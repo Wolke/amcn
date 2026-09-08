@@ -24,14 +24,20 @@
 ## 常用指令
 
 ```bash
-# 測試（18 tests：帳本守恆、信用額度性質、端到端情境）
+# 測試（21 tests：帳本守恆、信用額度性質、端到端情境）
 python3 -m unittest discover -s sim/tests
 
-# 單一情境模擬
+# 單一情境模擬（--trace auto 可看單一 Agent 的日記）
 cd sim && python3 -m amcn_sim --agents 500 --days 84 --scenario baseline
 
 # 全情境比較（baseline / expiry_cliff / high_default / wash_heavy）
 cd sim && python3 -m amcn_sim --all-scenarios
+
+# 參數掃描（starter × 風險費 × 違約率，輸出 out/sweep.csv）
+cd sim && python3 -m amcn_sim.sweep
+
+# Phase 1 三節點閉環 demo（約 5 秒，7 項 §20 驗收自動斷言）
+cd node && node demo.js
 ```
 
 注意：大規模模擬（>1,000 agents 或 --all-scenarios 全量）耗時較長，先與 Owner 確認再跑。

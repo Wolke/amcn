@@ -48,6 +48,8 @@ class Report:
     uncovered_bad_debt_cc: float = 0.0   # write-offs beyond insurance pool
     loss_cc: float = 0.0
     conservation_ok: bool = False
+    trace_agent: str | None = None
+    trace_lines: list[str] = field(default_factory=list)
     price_first_week: float | None = None
     price_last_week: float | None = None
     mean_credit_limit_honest: float = 0.0

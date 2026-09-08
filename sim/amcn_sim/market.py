@@ -18,18 +18,9 @@ from .ledger import Ledger
 
 REF_PRICE = 1.0          # CC per unit: public reference cost (SDD §14.2)
 FEE_RATE = 0.025         # base protocol fee → treasury (FR-057)
-
-
-def risk_rate(a: Agent, tick: int) -> float:
-    """Requester-side risk fee → insurance pool (Phase 0 finding F-2).
-
-    Priced on default-risk signals available at contract time: identity
-    age and counterparty history. Thin/young identities pay 3%, agents
-    with an established diverse track record pay 1%.
-    """
-    young = a.age_days(tick) < 30.0
-    thin = len(a.counterparties) < 5
-    return 0.03 if (young or thin) else 0.01
+# Requester-side risk fee → insurance pool (Phase 0 finding F-2): thin/young
+# identities pay more. Rates live on Market (risk_thin/risk_base) so sweeps
+# can vary them; defaults 3% / 1%.
 TASK_TTL_TICKS = 24      # unmatched tasks expire after 24h (EXPIRED)
 MAX_TASK_UNITS = 4.0     # requesters chunk demand into ≤4-unit tasks
 
@@ -67,19 +58,40 @@ class MarketStats:
 
 
 class Market:
-    def __init__(self, ledger: Ledger, rng: random.Random) -> None:
+    def __init__(self, ledger: Ledger, rng: random.Random,
+                 risk_thin: float = 0.03, risk_base: float = 0.01,
+                 starter_cc: float = 20.0,
+                 trace: str | None = None) -> None:
         self.ledger = ledger
         self.rng = rng
         self.open_tasks: list[Task] = []
         self.stats = MarketStats()
         self._task_seq = 0
+        self.risk_thin = risk_thin
+        self.risk_base = risk_base
+        self.starter_cc = starter_cc
+        self.trace = trace              # agent id whose diary we record
+        self.trace_log: list[str] = []
+
+    def _risk_rate(self, a: Agent, tick: int) -> float:
+        young = a.age_days(tick) < 30.0
+        thin = len(a.counterparties) < 5
+        return self.risk_thin if (young or thin) else self.risk_base
+
+    def _tr(self, tick: int, msg: str) -> None:
+        d, h = divmod(tick, 24)
+        self.trace_log.append(f"D{d:02d} {h:02d}:00  {msg}")
 
     # --- demand side ----------------------------------------------------
     def post_shortfall(self, a: Agent, units: float, tick: int,
                        peers: dict[str, Agent] | None = None) -> None:
         """Agent's own quota ran out mid-work: borrow from the network
         within its credit line (UC-01, P-05)."""
-        available_credit = credit_limit(a, tick, peers) + self.ledger.balance(a.aid)
+        available_credit = (credit_limit(a, tick, peers, self.starter_cc)
+                            + self.ledger.balance(a.aid))
+        if a.aid == self.trace:
+            self._tr(tick, f"額度耗盡，缺口 {units:.1f} units；"
+                           f"可用信用 {available_credit:.1f} CC → 發布任務借用 (UC-01)")
         while units > 1e-6 and available_credit > 0.5:
             chunk = min(units, MAX_TASK_UNITS)
             budget = min(chunk * REF_PRICE * a.max_price_factor, available_credit)
@@ -94,6 +106,8 @@ class Market:
             units -= chunk
         if units > 1e-6:
             self.stats.unmet_demand_units += units  # credit-constrained
+            if a.aid == self.trace:
+                self._tr(tick, f"信用不足：{units:.1f} units 需求發不出去")
 
     def post_wash_task(self, a: Agent, tick: int) -> None:
         """Colluding pair inflating volume (SDD §16 threat 7)."""
@@ -190,7 +204,7 @@ class Market:
             self.post_shortfall(requester, task.units, tick, agents)
             return
         fee = price * FEE_RATE
-        risk = price * risk_rate(requester, tick)
+        risk = price * self._risk_rate(requester, tick)
         self.ledger.settle(tick, task.task_id, requester.aid, provider.aid,
                            price, fee, risk)
         provider.tasks_completed += 1
@@ -207,3 +221,9 @@ class Market:
             self.stats.wash_settled_cc += price
         self.stats.prices_per_unit.append((tick, price / task.units))
         task.settled = True
+        if self.trace in (requester.aid, provider.aid):
+            role = "借入" if self.trace == requester.aid else "承接"
+            other = provider.aid if role == "借入" else requester.aid
+            bal = self.ledger.balance(self.trace)
+            self._tr(tick, f"{role} {task.units:.1f} units @ {price/task.units:.2f}"
+                           f"，對手 {other}，結算後餘額 {bal:+.1f} CC")

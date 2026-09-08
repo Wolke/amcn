@@ -16,8 +16,9 @@ docs/
     reviews/review-{A,B,C}.md               # 三份獨立深讀評審報告（矛盾清單、逐面向評分）
 sim/
   amcn_sim/                                 # Phase 0 單機經濟模擬器（SDD §19，純 stdlib Python）
-  tests/                                    # 18 項測試：帳本守恆、信用額度性質、端到端情境
+  tests/                                    # 21 項測試：帳本守恆、信用額度性質、端到端情境
   README.md                                 # 模擬器說明、情境與已知簡化
+node/                                       # Phase 1 最小閉環原型（3 進程 + Hub，`node demo.js`）
 CLAUDE.md                                   # 給 AI Agent 的導覽：閱讀順序、引用規則、指令
 ```
 

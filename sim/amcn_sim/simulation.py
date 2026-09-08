@@ -23,13 +23,25 @@ SCENARIOS = {
 
 
 def run(n_agents: int = 500, days: int = 84, seed: int = 42,
-        scenario: str = "baseline", out_dir: str | None = None) -> Report:
-    deadbeat_frac, washer_frac, expiry_cliff = SCENARIOS[scenario]
+        scenario: str = "baseline", out_dir: str | None = None,
+        starter_cc: float = 20.0, risk_thin: float = 0.03,
+        risk_base: float = 0.01, deadbeat_frac: float | None = None,
+        trace: str | None = None) -> Report:
+    sc_deadbeat, washer_frac, expiry_cliff = SCENARIOS[scenario]
+    if deadbeat_frac is None:
+        deadbeat_frac = sc_deadbeat
     rng = random.Random(seed)
     agents = {a.aid: a for a in build_population(
         n_agents, seed, deadbeat_frac, washer_frac, expiry_cliff)}
     ledger = Ledger()
-    market = Market(ledger, random.Random(seed + 1))
+    if trace == "auto":  # pick a chronically under-provisioned honest agent
+        trace = next((a.aid for a in agents.values()
+                      if a.behavior == "honest"
+                      and a.mean_daily_demand * a.cycle_days > a.quota_capacity),
+                     None)
+    market = Market(ledger, random.Random(seed + 1),
+                    risk_thin=risk_thin, risk_base=risk_base,
+                    starter_cc=starter_cc, trace=trace)
     ticks = days * TICKS_PER_DAY
     report = Report(days=days, n_agents=n_agents)
 
@@ -44,12 +56,19 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                 continue
             # deadbeat exit: burn remaining credit then disappear (§16 threat 13)
             if a.exit_tick is not None and tick >= a.exit_tick:
-                avail = credit_limit(a, tick, agents) + ledger.balance(a.aid)
+                avail = credit_limit(a, tick, agents, market.starter_cc) \
+                    + ledger.balance(a.aid)
                 if avail > 1.0:
                     market.post_shortfall(a, avail * 0.9, tick, agents)  # final grab
                 a.online = False
                 continue
             if a.cycle_reset_due(tick):
+                if a.aid == market.trace and tick > 0:
+                    market._tr(tick, f"計費週期重置：作廢 {a.remaining_quota:.1f} "
+                                     f"units，額度回到 {a.quota_capacity:.0f}；"
+                                     f"餘額 {ledger.balance(a.aid):+.1f} CC"
+                                     + ("（開始還債供應, UC-02）"
+                                        if ledger.balance(a.aid) < a.target_balance_low else ""))
                 a.remaining_quota = a.quota_capacity  # unused quota expires
             demand = a.draw_demand(tick)
             if demand <= a.remaining_quota:
@@ -92,13 +111,16 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                 open_tasks=len(market.open_tasks),
                 agents_in_debt=len(debtors),
                 total_debt_cc=sum(-ledger.balance(x.aid) for x in debtors),
-                total_credit_cc=sum(credit_limit(x, tick, agents)
+                total_credit_cc=sum(credit_limit(x, tick, agents, market.starter_cc)
                                     for x in agents.values() if x.online),
                 settled_cc_cum=market.stats.settled_cc,
             ))
 
     finalize(report, agents, ledger, market, ticks,
-             lambda a, t: credit_limit(a, t, agents))
+             lambda a, t: credit_limit(a, t, agents, market.starter_cc))
+    if market.trace:
+        report.trace_agent = market.trace
+        report.trace_lines = list(market.trace_log)
 
     if out_dir:
         out = Path(out_dir)
@@ -129,12 +151,20 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--all-scenarios", action="store_true",
                    help="run every scenario and print a comparison")
     p.add_argument("--out", default="sim/out", help="output dir for json/csv")
+    p.add_argument("--trace", default=None, metavar="AGENT_ID",
+                   help="print one agent's diary; 'auto' picks a chronically "
+                        "under-provisioned honest agent")
     args = p.parse_args(argv)
 
     scenarios = sorted(SCENARIOS) if args.all_scenarios else [args.scenario]
     for sc in scenarios:
-        rep = run(args.agents, args.days, args.seed, sc, args.out)
+        rep = run(args.agents, args.days, args.seed, sc, args.out,
+                  trace=args.trace)
         print(render_text(rep, sc))
+        if rep.trace_lines:
+            print(f"\n-- {rep.trace_agent} 的日記（{len(rep.trace_lines)} 條）--")
+            for line in rep.trace_lines:
+                print(line)
         print()
 
 
