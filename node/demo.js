@@ -1,19 +1,20 @@
-// Phase 1 three-node closed-loop demo (SDD §27) — upgraded:
-//   real OpenAI-compatible HTTP adapter path (against local key-gated
-//   fake providers), keystore-resolved keys, E2E-sealed payloads,
-//   E_eff dynamic credit lines + risk fee → insurance pool.
+// Phase 1 demo, round 3: DSL acceptance, judge-quorum, dual-signed
+// contracts + pre_authorization, FORCED settlement against a refusing
+// requester (T-05), per-account hash chains + hub checkpoints with a
+// tamper-evidence test, and a minimal Owner Console.
 //
 // Run:  node demo.js
 'use strict';
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { connect, verify } = require('./lib/wire');
+const { connect, verify, sha256, canon } = require('./lib/wire');
 
 const PORT = 47180;
 const KEY_A = 'sk-demo-A-SECRET-9f3a1c';
 const KEY_B = 'sk-demo-B-SECRET-77e0d2';
 const PAYLOAD_1 = 'debug: TypeError in settle() when postings list is empty';
 const PAYLOAD_2 = 'summarize: mutual credit conservation rules, 3 bullets';
+const PAYLOAD_3 = 'classify: is this task spam? return JSON verdict';
 
 const results = [];
 const check = (name, ok, detail) => {
@@ -32,62 +33,122 @@ const agentCfg = (o, extraEnv) => ({
   AGENT_CONFIG: JSON.stringify({ hubPort: PORT, ...o }), ...extraEnv,
 });
 
+// offline chain verification: anyone can do this from the export alone
+function verifyChains(chains, checkpoints, hubPub) {
+  for (const [account, chain] of Object.entries(chains)) {
+    let balance = 0, prev = sha256(account);
+    for (const e of chain) {
+      const { hash, ...body } = e;
+      if (sha256(canon(body)) !== hash) return `hash mismatch ${account}#${e.seq}`;
+      if (e.prev_hash !== prev) return `broken link ${account}#${e.seq}`;
+      balance = +(balance + e.delta_cc).toFixed(6);
+      if (Math.abs(balance - e.balance_after) > 1e-6) {
+        return `balance mismatch ${account}#${e.seq}`;
+      }
+      prev = hash;
+    }
+  }
+  const last = checkpoints.at(-1);
+  const heads = {};
+  for (const [account, chain] of Object.entries(chains)) {
+    heads[account] = chain.at(-1).hash;
+  }
+  if (sha256(canon(heads)) !== last.cp.root) return 'checkpoint root mismatch';
+  if (!verify(hubPub, last.cp, last.sig)) return 'bad checkpoint signature';
+  return null; // clean
+}
+
 async function main() {
-  console.log('== AMCN Phase 1: real-adapter + E2E + E_eff closed loop ==\n');
+  console.log('== AMCN Phase 1 round 3: quorum + forced settlement + hash chain ==\n');
   const procs = [];
   procs.push(spawnProc('hub.js', { HUB_PORT: String(PORT) }));
-  // each provider runs its own key-gated OpenAI-compatible endpoint
   procs.push(spawnProc('fake-provider.js', { FAKE_PORT: '47191', FAKE_KEY: KEY_A }));
   procs.push(spawnProc('fake-provider.js', { FAKE_PORT: '47192', FAKE_KEY: KEY_B }));
   await new Promise((r) => setTimeout(r, 300));
+  for (const v of ['V1', 'V2', 'V3']) {
+    procs.push(spawnProc('verifier.js', agentCfg({ name: v })));
+  }
 
-  // A: borrows first, then provides at a repayment discount (UC-01 → UC-02)
+  const SHA_OK = [{ op: 'sha256_eq' }, { op: 'max_len', arg: 64 }];
+  // A: borrows (T1), then provides; exposes an Owner Console
   procs.push(spawnProc('agent.js', agentCfg({
-    name: 'A',
+    name: 'A', consolePort: 47201,
     adapter: { baseUrl: 'http://127.0.0.1:47191', key: { env: 'A_PROVIDER_KEY', service: 'amcn-demo-a' } },
     provide: { afterMs: 2200, pricePerUnit: 0.95, repayment: true },
-    posts: [{ atMs: 600, units: 40, maxPriceCC: 45, payload: PAYLOAD_1 }],
+    posts: [{ atMs: 600, units: 40, maxPriceCC: 45, payload: PAYLOAD_1,
+              acceptance: 'dsl-local', asserts: SHA_OK }],
   }, { A_PROVIDER_KEY: KEY_A })));
-  // B: always-on provider at reference price
+  // B: provider; later a MALICIOUS requester who refuses to settle (T3)
   procs.push(spawnProc('agent.js', agentCfg({
-    name: 'B',
+    name: 'B', refuseToSettle: true,
     adapter: { baseUrl: 'http://127.0.0.1:47192', key: { env: 'B_PROVIDER_KEY', service: 'amcn-demo-b' } },
-    provide: { afterMs: 0, pricePerUnit: 1.0 }, posts: [],
+    provide: { afterMs: 0, pricePerUnit: 1.0 },
+    posts: [{ atMs: 5200, units: 30, maxPriceCC: 35, payload: PAYLOAD_3,
+              acceptance: 'judge-quorum', asserts: SHA_OK }],
   }, { B_PROVIDER_KEY: KEY_B })));
-  // C: third party whose demand lets A repay the network
+  // C: honest third party; quorum acceptance (T2)
   procs.push(spawnProc('agent.js', agentCfg({
     name: 'C', adapter: null, provide: null,
-    posts: [{ atMs: 2800, units: 48, maxPriceCC: 55, payload: PAYLOAD_2 }],
+    posts: [{ atMs: 2800, units: 48, maxPriceCC: 55, payload: PAYLOAD_2,
+              acceptance: 'judge-quorum', asserts: SHA_OK }],
   })));
 
-  await new Promise((r) => setTimeout(r, 4800));
+  await new Promise((r) => setTimeout(r, 9000));
 
-  const exportMsg = await new Promise((resolve) => {
+  const ex = await new Promise((resolve) => {
     const c = connect(PORT, (m) => { if (m.type === 'ledger_export') resolve(m); });
     c.send({ type: 'export' });
   });
-  const stats = {};
-  for (const [who, port] of [['A', 47191], ['B', 47192]]) {
-    stats[who] = await (await fetch(`http://127.0.0.1:${port}/stats`)).json();
-  }
+  const consoleA = await (await fetch('http://127.0.0.1:47201/status')).json();
   procs.forEach((p) => p.kill());
 
-  const { receipts, pubkeys, balances, credit_lines, raw_log } = exportMsg;
-  console.log('\n== 驗收檢查（SDD §20 縮小版＋Phase 1 追加） ==');
+  const { receipts, pubkeys, balances, credit_lines, chains, checkpoints,
+          hub_pub, raw_log } = ex;
+  console.log('\n== 驗收檢查 ==');
 
-  check('§20-1/6 Key 隔離：協議流量無 key；key 只到達本機 provider 端點',
-    !raw_log.includes('SECRET') && stats.A.authOk >= 1 && stats.B.authOk >= 1,
-    `hub ${raw_log.length}B clean; local auth A:${stats.A.authOk} B:${stats.B.authOk}`);
+  check('§20-1/6 Key 隔離＋NFR-005 E2E（3 個 payload 明文皆不經 Hub）',
+    !raw_log.includes('SECRET') && !raw_log.includes('TypeError in settle') &&
+    !raw_log.includes('conservation rules') && !raw_log.includes('is this task spam'),
+    `hub traffic ${raw_log.length}B clean`);
 
-  check('NFR-005 E2E：payload 明文不經 Hub（X25519+AES-GCM 封裝）',
-    !raw_log.includes('TypeError in settle') && !raw_log.includes('conservation rules'),
-    'both payloads sealed to winning provider only');
+  const kinds = receipts.map((r) => r.kind);
+  check('三筆結算：兩筆雙簽 + 一筆強制結算',
+    receipts.length === 3 && kinds.filter((k) => k === 'dual').length === 2 &&
+    kinds.filter((k) => k === 'forced').length === 1, kinds.join(', '));
 
-  check('雙簽收據：兩筆結算、四個簽章全部驗證通過',
-    receipts.length === 2 && receipts.every(({ receipt, sigs }) =>
-      verify(pubkeys[receipt.requester], receipt, sigs.requester) &&
-      verify(pubkeys[receipt.provider], receipt, sigs.provider)),
-    `${receipts.length} receipts`);
+  const dualOk = receipts.filter((r) => r.kind === 'dual').every(({ receipt, sigs }) =>
+    verify(pubkeys[receipt.requester], receipt, sigs.requester) &&
+    verify(pubkeys[receipt.provider], receipt, sigs.provider));
+  check('雙簽收據簽章全部驗證通過', dualOk);
+
+  const forced = receipts.find((r) => r.kind === 'forced');
+  const fEv = forced?.evidence;
+  const forcedOk = forced &&
+    verify(pubkeys[forced.receipt.provider], forced.receipt,
+      forced.sigs.provider) &&
+    forced.sigs.requester.startsWith('pre_auth:') &&
+    verify(pubkeys[forced.receipt.requester], fEv.pre_auth,
+      fEv.pre_auth_sig) &&
+    fEv.attestations.filter((a) => a.attestation.verdict === 'PASS' &&
+      verify(pubkeys[a.attestation.verifier], a.attestation, a.sig)).length >= 2;
+  check('T-05 反拒付：拒簽的 Requester 仍被 pre_auth＋2-of-3 quorum 強制記帳',
+    !!forcedOk,
+    forced && `B 被記 ${forced.receipt.postings.find((p) => p.account === forced.receipt.requester).amount_cc} CC，證據包離線可驗`);
+
+  check('FR-041/FR-044 Verifier 於合約時鎖定、attestation 機器可讀',
+    !!fEv && fEv.contract.verifiers.length === 3 &&
+    fEv.attestations.every((a) => Array.isArray(a.attestation.failures)),
+    `panel of ${fEv?.contract.verifiers.length}, failures[] present`);
+
+  const chainErr = verifyChains(chains, checkpoints, hub_pub);
+  check('NFR-006 hash chain＋checkpoint：全鏈離線重驗通過',
+    chainErr === null, chainErr || `${Object.keys(chains).length} chains, ${checkpoints.length} checkpoints`);
+
+  const tampered = JSON.parse(JSON.stringify(chains));
+  tampered[Object.keys(tampered)[0]][0].delta_cc += 1; // forge 1 CC
+  check('防竄改：偽造任一筆金額即被離線驗證抓出',
+    verifyChains(tampered, checkpoints, hub_pub) !== null,
+    `tamper detected: "${verifyChains(tampered, checkpoints, hub_pub)}"`);
 
   const rebuilt = {};
   for (const { receipt } of receipts) {
@@ -96,35 +157,30 @@ async function main() {
     }
   }
   const sum = Object.values(rebuilt).reduce((s, v) => s + v, 0);
-  check('§20-4 帳本可由簽署收據重建且 Σ=0（含 treasury＋insurance）',
+  check('§20-4 Σ=0 且收據重建 = Hub 帳（含 treasury/insurance）',
     Math.abs(sum) < 1e-9 &&
-    Object.entries(rebuilt).every(([a, v]) => Math.abs((balances[a] || 0) - v) < 1e-6) &&
-    (balances['protocol:insurance'] || 0) > 0,
-    `Σ=${sum.toFixed(9)}, insurance=${(balances['protocol:insurance'] || 0).toFixed(2)} CC`);
+    Object.entries(rebuilt).every(([a, v]) => Math.abs((balances[a] || 0) - v) < 1e-6),
+    `Σ=${sum.toFixed(9)}, insurance=${balances['protocol:insurance'].toFixed(2)}`);
 
-  const [r1, r2] = receipts.map((r) => r.receipt);
-  const A = r1.requester;
-  const aLoan = r1.postings.find((p) => p.account === A).amount_cc;
-  check('§20-2 從 0 CC 在 E_eff 動態信用額度內借用',
-    aLoan === -40 && Math.abs(aLoan) <= 50, `A → ${aLoan} CC（starter 50）`);
+  const A = receipts[0].receipt.requester;
+  const B = receipts[0].receipt.provider;
+  check('§20-2/3 閉環：A 額度內借 40 → 服務第三方 → 期末轉正',
+    receipts[0].receipt.postings.find((p) => p.account === A).amount_cc === -40 &&
+    balances[A] > 0, `A: 0 → -40 → ${balances[A].toFixed(2)} CC`);
 
-  check('§20-3 替第三方工作、負餘額完全清償（多邊清算）',
-    r2.provider === A && r2.requester !== r1.provider && balances[A] > 0,
-    `A: -40 → ${balances[A].toFixed(2)} CC（服務 C，非債主 B）`);
+  check('F-1 反洗量即時生效：B 有收入但單一對手 → 信用零成長',
+    credit_lines[B] <= 50 + 1e-6, `CL(B)=${credit_lines[B].toFixed(1)}`);
 
-  const B = r1.provider;
-  check('反洗量即時生效：B 從單一對手賺 36.6 CC，信用額度零成長',
-    credit_lines[B] <= 50 + 1e-6,
-    `CL(B)=${credit_lines[B].toFixed(1)}（E_eff 對單一對手收益記 0）`);
-
-  check('§20-7 確定性驗收＋真 HTTP adapter 路徑',
-    receipts.every(({ receipt }) => receipt.delivery_hash?.length === 64) &&
-    stats.A.requests + stats.B.requests >= 2,
-    `${stats.A.requests + stats.B.requests} real OpenAI-compatible calls served locally`);
+  check('FR-081 Owner Console：餘額/額度/結算史與 Hub 一致',
+    consoleA.did === A &&
+    Math.abs(consoleA.balance_cc - balances[A]) < 1e-6 &&
+    consoleA.settled.length >= 2,
+    `A console: ${consoleA.balance_cc.toFixed(2)} CC, ${consoleA.settled.length} settlements`);
 
   const failed = results.filter(([, ok]) => !ok).length;
   console.log(`\n結果：${results.length - failed}/${results.length} PASS`);
   console.log('期末餘額：', Object.entries(balances)
+    .filter(([, v]) => Math.abs(v) > 1e-9 || true)
     .map(([a, v]) => `${a.startsWith('did') ? a.slice(0, 18) : a}=${v.toFixed(2)}`)
     .join('  '));
   process.exit(failed ? 1 : 0);

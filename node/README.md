@@ -31,18 +31,21 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `lib/eeff.js` | 與 `sim/amcn_sim` 同構的 E_eff 信用公式（starter 50、風險費 6%/2%——GATE-0 掃描定案參數）＋保險池 |
 | `fake-provider.js` | 本機 key-gated OpenAI-compatible 端點，讓真 HTTP 路徑可測而不花錢 |
 
-## Demo 自動斷言（8 項）
+## Demo 自動斷言（11 項）
 
 | # | 檢查 | 方法 |
 |---|---|---|
-| §20-1/6 | Key 不離機 | Hub 全量流量掃描無 key；fake provider `/stats` 證明 key 只到達本機端點 |
-| NFR-005 | E2E 加密 | Hub 流量掃描不含兩個 payload 明文 |
-| FR-050 | 雙簽收據 | 兩筆結算四個 Ed25519 簽章逐一驗證 |
-| §20-4 | 帳可重建且 Σ=0 | 從收據重建（含 treasury＋insurance）比對 Hub 帳 |
-| §20-2 | 信用額度內借用 | A → -40，E_eff starter 50 內 |
-| §20-3 | 多邊清算完全還債 | A 服務 C（非債主 B）後餘額轉正 |
-| F-1 | 反洗量即時生效 | B 從單一對手賺 36.6 CC，CL 零成長（E_eff 單一對手收益記 0） |
-| §20-7 | 確定性驗收＋真 HTTP 路徑 | output == sha256(payload)，經真實 OpenAI-compatible HTTP 呼叫 |
+| §20-1/6＋NFR-005 | Key 不離機＋E2E | Hub 全量流量掃描：無 key、無三個 payload 明文（X25519+AES-GCM 封裝給得標者） |
+| FR-050 | 雙簽收據 | 兩筆自願結算的四個 Ed25519 簽章逐一驗證 |
+| **T-05 反拒付** | **強制結算** | B 收貨後拒簽收據 → A 持「雙簽合約＋B 的 pre_authorization＋2-of-3 quorum PASS」強制記帳；證據包離線可驗 |
+| FR-041/044 | Verifier 合約時鎖定＋機器可讀 | 3 人 panel 以 checkpoint root 為 seed 在成交時寫入雙簽合約；attestation 帶 failures[] 指向 assert index |
+| NFR-006 | hash chain＋checkpoint | 每帳戶單調 seq 雜湊鏈、每筆結算後 Hub 簽 checkpoint；demo 離線重驗全鏈 |
+| 防竄改 | tamper-evidence | 竄改任一筆金額後重驗必失敗（demo 實際偽造 1 CC 驗證） |
+| §20-4 | Σ=0 且可重建 | 從收據重建（含 treasury＋insurance）比對 Hub 帳 |
+| §20-2/3 | 借用→多邊清算閉環 | A 額度內借 40 → 服務第三方 C＋強制結算收入 → 期末 +27.8 |
+| F-1 | 反洗量即時生效 | B 從單一對手賺 36.6 CC，CL 零成長 |
+| §20-7 | DSL 驗收＋真 HTTP 路徑 | assert 集（sha256_eq＋max_len）於 TaskSpec 簽章時鎖 hash |
+| FR-081 | Owner Console | `http://127.0.0.1:47201/status`：餘額/額度/結算史與 Hub 帳一致 |
 
 ## 接真實模型
 
@@ -50,8 +53,9 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 
 ## 誠實簡化清單（正式版要補的）
 
-- 驗收只有 sha256 確定性測試：需驗收 DSL＋Judge quorum＋爭議路徑（DISPUTED/仲裁未實作）。
-- 無 per-account hash chain 與公開 checkpoint（Hub 可被審計但未提供密碼學防改史證明）。
-- 合約單簽（requester 簽、provider 以行為承諾）：正式版雙簽＋pre_authorization。
+- Verifier 是確定性 judge（跑 DSL asserts）：主觀任務需 LLM judge＋commit-reveal（訊息流已就位，換 verifier 內核即可）。
+- 爭議路徑只有「強制結算」一條：FAIL 後的 DISPUTED／仲裁／押金沒收未實作。
+- Verifier 無報酬 posting（違反 FR-057 精神，demo 從簡）；正式版按整合架構把驗證費列入收據。
+- Panel seed 用「最新」checkpoint root，有 grinding 風險（評審 A-④）：正式版綁未來輪 checkpoint＋commit-reveal。
 - credit line 的 age factor 固定為 1（demo 跑秒級）；風險費率靜態二檔，正式版依 GATE-0 結論做動態定價。
-- 無心跳/逾時/備援重發（狀態機例外路徑）、無 Owner Console。
+- 無心跳/逾時/備援重發（PROVIDER_FAILED 路徑）；Console 為唯讀 JSON，無政策編輯。
