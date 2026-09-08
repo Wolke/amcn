@@ -1,0 +1,176 @@
+"""Metric computation for the Phase 0 report (SDD §19)."""
+
+from __future__ import annotations
+
+import statistics
+from dataclasses import dataclass, field
+
+from .agents import TICKS_PER_DAY, Agent
+from .ledger import LOSS, TREASURY, Ledger
+from .market import Market
+
+
+@dataclass
+class DailySnapshot:
+    day: int
+    fill_rate: float
+    median_price: float | None
+    open_tasks: int
+    agents_in_debt: int
+    total_debt_cc: float
+    total_credit_cc: float
+    settled_cc_cum: float
+
+
+@dataclass
+class Report:
+    days: int = 0
+    n_agents: int = 0
+    fill_rate: float = 0.0
+    expired_rate: float = 0.0
+    mean_wait_hours: float = 0.0
+    p95_wait_hours: float = 0.0
+    gini_balances: float = 0.0
+    mean_debt_cycle_days: float | None = None
+    median_debt_cycle_days: float | None = None
+    open_debt_episodes: int = 0
+    bad_debt_cc: float = 0.0
+    bad_debt_rate: float = 0.0          # written-off / settled
+    settled_cc: float = 0.0
+    wash_settled_cc: float = 0.0
+    wash_share: float = 0.0
+    credit_velocity_per_month: float = 0.0
+    unmet_demand_units: float = 0.0
+    failed_verifications: int = 0
+    treasury_cc: float = 0.0
+    loss_cc: float = 0.0
+    conservation_ok: bool = False
+    price_first_week: float | None = None
+    price_last_week: float | None = None
+    mean_credit_limit_honest: float = 0.0
+    mean_credit_limit_washer: float | None = None
+    daily: list[DailySnapshot] = field(default_factory=list)
+
+
+def gini(values: list[float]) -> float:
+    """Gini over min-shifted values (handles negative balances)."""
+    if not values:
+        return 0.0
+    shifted = sorted(v - min(values) for v in values)
+    n = len(shifted)
+    total = sum(shifted)
+    if total == 0:
+        return 0.0
+    cum = 0.0
+    for i, v in enumerate(shifted, 1):
+        cum += i * v
+    return (2 * cum) / (n * total) - (n + 1) / n
+
+
+def median_price_in(market: Market, tick_lo: int, tick_hi: int) -> float | None:
+    prices = [p for t, p in market.stats.prices_per_unit if tick_lo <= t < tick_hi]
+    return statistics.median(prices) if prices else None
+
+
+def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
+             market: Market, ticks: int, credit_limit_fn) -> Report:
+    s = market.stats
+    report.fill_rate = s.matched / s.posted if s.posted else 0.0
+    report.expired_rate = s.expired / s.posted if s.posted else 0.0
+    if s.wait_ticks:
+        report.mean_wait_hours = statistics.mean(s.wait_ticks)
+        sw = sorted(s.wait_ticks)
+        report.p95_wait_hours = sw[int(0.95 * (len(sw) - 1))]
+    report.gini_balances = gini(
+        [ledger.balance(a.aid) for a in agents.values() if a.online])
+
+    cycles = []
+    open_eps = 0
+    for a in agents.values():
+        for ep in a.debt_episodes:
+            if ep.end_tick is None:
+                open_eps += 1
+            else:
+                cycles.append((ep.end_tick - ep.start_tick) / TICKS_PER_DAY)
+    if cycles:
+        report.mean_debt_cycle_days = statistics.mean(cycles)
+        report.median_debt_cycle_days = statistics.median(cycles)
+    report.open_debt_episodes = open_eps
+
+    report.settled_cc = s.settled_cc
+    report.wash_settled_cc = s.wash_settled_cc
+    report.wash_share = s.wash_settled_cc / s.settled_cc if s.settled_cc else 0.0
+    report.bad_debt_cc = max(0.0, -ledger.balance(LOSS))
+    report.bad_debt_rate = report.bad_debt_cc / s.settled_cc if s.settled_cc else 0.0
+    report.unmet_demand_units = s.unmet_demand_units
+    report.failed_verifications = s.failed_verification
+    report.treasury_cc = ledger.balance(TREASURY)
+    report.loss_cc = ledger.balance(LOSS)
+
+    # Credit velocity: settled CC per 30 days / average outstanding debt.
+    total_debt_now = sum(-ledger.balance(a.aid) for a in agents.values()
+                         if ledger.balance(a.aid) < 0)
+    months = max(ticks / (TICKS_PER_DAY * 30), 1e-9)
+    report.credit_velocity_per_month = (
+        (s.settled_cc / months) / total_debt_now if total_debt_now > 0 else 0.0)
+
+    # Expiry-cliff price signal: first vs last week median price
+    report.price_first_week = median_price_in(market, 0, 7 * TICKS_PER_DAY)
+    report.price_last_week = median_price_in(
+        market, ticks - 7 * TICKS_PER_DAY, ticks + 1)
+
+    honest_limits = [credit_limit_fn(a, ticks) for a in agents.values()
+                     if a.behavior == "honest" and a.online]
+    washer_limits = [credit_limit_fn(a, ticks) for a in agents.values()
+                     if a.behavior == "washer" and a.online]
+    if honest_limits:
+        report.mean_credit_limit_honest = statistics.mean(honest_limits)
+    if washer_limits:
+        report.mean_credit_limit_washer = statistics.mean(washer_limits)
+
+    try:
+        ledger.assert_conserved()
+        ledger.rebuild_and_verify()
+        report.conservation_ok = True
+    except Exception:
+        report.conservation_ok = False
+    return report
+
+
+def render_text(r: Report, scenario: str) -> str:
+    def f(x, nd=2):
+        return "n/a" if x is None else f"{x:.{nd}f}"
+    lines = [
+        f"=== AMCN Phase 0 simulation — scenario: {scenario} ===",
+        f"agents: {r.n_agents}   days: {r.days}",
+        "",
+        "-- 市場流動性 --",
+        f"任務成交率 (fill rate)        : {r.fill_rate*100:.1f}%",
+        f"任務過期率 (expired)          : {r.expired_rate*100:.1f}%",
+        f"平均等待時間                  : {f(r.mean_wait_hours)} 小時 (P95 {f(r.p95_wait_hours)} h)",
+        f"信用不足未發布需求            : {r.unmet_demand_units:.0f} units",
+        f"驗收失敗次數                  : {r.failed_verifications}",
+        "",
+        "-- 信用循環 --",
+        f"總結算量                      : {r.settled_cc:,.0f} CC",
+        f"Credit velocity (月結算/未償) : {f(r.credit_velocity_per_month)}x",
+        f"還債週期 平均/中位            : {f(r.mean_debt_cycle_days,1)} / {f(r.median_debt_cycle_days,1)} 天",
+        f"期末仍負債的 episodes         : {r.open_debt_episodes}",
+        "",
+        "-- 風險 --",
+        f"壞帳 (written off)            : {r.bad_debt_cc:,.0f} CC  ({r.bad_debt_rate*100:.2f}% of settled)",
+        f"餘額 Gini                     : {r.gini_balances:.3f}",
+        f"洗量結算佔比                  : {r.wash_share*100:.2f}%",
+        f"誠實 Agent 平均信用額度       : {r.mean_credit_limit_honest:.1f} CC",
+        f"洗量 Agent 平均信用額度       : {f(r.mean_credit_limit_washer,1)} CC",
+        "",
+        "-- 價格 --",
+        f"首週單位中位價                : {f(r.price_first_week)} CC/unit",
+        f"末週單位中位價                : {f(r.price_last_week)} CC/unit",
+        "",
+        "-- 帳務 --",
+        f"Treasury                      : {r.treasury_cc:,.1f} CC",
+        f"Loss (壞帳吸收)               : {r.loss_cc:,.1f} CC",
+        f"守恆 Σ=0 且事件可重建         : {'PASS' if r.conservation_ok else 'FAIL'}",
+    ]
+    return "\n".join(lines)
