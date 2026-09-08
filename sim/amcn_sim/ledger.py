@@ -4,8 +4,11 @@ Every posting set must sum to zero. Balances are derived purely from
 postings, so the whole ledger can be rebuilt from the event log
 (NFR-006). Special accounts:
 
-- protocol:treasury  — collects transaction fees (FR-057)
-- protocol:loss      — absorbs written-off negative balances (bad debt),
+- protocol:treasury  — collects base protocol fees (FR-057)
+- protocol:insurance — collects risk fees; first line of bad-debt absorption
+                       (Phase 0 finding F-2: base fee alone can't cover a
+                       high-default population)
+- protocol:loss      — absorbs write-offs beyond the insurance pool,
                        going negative itself so that Σ balances stays 0.
 """
 
@@ -14,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 TREASURY = "protocol:treasury"
+INSURANCE = "protocol:insurance"
 LOSS = "protocol:loss"
 
 
@@ -54,23 +58,32 @@ class Ledger:
         return ev
 
     def settle(self, tick: int, contract_id: str, requester: str,
-               provider: str, price_cc: float, fee_cc: float) -> LedgerEvent:
-        return self.post(tick, "settlement", contract_id, [
+               provider: str, price_cc: float, fee_cc: float,
+               risk_cc: float = 0.0) -> LedgerEvent:
+        postings = [
             Posting(requester, -price_cc),
-            Posting(provider, price_cc - fee_cc),
+            Posting(provider, price_cc - fee_cc - risk_cc),
             Posting(TREASURY, fee_cc),
-        ])
+        ]
+        if risk_cc > 0:
+            postings.append(Posting(INSURANCE, risk_cc))
+        return self.post(tick, "settlement", contract_id, postings)
 
     def write_off(self, tick: int, account: str) -> float:
-        """Absorb a defaulted negative balance into protocol:loss."""
+        """Absorb a defaulted negative balance: insurance pool first,
+        protocol:loss for the uncovered remainder."""
         bal = self.balances.get(account, 0.0)
         if bal >= 0:
             return 0.0
-        self.post(tick, "write_off", f"writeoff:{account}:{tick}", [
-            Posting(account, -bal),
-            Posting(LOSS, bal),
-        ])
-        return -bal
+        debt = -bal
+        from_ins = min(debt, max(0.0, self.balances.get(INSURANCE, 0.0)))
+        postings = [Posting(account, debt)]
+        if from_ins > 0:
+            postings.append(Posting(INSURANCE, -from_ins))
+        if debt - from_ins > 1e-12:
+            postings.append(Posting(LOSS, -(debt - from_ins)))
+        self.post(tick, "write_off", f"writeoff:{account}:{tick}", postings)
+        return debt
 
     def balance(self, account: str) -> float:
         return self.balances.get(account, 0.0)

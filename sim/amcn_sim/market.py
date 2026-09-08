@@ -17,7 +17,19 @@ from .agents import Agent, credit_limit
 from .ledger import Ledger
 
 REF_PRICE = 1.0          # CC per unit: public reference cost (SDD §14.2)
-FEE_RATE = 0.025         # protocol fee → treasury (FR-057)
+FEE_RATE = 0.025         # base protocol fee → treasury (FR-057)
+
+
+def risk_rate(a: Agent, tick: int) -> float:
+    """Requester-side risk fee → insurance pool (Phase 0 finding F-2).
+
+    Priced on default-risk signals available at contract time: identity
+    age and counterparty history. Thin/young identities pay 3%, agents
+    with an established diverse track record pay 1%.
+    """
+    young = a.age_days(tick) < 30.0
+    thin = len(a.counterparties) < 5
+    return 0.03 if (young or thin) else 0.01
 TASK_TTL_TICKS = 24      # unmatched tasks expire after 24h (EXPIRED)
 MAX_TASK_UNITS = 4.0     # requesters chunk demand into ≤4-unit tasks
 
@@ -63,10 +75,11 @@ class Market:
         self._task_seq = 0
 
     # --- demand side ----------------------------------------------------
-    def post_shortfall(self, a: Agent, units: float, tick: int) -> None:
+    def post_shortfall(self, a: Agent, units: float, tick: int,
+                       peers: dict[str, Agent] | None = None) -> None:
         """Agent's own quota ran out mid-work: borrow from the network
         within its credit line (UC-01, P-05)."""
-        available_credit = credit_limit(a, tick) + self.ledger.balance(a.aid)
+        available_credit = credit_limit(a, tick, peers) + self.ledger.balance(a.aid)
         while units > 1e-6 and available_credit > 0.5:
             chunk = min(units, MAX_TASK_UNITS)
             budget = min(chunk * REF_PRICE * a.max_price_factor, available_credit)
@@ -174,21 +187,21 @@ class Market:
             provider.disputes += 1
             self.stats.failed_verification += 1
             # requester reposts once immediately (best-effort retry)
-            self.post_shortfall(requester, task.units, tick)
+            self.post_shortfall(requester, task.units, tick, agents)
             return
         fee = price * FEE_RATE
+        risk = price * risk_rate(requester, tick)
         self.ledger.settle(tick, task.task_id, requester.aid, provider.aid,
-                           price, fee)
-        was_positive = self.ledger.balance(requester.aid) + price >= 0
-        if not was_positive:
-            pass  # already in an episode; tracked in simulation loop
+                           price, fee, risk)
         provider.tasks_completed += 1
-        provider.earned_cc += price - fee
+        provider.earned_cc += price - fee - risk
         requester.spent_cc += price
         provider.counterparties.add(requester.aid)
         requester.counterparties.add(provider.aid)
         provider.counterparty_volume[requester.aid] = \
-            provider.counterparty_volume.get(requester.aid, 0.0) + (price - fee)
+            provider.counterparty_volume.get(requester.aid, 0.0) + (price - fee - risk)
+        requester.paid_volume[provider.aid] = \
+            requester.paid_volume.get(provider.aid, 0.0) + price
         self.stats.settled_cc += price
         if task.is_wash:
             self.stats.wash_settled_cc += price

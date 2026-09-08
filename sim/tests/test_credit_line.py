@@ -60,6 +60,40 @@ class TestCreditLimit(unittest.TestCase):
         self.assertLess(credit_limit(disputed, tick),
                         credit_limit(clean, tick))
 
+    def test_mixed_wash_strategy_defeated(self):
+        """Phase 0 finding F-1: wash pair that ALSO trades honestly must
+        not out-credit a purely honest agent with the same total volume.
+        Requires the T_flow weight, hence a peers dict."""
+        tick = 60 * TICKS_PER_DAY
+        honest = make_agent("agent:h")
+        washer = make_agent("agent:w")
+        partner = make_agent("agent:p")
+        honest.tasks_completed = washer.tasks_completed = 100
+
+        # honest: 1200 CC earned across 8 counterparties
+        peers = {"agent:h": honest, "agent:w": washer, "agent:p": partner}
+        for i in range(8):
+            c = make_agent(f"agent:c{i}")
+            peers[c.aid] = c
+            honest.counterparties.add(c.aid)
+            honest.counterparty_volume[c.aid] = 150.0
+            c.paid_volume[honest.aid] = 150.0
+            c.paid_volume["agent:elsewhere"] = 600.0  # diversified payers
+
+        # washer: 1000 CC wash from partner + 200 CC honest from 4 others
+        washer.counterparties.add(partner.aid)
+        washer.counterparty_volume[partner.aid] = 1000.0
+        partner.paid_volume[washer.aid] = 1000.0
+        partner.paid_volume["agent:elsewhere"] = 100.0  # concentrated payer
+        for i in range(4):
+            c = peers[f"agent:c{i}"]
+            washer.counterparties.add(c.aid)
+            washer.counterparty_volume[c.aid] = 50.0
+            c.paid_volume[washer.aid] = 50.0
+
+        self.assertGreater(credit_limit(honest, tick, peers),
+                           credit_limit(washer, tick, peers))
+
     def test_hard_cap_and_offline(self):
         a = make_agent()
         a.tasks_completed = 10_000

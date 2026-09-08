@@ -6,7 +6,7 @@ import statistics
 from dataclasses import dataclass, field
 
 from .agents import TICKS_PER_DAY, Agent
-from .ledger import LOSS, TREASURY, Ledger
+from .ledger import INSURANCE, LOSS, TREASURY, Ledger
 from .market import Market
 
 
@@ -43,11 +43,15 @@ class Report:
     unmet_demand_units: float = 0.0
     failed_verifications: int = 0
     treasury_cc: float = 0.0
+    insurance_income_cc: float = 0.0
+    insurance_balance_cc: float = 0.0
+    uncovered_bad_debt_cc: float = 0.0   # write-offs beyond insurance pool
     loss_cc: float = 0.0
     conservation_ok: bool = False
     price_first_week: float | None = None
     price_last_week: float | None = None
     mean_credit_limit_honest: float = 0.0
+    mean_credit_limit_honest_matched: float | None = None  # similar earnings cohort
     mean_credit_limit_washer: float | None = None
     daily: list[DailySnapshot] = field(default_factory=list)
 
@@ -100,11 +104,19 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
     report.settled_cc = s.settled_cc
     report.wash_settled_cc = s.wash_settled_cc
     report.wash_share = s.wash_settled_cc / s.settled_cc if s.settled_cc else 0.0
-    report.bad_debt_cc = max(0.0, -ledger.balance(LOSS))
+    # total written off = the debtor-side postings of write_off events
+    report.bad_debt_cc = sum(
+        p.amount_cc for ev in ledger.events if ev.kind == "write_off"
+        for p in ev.postings if p.amount_cc > 0)
     report.bad_debt_rate = report.bad_debt_cc / s.settled_cc if s.settled_cc else 0.0
     report.unmet_demand_units = s.unmet_demand_units
     report.failed_verifications = s.failed_verification
     report.treasury_cc = ledger.balance(TREASURY)
+    report.insurance_income_cc = sum(
+        p.amount_cc for ev in ledger.events if ev.kind == "settlement"
+        for p in ev.postings if p.account == INSURANCE)
+    report.insurance_balance_cc = ledger.balance(INSURANCE)
+    report.uncovered_bad_debt_cc = max(0.0, -ledger.balance(LOSS))
     report.loss_cc = ledger.balance(LOSS)
 
     # Credit velocity: settled CC per 30 days / average outstanding debt.
@@ -119,14 +131,24 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
     report.price_last_week = median_price_in(
         market, ticks - 7 * TICKS_PER_DAY, ticks + 1)
 
-    honest_limits = [credit_limit_fn(a, ticks) for a in agents.values()
-                     if a.behavior == "honest" and a.online]
-    washer_limits = [credit_limit_fn(a, ticks) for a in agents.values()
-                     if a.behavior == "washer" and a.online]
-    if honest_limits:
-        report.mean_credit_limit_honest = statistics.mean(honest_limits)
-    if washer_limits:
-        report.mean_credit_limit_washer = statistics.mean(washer_limits)
+    honest_pop = [a for a in agents.values()
+                  if a.behavior == "honest" and a.online]
+    washer_pop = [a for a in agents.values()
+                  if a.behavior == "washer" and a.online]
+    if honest_pop:
+        report.mean_credit_limit_honest = statistics.mean(
+            credit_limit_fn(a, ticks) for a in honest_pop)
+    if washer_pop:
+        report.mean_credit_limit_washer = statistics.mean(
+            credit_limit_fn(a, ticks) for a in washer_pop)
+        # G2's fair baseline: honest agents with comparable earned volume.
+        # Comparing against all honest agents (incl. pure consumers who
+        # never provided) understates honest credit and misreads the test.
+        w_earned = statistics.mean(a.earned_cc for a in washer_pop)
+        matched = [a for a in honest_pop if a.earned_cc >= 0.5 * w_earned]
+        if matched:
+            report.mean_credit_limit_honest_matched = statistics.mean(
+                credit_limit_fn(a, ticks) for a in matched)
 
     try:
         ledger.assert_conserved()
@@ -161,7 +183,8 @@ def render_text(r: Report, scenario: str) -> str:
         f"壞帳 (written off)            : {r.bad_debt_cc:,.0f} CC  ({r.bad_debt_rate*100:.2f}% of settled)",
         f"餘額 Gini                     : {r.gini_balances:.3f}",
         f"洗量結算佔比                  : {r.wash_share*100:.2f}%",
-        f"誠實 Agent 平均信用額度       : {r.mean_credit_limit_honest:.1f} CC",
+        f"誠實 Agent 平均信用額度       : {r.mean_credit_limit_honest:.1f} CC"
+        f"（同活躍度組 {f(r.mean_credit_limit_honest_matched,1)}）",
         f"洗量 Agent 平均信用額度       : {f(r.mean_credit_limit_washer,1)} CC",
         "",
         "-- 價格 --",
@@ -169,8 +192,24 @@ def render_text(r: Report, scenario: str) -> str:
         f"末週單位中位價                : {f(r.price_last_week)} CC/unit",
         "",
         "-- 帳務 --",
-        f"Treasury                      : {r.treasury_cc:,.1f} CC",
-        f"Loss (壞帳吸收)               : {r.loss_cc:,.1f} CC",
+        f"Treasury（基本費 2.5%）       : {r.treasury_cc:,.1f} CC",
+        f"保險池收入 / 期末餘額         : {r.insurance_income_cc:,.1f} / {r.insurance_balance_cc:,.1f} CC",
+        f"未覆蓋壞帳 (Loss)             : {r.uncovered_bad_debt_cc:,.1f} CC",
         f"守恆 Σ=0 且事件可重建         : {'PASS' if r.conservation_ok else 'FAIL'}",
+        "",
+        "-- GATE-0 判準 --",
+        f"G1 守恆與事件重建             : {'PASS' if r.conservation_ok else 'FAIL'}",
+        f"G2 洗量額度 ≤ 同活躍度誠實組  : "
+        + ("n/a" if r.mean_credit_limit_washer is None else
+           ("PASS" if r.mean_credit_limit_washer <=
+            (r.mean_credit_limit_honest_matched
+             if r.mean_credit_limit_honest_matched is not None
+             else r.mean_credit_limit_honest) * 1.05 else "FAIL")),
+        f"G3 壞帳 ≤ 保險池收入          : "
+        + ("PASS" if r.bad_debt_cc <= r.insurance_income_cc else "FAIL"),
+        f"G4 還債週期中位 < 30 天       : "
+        + ("n/a" if r.median_debt_cycle_days is None else
+           ("PASS" if r.median_debt_cycle_days < 30 else "FAIL")),
+        f"G5 成交率 ≥ 80%               : {'PASS' if r.fill_rate >= 0.8 else 'FAIL'}",
     ]
     return "\n".join(lines)

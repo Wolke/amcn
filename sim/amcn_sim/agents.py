@@ -71,6 +71,7 @@ class Agent:
     disputes: int = 0
     counterparties: set[str] = field(default_factory=set)
     counterparty_volume: dict[str, float] = field(default_factory=dict)
+    paid_volume: dict[str, float] = field(default_factory=dict)  # spend per provider
     debt_episodes: list[DebtEpisode] = field(default_factory=list)
     pending_burst_units: float = 0.0
 
@@ -85,17 +86,35 @@ class Agent:
         done = self.tasks_completed + self.tasks_failed
         return self.disputes / done if done else 0.0
 
-    def diverse_contribution(self) -> float:
-        """Earned CC, discounted for counterparty concentration (FR-062).
+    def effective_contribution(self, peers: dict[str, "Agent"] | None = None) -> float:
+        """E_eff (proposal C, adopted after Phase 0 finding F-1).
 
-        Volume with any single counterparty above 25% of total is ignored,
-        which is what caps wash-trading pairs.
+        Round-1 flaw: capping each counterparty at 25% of *total* volume
+        lets wash volume inflate its own ceiling (mixed wash strategy won).
+        Two fixes, applied in order:
+
+        1. T_flow proxy: earnings from a payer are weighted by how spread
+           that payer's own spending is. A wash partner who sends most of
+           its outflow to me contributes almost nothing.
+        2. Per-counterparty cap of 20% of the sum of all *other*
+           counterparties' weighted volume — the cap base excludes the
+           counterparty itself, so pumping one pair can never raise the
+           pair's own ceiling.
         """
-        total = sum(self.counterparty_volume.values())
-        if total <= 0:
+        if not self.counterparty_volume:
             return 0.0
-        cap = 0.25 * total
-        return sum(min(v, cap) for v in self.counterparty_volume.values())
+        weighted: dict[str, float] = {}
+        for c, v in self.counterparty_volume.items():
+            w = 1.0
+            if peers is not None and c in peers:
+                payer = peers[c]
+                out_total = sum(payer.paid_volume.values())
+                if out_total > 0:
+                    share_to_me = payer.paid_volume.get(self.aid, 0.0) / out_total
+                    w = max(0.0, 1.0 - share_to_me)
+            weighted[c] = v * w
+        total_w = sum(weighted.values())
+        return sum(min(v, 0.20 * (total_w - v)) for v in weighted.values())
 
     # --- per-tick draws -------------------------------------------------
     def cycle_reset_due(self, tick: int) -> bool:
@@ -126,19 +145,20 @@ class Agent:
         return self.remaining_quota - 1.2 * self.expected_remaining_demand(tick)
 
 
-def credit_limit(a: Agent, tick: int, starter_cc: float = 20.0) -> float:
-    """Simulable credit-line algorithm (SDD §14.3).
+def credit_limit(a: Agent, tick: int, peers: dict[str, Agent] | None = None,
+                 starter_cc: float = 20.0) -> float:
+    """Simulable credit-line algorithm (SDD §14.3, E_eff per proposal C).
 
-    credit_limit = f(age, verified contribution, completion rate,
+    credit_limit = f(age, E_eff contribution, completion rate,
                      counterparty diversity, dispute rate)
 
     Starter line is treasury-capped and small; growth requires diverse,
-    verified contribution — a deliberate Sybil/wash-trading cost.
+    trust-flow-weighted contribution — a deliberate Sybil/wash cost.
     """
     if not a.online:
         return 0.0
     age_factor = min(1.0, a.age_days(tick) / 30.0)          # ramps over 30 days
-    contribution = min(a.diverse_contribution(), 2000.0)
+    contribution = min(a.effective_contribution(peers), 2000.0)
     diversity = min(1.0, len(a.counterparties) / 8.0)
     quality_factor = 0.25 + 0.75 * a.completion_rate()
     dispute_penalty = max(0.0, 1.0 - 4.0 * a.dispute_rate())

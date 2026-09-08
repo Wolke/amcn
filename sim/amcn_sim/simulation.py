@@ -44,9 +44,9 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                 continue
             # deadbeat exit: burn remaining credit then disappear (§16 threat 13)
             if a.exit_tick is not None and tick >= a.exit_tick:
-                avail = credit_limit(a, tick) + ledger.balance(a.aid)
+                avail = credit_limit(a, tick, agents) + ledger.balance(a.aid)
                 if avail > 1.0:
-                    market.post_shortfall(a, avail * 0.9, tick)  # final grab
+                    market.post_shortfall(a, avail * 0.9, tick, agents)  # final grab
                 a.online = False
                 continue
             if a.cycle_reset_due(tick):
@@ -57,7 +57,7 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
             else:
                 shortfall = demand - a.remaining_quota
                 a.remaining_quota = 0.0
-                market.post_shortfall(a, shortfall, tick)  # UC-01
+                market.post_shortfall(a, shortfall, tick, agents)  # UC-01
             if a.behavior == WASHER and tick % (TICKS_PER_DAY // 2) == 0:
                 market.post_wash_task(a, tick)
 
@@ -92,12 +92,13 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                 open_tasks=len(market.open_tasks),
                 agents_in_debt=len(debtors),
                 total_debt_cc=sum(-ledger.balance(x.aid) for x in debtors),
-                total_credit_cc=sum(credit_limit(x, tick)
+                total_credit_cc=sum(credit_limit(x, tick, agents)
                                     for x in agents.values() if x.online),
                 settled_cc_cum=market.stats.settled_cc,
             ))
 
-    finalize(report, agents, ledger, market, ticks, credit_limit)
+    finalize(report, agents, ledger, market, ticks,
+             lambda a, t: credit_limit(a, t, agents))
 
     if out_dir:
         out = Path(out_dir)
