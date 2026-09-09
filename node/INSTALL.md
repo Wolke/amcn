@@ -1,0 +1,126 @@
+# 兩台電腦跑 AMCN 試點：安裝指南
+
+目標：機器 1 跑 Hub＋Provider Agent＋3 個 Verifier，機器 2 跑 Requester Agent，跨區網完成一次「借用 → 驗收 → 結算」，然後角色互換測還債。
+
+## 0. 前置需求（兩台都要）
+
+- **Node.js ≥ 20**（零第三方套件，不需要 npm install）
+  ```bash
+  # macOS
+  brew install node
+  node --version   # 確認 ≥ v20
+  ```
+- 兩台在**同一個區網**（同一台路由器/Wi-Fi）。
+- 取得專案：把整個 `ai-exchage` 資料夾複製到兩台機器（AirDrop、隨身碟、`scp -r`，或推到私人 GitHub repo 再 clone 都可以）。只有 `node/` 目錄是必要的。
+
+## 1. 機器 1：Hub＋Provider＋Verifiers
+
+**1a. 查自己的區網 IP**（機器 2 要用）：
+
+```bash
+ipconfig getifaddr en0     # macOS，例如 192.168.1.10
+```
+
+**1b. 啟動 Hub**（開一個終端機分頁）：
+
+```bash
+cd ai-exchage/node
+HUB_BIND=0.0.0.0 node hub.js
+```
+
+看到 `[hub] listening on 0.0.0.0:47180` 即成功。macOS 第一次會跳「允許接受連入網路連線？」→ 按允許。
+
+**1c. 啟動 3 個 Verifier**（各開一個分頁，或用 `&` 背景執行）：
+
+```bash
+cd ai-exchage/node
+AGENT_CONFIG='{"name":"V1","hubPort":47180}' node verifier.js &
+AGENT_CONFIG='{"name":"V2","hubPort":47180}' node verifier.js &
+AGENT_CONFIG='{"name":"V3","hubPort":47180}' node verifier.js &
+```
+
+**1d. 啟動 Provider Agent**：
+
+```bash
+cd ai-exchage/node
+cp configs/provider.example.json configs/provider.json
+# 第一次測試不用改任何欄位（adapter.baseUrl=null → 確定性 mock，不花錢）
+AMCN_PROVIDER_KEY='sk-test-anything' node agent.js configs/provider.json
+```
+
+看到 `registered, dynamic credit line 50.0 CC` 和 `now providing at 1 CC/unit` 即成功。
+
+## 2. 機器 2：Requester
+
+```bash
+cd ai-exchage/node
+cp configs/requester.example.json configs/requester.json
+# 編輯 configs/requester.json：把 hubHost 改成機器 1 的 IP（步驟 1a）
+node agent.js configs/requester.json
+```
+
+看到 `registered, dynamic credit line 50.0 CC` 表示已跨機連上 Hub。
+
+## 3. 發第一筆任務（在機器 2）
+
+Requester 的 Owner Console 在本機 47202。用 curl 手動發任務（模擬「額度耗盡去借」）：
+
+```bash
+curl -s -X POST http://127.0.0.1:47202/post \
+  -H 'content-type: application/json' \
+  -d '{
+    "units": 10, "maxPriceCC": 12,
+    "payload": "hello from machine 2",
+    "acceptance": "judge-quorum",
+    "asserts": [{"op":"sha256_eq"}, {"op":"max_len","arg":64}]
+  }'
+```
+
+預期流程（幾秒內）：機器 1 的 Provider 出價 → 機器 2 選標、E2E 封裝 payload → 機器 1 本機執行 → 3 個 Verifier 驗收 PASS → 雙簽收據 → Hub 顯示 `SETTLED(dual)`，機器 2 餘額 **-10**、機器 1 **+9.15**。
+
+**查帳**：
+
+```bash
+curl -s http://127.0.0.1:47202/status | python3 -m json.tool   # 機器 2 的餘額
+```
+
+機器 1 的 Hub 終端機會印出完整結算與 checkpoint。
+
+## 4. 還債（角色互換）
+
+在機器 1 的 provider.json 已經在供應中；讓機器 2 也開供應、機器 1 發任務即可測 UC-02：
+
+1. 機器 2：把 requester.json 的 `"provide": null` 改成 `{"afterMs":0,"pricePerUnit":0.9}`、`"adapter"` 改成 provider.example 那格（用 env key），重啟 agent。
+2. 機器 1：再開一個 requester 設定（`hubHost:"127.0.0.1"`、`consolePort:47203`、`provide:null`），啟動後用 curl 對 47203 發任務。
+3. 機器 2 得標、執行、收款 → 負餘額回補。這就是 §27 閉環的跨機版。
+
+## 5. 接真實模型（選配）
+
+把 provider 設定的 `adapter.baseUrl` 指向：
+
+- 本機 Ollama：`"http://127.0.0.1:11434"`，`"model": "llama3.2"`（先 `ollama serve`）
+- 任何 OpenAI-compatible 端點；key 建議放 macOS Keychain：
+  ```bash
+  security add-generic-password -s amcn-provider-key -a $USER -w '<你的key>'
+  AMCN_USE_KEYCHAIN=1 node agent.js configs/provider.json
+  ```
+
+⚠️ 真實 LLM 輸出**非確定性**，`sha256_eq` 驗收必失敗。改用弱斷言，例如：
+`"asserts": [{"op":"max_len","arg":2000},{"op":"contains","arg":"關鍵詞"}]`。
+這是原型已知限制（見 README 誠實清單）——正式版驗收 DSL 會有 schema/test-suite 等強斷言。
+
+## 6. 疑難排解
+
+| 症狀 | 原因與解法 |
+|---|---|
+| 機器 2 連不上 | Hub 沒設 `HUB_BIND=0.0.0.0`；或 macOS 防火牆擋了 node → 系統設定 › 網路 › 防火牆 › 允許 node；或兩台不在同網段（`ping <機器1 IP>` 測試） |
+| `no bids for ...` | Provider 沒在供應（看它有沒有印 `now providing`）；或 maxPriceCC < units×pricePerUnit |
+| quorum 沒反應 | 3 個 Verifier 沒起來（Hub log 應有三筆 `registered ... (verifier)`） |
+| 驗收 FAIL | 用了真實 LLM 卻配 `sha256_eq`（見第 5 節） |
+| 埠被占用 | 換 `HUB_PORT`／`consolePort`，兩邊設定要一致 |
+
+## 7. 安全注意（試點範圍）
+
+- Hub 綁 `0.0.0.0` 只該在**受信任的區網**做；傳輸層目前無 TLS（訊息本身有簽章、payload 有 E2E 加密，但 metadata 是明文）。不要暴露到公網。
+- Console（47201/47202）只綁 localhost，這是刻意的——它是 Owner 的控制面。
+- API key 永遠只在 agent 進程的機器上；試點時可用 `sk-test-anything` 假 key 跑 mock adapter，完全不花錢。

@@ -1,0 +1,10 @@
+{
+  "name": "machine1-provider",
+  "hubHost": "127.0.0.1",
+  "hubPort": 47180,
+  "consolePort": 47201,
+  "adapter": { "baseUrl": null, "model": null,
+               "key": { "service": "amcn-provider-key", "env": "AMCN_PROVIDER_KEY" } },
+  "provide": { "afterMs": 0, "pricePerUnit": 1.0 },
+  "posts": []
+}

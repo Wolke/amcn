@@ -1,0 +1,9 @@
+{
+  "name": "machine2-requester",
+  "hubHost": "192.168.1.10",
+  "hubPort": 47180,
+  "consolePort": 47202,
+  "adapter": null,
+  "provide": null,
+  "posts": []
+}

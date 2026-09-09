@@ -19,6 +19,7 @@ const { attachLineReader, sendLine, verify, sha256, canon,
 const eeff = require('./lib/eeff');
 
 const PORT = Number(process.env.HUB_PORT || 47180);
+const BIND = process.env.HUB_BIND || '127.0.0.1'; // 0.0.0.0 for LAN pilots
 const TREASURY = 'protocol:treasury';
 const INSURANCE = 'protocol:insurance';
 
@@ -260,6 +261,6 @@ const server = net.createServer((sock) => {
   }, (line) => rawLog.push(line));
 });
 
-server.listen(PORT, '127.0.0.1', () => console.log(
-  `[hub] listening on ${PORT} — starter CL ${eeff.STARTER_CC}, fee ${eeff.FEE_RATE * 100}%, ` +
+server.listen(PORT, BIND, () => console.log(
+  `[hub] listening on ${BIND}:${PORT} — starter CL ${eeff.STARTER_CC}, fee ${eeff.FEE_RATE * 100}%, ` +
   `risk ${eeff.RISK_THIN * 100}%/${eeff.RISK_BASE * 100}%, hash-chained + checkpointed`));

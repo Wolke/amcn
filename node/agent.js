@@ -5,8 +5,8 @@
 // judge-quorum acceptance via the DSL, forced settlement when a requester
 // refuses to pay (T-05), and a minimal read-only Owner Console.
 //
-// AGENT_CONFIG (JSON):
-// { name, hubPort, consolePort?,
+// Config: AGENT_CONFIG env (JSON) or `node agent.js <config.json>`:
+// { name, hubPort, hubHost?, consolePort?,
 //   adapter: {baseUrl, model, key:{service, env}} | null,
 //   provide: {afterMs, pricePerUnit, repayment?} | null,
 //   refuseToSettle?: bool,   // demo: act as a malicious non-payer
@@ -20,7 +20,9 @@ const { runAsserts, assertsHash } = require('./lib/dsl');
 const keystore = require('./lib/keystore');
 const adapter = require('./adapter');
 
-const cfg = JSON.parse(process.env.AGENT_CONFIG);
+const cfg = process.env.AGENT_CONFIG
+  ? JSON.parse(process.env.AGENT_CONFIG)
+  : JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
 const id = genIdentity();
 const box = genBoxKeys();
 const log = (m) => console.log(`[${cfg.name} ${id.did}] ${m}`);
@@ -58,7 +60,7 @@ function requestSettlement(contractId, role, provider, output) {
   hub.send({ type: 'fee_quote', contract_id: contractId, requester, price });
 }
 
-const hub = connect(cfg.hubPort, async (msg) => {
+const hub = connect(cfg.hubPort || 47180, async (msg) => {
   switch (msg.type) {
     case 'registered':
       console_.creditLine = msg.credit_line;
@@ -243,15 +245,36 @@ const hub = connect(cfg.hubPort, async (msg) => {
 
     case 'error': log(`hub error: ${msg.why} (${msg.ref})`); break;
   }
-});
+}, cfg.hubHost || '127.0.0.1');
 
 const regBody = { did: id.did, pub: id.pub, box_pub: box.boxPub };
 hub.send({ type: 'register', ...regBody, sig: sign(id.privateKey, regBody) });
 console.log(`DID ${cfg.name} ${id.did}`);
 
-// minimal read-only Owner Console (§9.9 / FR-081, prototype scope)
+// minimal Owner Console (§9.9 / FR-081): GET /status for state,
+// POST /post to manually publish a task (two-machine pilots).
+// Localhost-only on purpose — this is the Owner's own control surface.
 if (cfg.consolePort) {
   http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/post') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const post = JSON.parse(body);
+          if (!post.acceptance || !Array.isArray(post.asserts)) {
+            throw new Error('post needs acceptance + asserts (FR-011)');
+          }
+          const taskId = postTask(post);
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, task_id: taskId }));
+        } catch (e) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({
       name: cfg.name, did: id.did,
@@ -271,11 +294,12 @@ if (cfg.provide) {
   }, cfg.provide.afterMs);
 }
 
-for (const post of cfg.posts || []) {
-  setTimeout(() => {
-    hub.send({ type: 'list_verifiers' }); // refresh panel directory + lock
-    const task = {
-      task_id: `t-${cfg.name}-${post.atMs}`,
+let postSeq = 0;
+function postTask(post) {
+  postSeq += 1;
+  hub.send({ type: 'list_verifiers' }); // refresh panel directory + lock
+  const task = {
+      task_id: `t-${cfg.name}-${postSeq}`,
       requester: id.did,
       units: post.units,
       max_price_cc: post.maxPriceCC,
@@ -315,7 +339,11 @@ for (const post of cfg.posts || []) {
                    pre_auth, pre_auth_sig: sign(id.privateKey, pre_auth) });
       }, 500),
     });
-    log(`quota exhausted → posting ${task.task_id} (UC-01, ${post.acceptance})`);
-    hub.send({ type: 'task', task, sig: sign(id.privateKey, task) });
-  }, post.atMs);
+  log(`quota exhausted → posting ${task.task_id} (UC-01, ${post.acceptance})`);
+  hub.send({ type: 'task', task, sig: sign(id.privateKey, task) });
+  return task.task_id;
+}
+
+for (const post of cfg.posts || []) {
+  setTimeout(() => postTask(post), post.atMs);
 }

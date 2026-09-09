@@ -57,8 +57,8 @@ function attachLineReader(sock, onMsg, onRaw) {
 
 function sendLine(sock, obj) { sock.write(JSON.stringify(obj) + '\n'); }
 
-function connect(port, onMsg) {
-  const sock = net.connect(port, '127.0.0.1');
+function connect(port, onMsg, host = '127.0.0.1') {
+  const sock = net.connect(port, host);
   attachLineReader(sock, onMsg);
   return { sock, send: (obj) => sendLine(sock, obj) };
 }
