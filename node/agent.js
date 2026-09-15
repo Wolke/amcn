@@ -122,11 +122,18 @@ function requestSettlement(contractId, role, provider, output) {
 // else seeing it (NFR-005).
 // Ask the panel to open their commitments. Fires when everyone has
 // committed, or on the grace timer with whatever quorum exists.
-function requestReveal(contractId) {
+function requestReveal(contractId, why = 'quorum') {
   const ctx = asRequester.get(contractId);
   if (!ctx || ctx.revealed || !ctx.panel) return;
   if (!ctx.commits || ctx.commits.size < 2) {
-    log(`cannot reveal ${contractId}: only ${ctx.commits ? ctx.commits.size : 0} commitments`);
+    // Not a failure yet: the grace timer may simply have fired before
+    // cross-machine commitments landed. Record that the window has passed so
+    // the commit handler can reveal the moment a quorum exists, instead of
+    // waiting for the full panel that may never complete. Giving up here left
+    // 16 contracts stalled on the live pilot — localhost demos never saw it,
+    // because local commitments always beat the 1.5s window.
+    log(`reveal deferred on ${contractId}: ${ctx.commits ? ctx.commits.size : 0} ` +
+        'commitments so far, waiting for a quorum');
     return;
   }
   ctx.revealed = true;
@@ -138,7 +145,7 @@ function requestReveal(contractId) {
     hub.send({ type: 'reveal_request', to: v.did, contract_id: contractId,
                requester: id.did, provider: ctx.contract.provider, sig, pub: id.pub });
   }
-  log(`reveal requested on ${contractId} (${ctx.commits.size} commitments)`);
+  log(`reveal requested on ${contractId} (${ctx.commits.size} commitments, ${why})`);
 }
 
 function fanOut(delivery, ctx, chosen) {
@@ -295,7 +302,14 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
           fanOut(d, ctx, chosen);
           // A verifier that never commits must not stall the contract, so
           // reveal on a quorum after a grace period.
-          ctx.revealTimer = setTimeout(() => requestReveal(d.contract_id), 1500);
+          // Cross-machine commitments can take longer than a local round
+          // trip, so the window is configurable and the timer only marks the
+          // window closed — it never abandons the contract.
+          const graceMs = (cfg.policy && cfg.policy.revealGraceMs) || 3000;
+          ctx.revealTimer = setTimeout(() => {
+            ctx.graceElapsed = true;
+            requestReveal(d.contract_id, 'grace elapsed');
+          }, graceMs);
         };
         dispatch();
       }
@@ -314,8 +328,14 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
       const reqC = asRequester.get(cid);
       // Only the requester drives the reveal; the provider just records
       // commitments so it can build a forced-settlement bundle.
-      if (reqC && reqC.panel && reqC.commits.size >= reqC.panel.length) {
-        requestReveal(cid);
+      if (reqC && reqC.panel) {
+        // Full panel: reveal at once. Past the grace window: reveal as soon
+        // as a quorum exists, so a panel that never completes still settles.
+        if (reqC.commits.size >= reqC.panel.length) {
+          requestReveal(cid, 'full panel');
+        } else if (reqC.graceElapsed && reqC.commits.size >= 2) {
+          requestReveal(cid, 'quorum after grace');
+        }
       }
       break;
     }
