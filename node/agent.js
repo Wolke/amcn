@@ -298,12 +298,18 @@ if (cfg.provide) {
   }, cfg.provide.afterMs);
 }
 
+// postSeq restarts at 1 every process, and cfg.name is not unique either, so
+// a bare `t-<name>-<seq>` collided across restarts: two different agents ended
+// up holding receipts under one contract_id, which is the settlement
+// idempotency key (W1 schema freeze). The DID tag makes it unique per
+// identity, and genIdentity() runs per process.
+const idTag = id.did.slice(-8);
 let postSeq = 0;
 function postTask(post) {
   postSeq += 1;
   hub.send({ type: 'list_verifiers' }); // refresh panel directory + lock
   const task = {
-      task_id: `t-${cfg.name}-${postSeq}`,
+      task_id: `t-${cfg.name}-${idTag}-${postSeq}`,
       requester: id.did,
       units: post.units,
       max_price_cc: post.maxPriceCC,

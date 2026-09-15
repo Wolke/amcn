@@ -25,6 +25,7 @@ const TREASURY = 'protocol:treasury';
 const INSURANCE = 'protocol:insurance';
 
 const hubId = genIdentity(); // signs checkpoints
+const settledIds = new Set(); // contract_id idempotency keys
 const agents = new Map();    // did -> {pub, boxPub, sock, stats, role}
 const balances = new Map();
 const receipts = [];         // {kind:'dual'|'forced', receipt, sigs, evidence?}
@@ -81,6 +82,12 @@ function makeCheckpoint() {
 
 // --- settlement core ----------------------------------------------------
 function validateSchedule(receipt, sock, ref) {
+  // contract_id is the settlement idempotency key: one contract, one
+  // settlement. Both the dual and forced paths come through here.
+  if (settledIds.has(ref)) {
+    fail(sock, 'duplicate contract_id: already settled', ref);
+    return false;
+  }
   const sum = receipt.postings.reduce((s, p) => s + p.amount_cc, 0);
   if (Math.abs(sum) > 1e-9) { fail(sock, `postings sum ${sum} != 0`, ref); return false; }
   const price = -receipt.postings.find((p) => p.account === receipt.requester).amount_cc;
@@ -120,6 +127,7 @@ function applySettlement(kind, receipt, sigs, evidence) {
     (prov.stats.earnedBy.get(receipt.requester) || 0) + provNet);
   prov.stats.completed += 1;
   receipts.push({ kind, receipt, sigs, evidence });
+  settledIds.add(receipt.contract_id);
   const cp = makeCheckpoint();
   console.log(`[hub] SETTLED(${kind}) ${receipt.contract_id}: ` +
     receipt.postings.map((p) => `${p.account.slice(0, 18)}=${p.amount_cc.toFixed(2)}`)

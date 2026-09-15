@@ -121,6 +121,18 @@
 
 （其餘 P2 級文字/排程不一致 13 項，開發中隨頁修正；完整清單見三份評審報告原文。）
 
+### Phase 1 原型實作發現（非評審來源）
+
+上列 1–12 項來自三份獨立評審。以下由 `node/` 的 Phase 1 原型與兩台機器試點實作過程發現——評審讀不到的層級，只有跑起來才會暴露：
+
+| # | 級別 | 缺陷 | 狀態與修法 |
+|---|---|---|---|
+| 13 | **P0** | Hub 對畸形 frame 會整個進程崩潰：`createPublicKey()` 遇到壞 DER 是丟例外而非回傳 false，例外從 socket `data` handler 逃出即 uncaught。Hub 綁 `0.0.0.0` 時，區網任一裝置送一行垃圾就能打掉整個網路（掛在上面的 Verifier 全數斷線） | **已修**（`lib/wire.js` 驗簽不丟例外＋frame 層隔離＋socket error 處理＋行長上限；`demo.js` 回歸閘門） |
+| 14 | **P1** | 中央化 Transport／撮合層缺「協議內發現與輪替機制」——§2.1 把它列為中央化的綁定條件，§2.2 裁定 B 案時未交付。Hub 位址只存在各機設定檔，換位址等於全網手改 | **部分修**：已交付區網 UDP 簽署信標＋`hubPin` 釘住（`lib/discovery.js`）。真正的「輪替」還需 Hub 身分持久化——目前 `genIdentity()` 每次重啟換身分，使 pin 只在單次生命週期有效。併入 W10「帳本匯出重建」一併處理 |
+| 15 | **P1** | `contract_id` 可重複：任務 id 為 `t-<設定名>-<seq>`，`seq` 每次啟動歸零且設定名不唯一，導致兩個不同 DID 持有相同 contract_id 的收據。W1 已凍結的 schema 中 contract_id 是結算冪等鍵，識別碼不唯一將使 W9 爭議、W11 紅隊重放、W12 §20 證據包出現雙重計算 | **已修**（id 併入 DID 標籤；Hub 以 `settledIds` 拒絕重複結算，雙簽與強制路徑共用同一守門；`demo.js` 重放斷言） |
+| 16 | **P2** | Hub 的 `receipt`／`task`／`forced_settlement` handler 對缺必要欄位的 frame 會丟例外。目前由 #13 的 frame 層 try/catch 接住並記錄為 `[wire] dropped frame`，但缺逐欄位驗證，錯誤訊息對送出方也不具指引性 | 未修。建議與 W1 schema v1 的欄位驗證一併實作 |
+| 17 | **P2** | Hub 帳本與 Agent 身分皆不持久化：帳本在記憶體、`export` 有出口無 import 入口，`agent.js` 每次啟動 `genIdentity()` 產生新 DID。任一邊重啟即歸零，且被棄置的負餘額身分會在帳上留下永不償還的洞（試點實測留下一筆 −10 CC） | 未修，屬 W10「帳本匯出重建」範圍。§2.2 Ledger 列已承諾「全部狀態可由公開簽署事件重建」，出口已具備，缺 import |
+
 ---
 
 ## 5. 12 週整合實作計畫

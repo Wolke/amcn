@@ -129,6 +129,31 @@ async function main() {
     port: BEACON_PORT, timeoutMs: 1200, pin: 'did:demo:0000000000000000',
   });
 
+  // contract_id is the settlement idempotency key (W1 schema freeze). Replay a
+  // receipt the hub already settled: it must be refused, and no balance may
+  // move. `t-<name>-<seq>` alone used to collide across restarts, so two
+  // agents held receipts under one id.
+  const first = ex.receipts[0];
+  const replay = await new Promise((resolve) => {
+    const t = setTimeout(() => resolve('no reply'), 2500);
+    const c = connect(PORT, (m) => {
+      if (m.type === 'error' && m.ref === first.receipt.contract_id) {
+        clearTimeout(t); c.sock.destroy(); resolve(m.why);
+      }
+    });
+    c.send({ type: 'receipt', receipt: first.receipt, sigs: first.sigs });
+  });
+  const afterReplay = await new Promise((resolve) => {
+    const c = connect(PORT, (m) => {
+      if (m.type === 'ledger_export') { c.sock.destroy(); resolve(m); }
+    });
+    c.send({ type: 'export' });
+  });
+  const idsUnique = (() => {
+    const ids = ex.receipts.map((r) => r.receipt.contract_id);
+    return new Set(ids).size === ids.length;
+  })();
+
   // Regression gate: a malformed frame from any LAN peer must not be able to
   // kill the hub. It could — createPublicKey() throws on bad DER and the throw
   // escaped the socket 'data' handler, taking the hub and every connected
@@ -223,6 +248,13 @@ async function main() {
     Math.abs(consoleA.balance_cc - balances[A]) < 1e-6 &&
     consoleA.settled.length >= 2,
     `A console: ${consoleA.balance_cc.toFixed(2)} CC, ${consoleA.settled.length} settlements`);
+
+  check('contract_id 冪等：重放已結算收據被拒、餘額不動、id 全域唯一（W1 schema）',
+    /duplicate contract_id/.test(replay) && idsUnique &&
+    afterReplay.receipts.length === ex.receipts.length &&
+    Object.keys(balances).every((a) =>
+      Math.abs((afterReplay.balances[a] || 0) - balances[a]) < 1e-9),
+    `replay refused: "${replay}", ${ex.receipts.length} receipts unchanged`);
 
   check('UDP 發現：無需手填 IP 即找到 Hub，且錯誤的 pin 被拒絕（§2.1 協議內發現）',
     !!beacon && beacon.port === PORT && beacon.pub === hub_pub && wrongPin === null,
