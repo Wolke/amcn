@@ -45,6 +45,9 @@ cd node && node demo-autonomous.js
 # W9 金絲雀稽核 demo（約 30 秒，6 項斷言：偷懶 verifier 被沒收押注）
 cd node && node demo-canary.js
 
+# W10 帳本重建演練（約 25 秒，7 項斷言：第二排序器從匯出重建、竄改被拒）
+cd node && node demo-rebuild.js
+
 # 兩支 demo 都可用 DEMO_PORT_OFFSET=100 與跑中的試點並存
 
 # 還債政策參數掃描（折價 × band 定義 × 情境，約 10 分鐘）
