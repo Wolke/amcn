@@ -24,9 +24,39 @@ const PORT = Number(process.env.HUB_PORT || 47180);
 const BIND = process.env.HUB_BIND || '127.0.0.1'; // 0.0.0.0 for LAN pilots
 const TREASURY = 'protocol:treasury';
 const INSURANCE = 'protocol:insurance';
+// §4 #28: a verifier's stake has to be real CC held somewhere, or "slashing"
+// can only ever take what the verifier happened to have earned — which
+// coupled deterrence to the fee rate, an implementation artifact rather than
+// a design. proposal-C assumes a verifier posts a deposit up front, but a
+// verifier here starts at 0 CC with no credit line, so pay-to-play is not
+// available. Instead a share of each verification fee is escrowed until the
+// target is met: a new verifier has little at risk and earns little, and
+// works its way to full standing — the same shape as the credit line.
+const STAKE = 'protocol:stake';
+const STAKE_TARGET_CC = Number(process.env.HUB_STAKE_TARGET_CC || 5);
+const STAKE_ESCROW_FRAC = Number(process.env.HUB_STAKE_ESCROW_FRAC || 0.5);
 
 const hubId = genIdentity(); // signs checkpoints
 const settledIds = new Set(); // contract_id idempotency keys
+const stakes = new Map();     // verifier did -> CC held in protocol:stake
+
+// Post a balanced set that is not a settlement (escrow, slashing). Same
+// conservation and hash-chain rules; kept separate so `receipts` stays the
+// list of things two parties signed.
+function applyPostings(kind, ref, postings) {
+  const total = postings.reduce((t, p) => t + p.amount_cc, 0);
+  if (Math.abs(total) > 1e-9) {
+    console.error(`[hub] refusing ${kind} ${ref}: postings sum ${total} != 0`);
+    return false;
+  }
+  const idx = receipts.length;
+  for (const p of postings) {
+    balances.set(p.account, bal(p.account) + p.amount_cc);
+    chainAppend(p.account, idx, p.amount_cc);
+  }
+  makeCheckpoint();
+  return true;
+}
 const agents = new Map();    // did -> {pub, boxPub, sock, stats, role}
 const balances = new Map();
 const receipts = [];         // {kind:'dual'|'forced', receipt, sigs, evidence?}
@@ -221,6 +251,21 @@ function applySettlement(kind, receipt, sigs, evidence) {
     receipt.postings.map((p) => `${p.account.slice(0, 18)}=${p.amount_cc.toFixed(2)}`)
       .join(' ') + ` | checkpoint#${cp.seq} ${cp.root.slice(0, 12)}`);
   broadcast({ type: 'settled', receipt, kind });
+  // Escrow part of each verifier's fee into the stake account. A separate
+  // posting set, not folded into the receipt: the receipt is what both
+  // parties signed, and the hub must not be able to alter it after the fact.
+  for (const p of receipt.postings) {
+    const a = agents.get(p.account);
+    if (!a || a.role !== 'verifier' || p.amount_cc <= 0) continue;
+    const held = stakes.get(p.account) || 0;
+    const room = +(STAKE_TARGET_CC - held).toFixed(4);
+    if (room <= 0) continue;
+    const take = +Math.min(room, p.amount_cc * STAKE_ESCROW_FRAC).toFixed(4);
+    if (take <= 0) continue;
+    stakes.set(p.account, +(held + take).toFixed(4));
+    applyPostings('stake_escrow', receipt.contract_id,
+      [{ account: p.account, amount_cc: -take }, { account: STAKE, amount_cc: take }]);
+  }
   // The band's low bound is -0.3 x CL (FR-055), and CL moves with every
   // settlement, so each party needs its new line, not the one it got at
   // registration.
@@ -403,6 +448,7 @@ const server = net.createServer((sock) => {
               .map(([d]) => [d, clOf(d)])),
           chains: Object.fromEntries(chains),
           checkpoints,
+          stakes: Object.fromEntries(stakes),
           hub_pub: hubId.pub,
           raw_log: rawLog.join('\n'),
         });

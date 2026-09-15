@@ -312,10 +312,30 @@ async function main() {
     verifyChains(tampered, checkpoints, hub_pub) !== null,
     `tamper detected: "${verifyChains(tampered, checkpoints, hub_pub)}"`);
 
+  // Rebuilt from the signed receipts plus the protocol's published rules —
+  // which is how the fee schedule already works: fees are not separately
+  // signed either, they are derived from the receipt and validated against
+  // the rule. Stake escrow (§4 #28) is the same kind of thing: a
+  // deterministic function of each receipt's verifier postings, so anyone
+  // holding the receipt stream can recompute it. If it were not derivable,
+  // §20-4's "rebuildable from signed events" would genuinely be broken.
+  const STAKE_TARGET_CC = 5, STAKE_ESCROW_FRAC = 0.5;
   const rebuilt = {};
+  const held = {};
+  const add = (acct, amt) => {
+    rebuilt[acct] = +((rebuilt[acct] || 0) + amt).toFixed(6);
+  };
   for (const { receipt } of receipts) {
+    for (const p of receipt.postings) add(p.account, p.amount_cc);
     for (const p of receipt.postings) {
-      rebuilt[p.account] = +((rebuilt[p.account] || 0) + p.amount_cc).toFixed(6);
+      if (!receipt.verifier_pool.includes(p.account) || p.amount_cc <= 0) continue;
+      const room = +(STAKE_TARGET_CC - (held[p.account] || 0)).toFixed(4);
+      if (room <= 0) continue;
+      const take = +Math.min(room, p.amount_cc * STAKE_ESCROW_FRAC).toFixed(4);
+      if (take <= 0) continue;
+      held[p.account] = +((held[p.account] || 0) + take).toFixed(4);
+      add(p.account, -take);
+      add('protocol:stake', take);
     }
   }
   const sum = Object.values(rebuilt).reduce((s, v) => s + v, 0);
@@ -323,6 +343,27 @@ async function main() {
     Math.abs(sum) < 1e-9 &&
     Object.entries(rebuilt).every(([a, v]) => Math.abs((balances[a] || 0) - v) < 1e-6),
     `Σ=${sum.toFixed(9)}, insurance=${balances['protocol:insurance'].toFixed(2)}`);
+
+  // §4 #28: the stake has to be real CC sitting in an account, not a number
+  // in the hub's memory — otherwise slashing can only take what a verifier
+  // happened to have earned, which made deterrence a function of the fee
+  // rate. Escrowed out of verifier fees, capped at the target.
+  const stakeTotal = Object.values(ex.stakes || {}).reduce((t, v) => t + v, 0);
+  const stakeAccount = balances['protocol:stake'] || 0;
+  const paidVerifiers = new Set();
+  for (const r of receipts) {
+    for (const p of r.receipt.postings) {
+      if (r.receipt.verifier_pool.includes(p.account) && p.amount_cc > 0) {
+        paidVerifiers.add(p.account);
+      }
+    }
+  }
+  check('§4 #28 押注真實託管：verifier 費用有一部分進 protocol:stake，且帳戶餘額 = 各自持有額之和',
+    paidVerifiers.size >= 3 && stakeTotal > 0 &&
+    Math.abs(stakeAccount - stakeTotal) < 1e-6 &&
+    Object.values(ex.stakes || {}).every((v) => v <= 5 + 1e-9),
+    `protocol:stake=${stakeAccount.toFixed(2)} CC = Σ持有 ${stakeTotal.toFixed(2)}，` +
+    `${Object.keys(ex.stakes || {}).length} 位 verifier，上限 5 CC/位`);
 
   const A = receipts[0].receipt.requester;
   const B = receipts[0].receipt.provider;
