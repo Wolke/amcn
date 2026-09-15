@@ -30,6 +30,9 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `lib/e2e.js` | NFR-005：X25519 ECDH（ephemeral）＋HKDF＋AES-256-GCM |
 | `lib/eeff.js` | 與 `sim/amcn_sim` 同構的 E_eff 信用公式（starter 50、風險費 6%/2%——GATE-0 掃描定案參數）＋保險池 |
 | `fake-provider.js` | 本機 key-gated OpenAI-compatible 端點，讓真 HTTP 路徑可測而不花錢 |
+| `lib/strategy.js` | FR-055 目標餘額區間＋還債排程器：`[low, high]` 預設 `[-0.3×CL, +100]`，跌破 low 則供給折價、暫停非必要消費；§20-10 平均還債時間 |
+| `lib/discovery.js` | §2.1「協議內發現與輪替」的區網部分：Hub 簽署 UDP 信標，Agent 以 `hubHost: "discover"` 自動尋找並可用 `hubPin` 釘住身分（跨機尚未驗證，見 §4 #18）|
+| `mcp-server.js` | §23.1 需求側入口：MCP server（JSON-RPC over stdio，協議 2025-06-18），三個 tool `amcn_balance` / `amcn_publish_task` / `amcn_request_inference`。不持有任何金鑰，只經 127.0.0.1 的 Owner Console 操作本機 Agent |
 
 ## Demo 自動斷言（11 項）
 
@@ -59,3 +62,37 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 - Panel seed 用「最新」checkpoint root，有 grinding 風險（評審 A-④）：正式版綁未來輪 checkpoint＋commit-reveal。
 - credit line 的 age factor 固定為 1（demo 跑秒級）；風險費率靜態二檔，正式版依 GATE-0 結論做動態定價。
 - 無心跳/逾時/備援重發（PROVIDER_FAILED 路徑）；Console 為唯讀 JSON，無政策編輯。
+
+## 把 AMCN 當工具用（MCP，§23.1）
+
+讓你現有的 Claude／自建 Agent 直接對 AMCN 下單。先啟動一個帶 Console 的本機 Agent，再把這個 server 指向它：
+
+```bash
+AMCN_CONSOLE=http://127.0.0.1:47203 node mcp-server.js
+```
+
+Claude Code 的設定（`.mcp.json` 或 `claude mcp add`）：
+
+```json
+{
+  "mcpServers": {
+    "amcn": {
+      "command": "node",
+      "args": ["/path/to/ai-exchage/node/mcp-server.js"],
+      "env": { "AMCN_CONSOLE": "http://127.0.0.1:47203" }
+    }
+  }
+}
+```
+
+三個 tool：
+
+| Tool | 用途 |
+|---|---|
+| `amcn_balance` | 餘額、動態信用額度、可支用額、目標餘額區間與策略模式 |
+| `amcn_publish_task` | 發布任務後立即返回 `task_id` / `contract_id`，不等結算 |
+| `amcn_request_inference` | 發布任務並**等到結算**，回傳產出、成本與期末餘額（預設 60 秒逾時）|
+
+設計上這個 process **不持有金鑰也沒有身分** —— 它只是 Owner Console 的薄客戶端，簽章、keystore 與 E2E 封裝全留在 Agent 進程裡，所以多這個介面不會弱化 P-02。
+
+⚠️ `amcn_request_inference` 預設的驗收斷言是 `max_len`，不是 `sha256_eq` —— 真實模型輸出非確定性，`sha256_eq` 必然失敗（見本檔誠實清單）。

@@ -308,6 +308,22 @@ if (cfg.consolePort) {
       });
       return;
     }
+    // GET /result?contract_id=... — the accepted output of a task this agent
+    // requested, so the MCP entry point (§23.1) can hand work back to the
+    // Owner's own agent once it has passed acceptance and settled.
+    if (req.url.startsWith('/result')) {
+      const want = new URL(req.url, 'http://127.0.0.1').searchParams
+        .get('contract_id');
+      const ctx = want && asRequester.get(want);
+      const settled = console_.settled.find((x) => x.contract_id === want);
+      res.writeHead(ctx ? 200 : 404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(ctx
+        ? { contract_id: want, output: ctx.output ?? null,
+            settled: !!settled, delta_cc: settled ? settled.delta_cc : null,
+            provider: ctx.contract && ctx.contract.provider }
+        : { error: 'unknown contract_id' }));
+      return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     const band = strategy.bandFor(cfg, console_.creditLine);
     res.end(JSON.stringify({
