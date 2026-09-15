@@ -111,7 +111,7 @@
 
 | # | 來源 | 缺陷 | 整合修法 |
 |---|---|---|---|
-| 6 | A④ | Verifier 抽選種子可 grinding | 綁未來 checkpoint＋commit-reveal |
+| 6 | A④ | Verifier 抽選種子可 grinding | **未來 checkpoint 已交付**（W9）：合約不再指名 panel，只釘住 pool 雜湊與一個**尚未產生**的 checkpoint 序號；panel 由該 checkpoint 的 root 推導，Hub 在強制結算時**重新推導**而非採信合約名單。`node/lib/panel.js` 為雙方共用規則，`demo.js` 斷言「合約時已知序號 < 種子序號」且實際 attester 全在推導結果內。commit-reveal 尚未交付 |
 | 7 | A⑤/C⑦ | Verifier 押金 vs 經手上限差 20 倍；金絲雀成本低估 40 倍 | 經手上限 ≤ 押金×3；金絲雀改分層抽樣並重編預算 |
 | 8 | B⑥ | 抽查率 0.13% 撐不起威懾宣稱 | 同上＋高風險對手方加權抽樣 |
 | 9 | C⑥ | 不對稱一致性與強制入帳互斥 | 強制入帳一律走序列化路徑（§2.2） |
@@ -133,6 +133,7 @@
 | 16 | **P2** | Hub 的 `receipt`／`task`／`forced_settlement` handler 對缺必要欄位的 frame 會丟例外。目前由 #13 的 frame 層 try/catch 接住並記錄為 `[wire] dropped frame`，但缺逐欄位驗證，錯誤訊息對送出方也不具指引性 | 未修。建議與 W1 schema v1 的欄位驗證一併實作 |
 | 17 | **P2** | Hub 帳本與 Agent 身分皆不持久化：帳本在記憶體、`export` 有出口無 import 入口，`agent.js` 每次啟動 `genIdentity()` 產生新 DID。任一邊重啟即歸零，且被棄置的負餘額身分會在帳上留下永不償還的洞（試點實測留下一筆 −10 CC） | 未修，屬 W10「帳本匯出重建」範圍。§2.2 Ledger 列已承諾「全部狀態可由公開簽署事件重建」，出口已具備，缺 import |
 | 18 | **P1** | `demo.js` 的發現檢查（#14 交付）是**同機驗證**：agent 與 Hub 在同一台機器上，只是經由區網位址連線。試點實測機器 2 用 `hubHost: "discover"` **無法**連上，改手填 IP 才成功——綠燈的檢查給了假保證。相關 commit `af5836a` 的描述「Verified on the real LAN: an agent with no IP and no port discovered 192.168.50.30 and registered」為錯誤陳述 | 未修。待判定是網路環境（Wi-Fi client isolation／不同介面／訪客網路阻擋 UDP 廣播）或 beacon 實作缺陷。無論哪者，該檢查須更名為「同機發現」，跨機發現需要真正的兩機自動化驗證才可宣稱 |
+| 24 | **P0** | 未來-checkpoint 抽選的 bootstrap 死鎖：週期 checkpoint 原本以 `if (chains.size)` 為條件，而 `chains` 只在第一筆結算後才有內容。全新網路若第一筆任務就要 quorum，種子 checkpoint 永不產生 → 無法驗收 → 沒有第一筆結算。`demo.js` 未踩到（第一筆是 `dsl-local`），只有 `demo-autonomous.js` 全 quorum 才暴露 | **已修**：無條件鑄造 checkpoint（空 heads 的 checkpoint 完全合法，root = hash of `{}`）|
 | 21 | **P0** | `agent.js` 的 `provide` 若沒有可解析的 adapter，得標後才在 `adapter.complete(null, ...)` 崩潰——而合約當時已雙簽，requester 只能等強制結算。同一個 await 在 async handler 內，**任何** adapter 錯誤（含真實端點回 500）都會變成 unhandled rejection 殺掉整個 agent | **已修**：無 adapter 則不武裝供給（不能執行者不得出價）；執行失敗改為記錄並標記合約 `failed`，不再毀掉進程 |
 | 22 | **P1** | `agent.js` 出價完全不檢查自己剩餘額度，可以賣出根本沒有的算力。模擬器 `collect_offers` 一直有 `remaining_quota < 1.0` 守門，node 端沒有——W8 的無人運行才暴露（額度模型存在但不約束供給側） | **已修**：出價前要求 `quota.remaining >= units`，得標時扣除；Console 新增 `sold_units` |
 | 23 | **P2** | 選標同價時以到達順序決勝（`bids.sort` 為穩定排序），使先啟動的 Agent 在同質價格市場中系統性勝出。三節點 demo 中最後啟動者永遠拿不到單，是啟動順序而非市場性質 | 未修。選標是 requester 自身職權（FR-012），先到先服務可辯護，但同質市場會產生贏者全拿。建議改為以 `sha256(contract_id + did)` 決勝（驗收 panel 抽選已用同一手法）|

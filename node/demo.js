@@ -10,6 +10,7 @@ const path = require('node:path');
 const { connect, verify, sha256, canon, net } = require('./lib/wire');
 const discovery = require('./lib/discovery');
 const strategy = require('./lib/strategy');
+const panelLib = require('./lib/panel');
 
 // Every port is derived from one offset so the demo can run alongside a live
 // pilot stack (which holds 47180 and the 47201 console) without colliding:
@@ -216,10 +217,26 @@ async function main() {
     !!forcedOk,
     forced && `B 被記 ${forced.receipt.postings.find((p) => p.account === forced.receipt.requester).amount_cc} CC，證據包離線可驗`);
 
-  check('FR-041/FR-044 Verifier 於合約時鎖定、attestation 機器可讀',
-    !!fEv && fEv.contract.verifiers.length === 3 &&
+  check('FR-041/FR-044 Verifier pool 於合約時釘住、attestation 機器可讀',
+    !!fEv && fEv.contract.verifier_pool.length === 3 &&
+    panelLib.poolHash(fEv.contract.verifier_pool) === fEv.contract.verifier_pool_hash &&
     fEv.attestations.every((a) => Array.isArray(a.attestation.failures)),
-    `panel of ${fEv?.contract.verifiers.length}, failures[] present`);
+    `pool of ${fEv?.contract.verifier_pool.length} 與 pinned hash 相符, failures[] present`);
+
+  // §4 #6: the seed must be a checkpoint that did not exist when the contract
+  // was signed, and the attesting panel must be exactly what that root
+  // selects — otherwise the requester could have fanned out to a panel of its
+  // choosing, or ground the contract id against a root it already knew.
+  const seedCp = fEv && checkpoints[fEv.contract.panel_seed_cp];
+  const derived = seedCp && new Set(panelLib.deriveDids(
+    fEv.contract.verifier_pool, fEv.contract.contract_id, seedCp.cp.root));
+  const attesters = fEv && new Set(fEv.attestations.map((a) => a.attestation.verifier));
+  check('§4 #6 抽選種子綁未來 checkpoint：種子序號 > 合約時已知序號，且實際 panel = 該 root 推導結果',
+    !!seedCp && !!derived &&
+    fEv.contract.verifier_lock.checkpoint_seq < fEv.contract.panel_seed_cp &&
+    [...attesters].every((v) => derived.has(v)) && attesters.size >= 2,
+    fEv && `合約時已知 #${fEv.contract.verifier_lock.checkpoint_seq} < 種子 ` +
+      `#${fEv.contract.panel_seed_cp}, ${attesters?.size} 位 attester 全在推導出的 panel 內`);
 
   const chainErr = verifyChains(chains, checkpoints, hub_pub);
   check('NFR-006 hash chain＋checkpoint：全鏈離線重驗通過',

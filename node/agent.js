@@ -21,6 +21,7 @@ const keystore = require('./lib/keystore');
 const discovery = require('./lib/discovery');
 const strategy = require('./lib/strategy');
 const demand = require('./lib/demand');
+const panelLib = require('./lib/panel');
 const adapter = require('./adapter');
 
 const cfg = process.env.AGENT_CONFIG
@@ -65,12 +66,20 @@ function refreshMode(why) {
         : ''));
 }
 
-function panelFor(contractId) { // seeded, checkpoint-locked (FR-041)
-  const { verifiers, lock } = verifierDir;
-  return [...verifiers]
-    .sort((a, b) => sha256(lock.root + contractId + a.did)
-      .localeCompare(sha256(lock.root + contractId + b.did)))
-    .slice(0, 3);
+// Roots of checkpoints as the hub mints them. A panel's seed is a checkpoint
+// that does not exist when the contract is signed (§4 #6), so selection waits
+// for it to arrive.
+const cpRoots = new Map();      // seq -> root
+const pendingPanel = new Map(); // contract_id -> () => void
+
+// FR-041 with the §2.2 fix: the pool is pinned at contract time, the
+// selection is deferred to a future checkpoint's root.
+function panelFor(contractId, ctx) {
+  const root = cpRoots.get(ctx.contract.panel_seed_cp);
+  if (root === undefined) return null;
+  const dids = new Set(panelLib.deriveDids(
+    ctx.contract.verifier_pool, contractId, root));
+  return ctx.pool.filter((v) => dids.has(v.did));
 }
 
 function requestSettlement(contractId, role, provider, output) {
@@ -88,6 +97,24 @@ function requestSettlement(contractId, role, provider, output) {
 // hubHost: "discover" opts into the UDP beacon (lib/discovery.js) instead of
 // a hand-copied IP. Any other value, including absent, keeps the previous
 // behaviour exactly — existing configs and demo.js are unaffected.
+// Send the verify request to each selected verifier. The payload is sealed
+// per verifier, so the panel can check the work without the hub or anyone
+// else seeing it (NFR-005).
+function fanOut(delivery, ctx, chosen) {
+  for (const v of chosen) {
+    const request = {
+      contract_id: delivery.contract_id, requester: id.did,
+      provider: delivery.provider, output: delivery.output,
+      asserts: ctx.asserts,
+      asserts_hash: ctx.contract.acceptance.asserts_hash,
+      panel_seed_cp: ctx.contract.panel_seed_cp,
+      payload_box: seal(v.box_pub, ctx.payload),
+    };
+    hub.send({ type: 'verify_request', to: v.did, request,
+               sig: sign(id.privateKey, request), pub: id.pub });
+  }
+}
+
 const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
   switch (msg.type) {
     case 'registered':
@@ -102,6 +129,18 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
       break;
 
     case 'verifiers': verifierDir = msg; break;
+
+    case 'checkpoint': {
+      cpRoots.set(msg.cp.seq, msg.cp.root);
+      for (const [cid, release] of [...pendingPanel]) {
+        const ctx = asRequester.get(cid);
+        if (ctx && cpRoots.has(ctx.contract.panel_seed_cp)) {
+          pendingPanel.delete(cid);
+          release();
+        }
+      }
+      break;
+    }
 
     case 'task': {
       if (!providing) break;
@@ -149,7 +188,8 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
           +((console_.quota.soldUnits || 0) + soldUnits).toFixed(3);
       }
       log(`awarded ${c.contract_id} @ ${c.price_cc} CC (contract dual-signed, ` +
-          `panel ${c.verifiers.length} verifiers) — executing locally` +
+          `pool ${(c.verifier_pool || []).length}, panel seeded from ` +
+          `checkpoint #${c.panel_seed_cp}) — executing locally` +
           (soldUnits ? `, ${soldUnits}u quota spent` : ''));
       let output;
       try {
@@ -197,18 +237,21 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
         if (!pass) { log(`REJECTED ${d.contract_id}: ${JSON.stringify(failures)}`); break; }
         log(`verified ${d.contract_id} via local DSL → settling`);
         requestSettlement(d.contract_id, 'requester', d.provider, d.output);
-      } else { // judge-quorum: fan out to the contract-locked panel
-        log(`delivery on ${d.contract_id} → dispatching to verifier panel`);
-        for (const v of ctx.panel) {
-          const request = {
-            contract_id: d.contract_id, requester: id.did, provider: d.provider,
-            output: d.output, asserts: ctx.asserts,
-            asserts_hash: ctx.contract.acceptance.asserts_hash,
-            payload_box: seal(v.box_pub, ctx.payload),
-          };
-          hub.send({ type: 'verify_request', to: v.did, request,
-                     sig: sign(id.privateKey, request), pub: id.pub });
-        }
+      } else { // judge-quorum: fan out to the future-seeded panel
+        const dispatch = () => {
+          const chosen = panelFor(d.contract_id, ctx);
+          if (!chosen) { // still no seed; the checkpoint handler will retry
+            pendingPanel.set(d.contract_id, dispatch);
+            log(`delivery on ${d.contract_id} → waiting for seed ` +
+                `checkpoint #${ctx.contract.panel_seed_cp} before selecting a panel`);
+            return;
+          }
+          ctx.panel = chosen;
+          log(`delivery on ${d.contract_id} → panel selected from checkpoint ` +
+              `#${ctx.contract.panel_seed_cp}: ${chosen.length} verifiers`);
+          fanOut(d, ctx, chosen);
+        };
+        dispatch();
       }
       break;
     }
@@ -234,7 +277,13 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
         }
       }
       if (provCtx) { // provider side: arm forced settlement (T-05)
-        if (!provCtx.contract.verifiers.includes(a.verifier)) break;
+        // The panel is no longer on the contract, so check membership against
+        // the same future-seeded derivation the hub will re-run. Without the
+        // seed root yet, hold the attestation: the hub would reject it anyway.
+        const seedRoot = cpRoots.get(provCtx.contract.panel_seed_cp);
+        if (seedRoot === undefined) break;
+        if (!panelLib.deriveDids(provCtx.contract.verifier_pool,
+              a.contract_id, seedRoot).includes(a.verifier)) break;
         if (!verify(msg.pub, a, msg.sig)) break;
         provCtx.attest.push({ attestation: a, sig: msg.sig, pub: msg.pub });
         const passes = provCtx.attest.filter((x) => x.attestation.verdict === 'PASS').length;
@@ -445,14 +494,23 @@ function postTask(post) {
         bids.sort((a, b) => a.price_cc - b.price_cc);
         const win = bids[0];
         const contractId = `c-${task.task_id}`;
-        const panel = post.acceptance === 'judge-quorum' ? panelFor(contractId) : [];
+        const pool = post.acceptance === 'judge-quorum'
+          ? [...(verifierDir.verifiers || [])] : [];
+        // §4 #6: the panel is not named here. The pool is pinned and the seed
+        // is a checkpoint that does not exist yet, so grinding the contract id
+        // would mean predicting a root that later settlements determine.
+        const seedCp = verifierDir.next_checkpoint_seq != null
+          ? verifierDir.next_checkpoint_seq
+          : (verifierDir.lock ? verifierDir.lock.checkpoint_seq + 1 : 0);
         const contract = {
           contract_id: contractId,
           requester: id.did, provider: win.provider, price_cc: win.price_cc,
           payload_box: seal(win.box_pub, post.payload),
           acceptance: task.acceptance,
           asserts: post.asserts,
-          verifiers: panel.map((v) => v.did),
+          verifier_pool: pool.map((v) => v.did),
+          verifier_pool_hash: panelLib.poolHash(pool.map((v) => v.did)),
+          panel_seed_cp: seedCp,
           verifier_lock: verifierDir.lock,
         };
         const pre_auth = { contract_id: contractId, requester: id.did,
@@ -460,11 +518,14 @@ function postTask(post) {
                            condition: 'quorum-accepted' };
         asRequester.set(contractId, {
           contract, contract_sigs: {}, payload: post.payload,
-          asserts: post.asserts, panel, providerPub: win.pub || null,
-          attest: [], done: false,
+          asserts: post.asserts, pool, panel: null,
+          providerPub: win.pub || null, attest: [], done: false,
         });
         log(`selected ${win.provider} @ ${win.price_cc} CC (${bids.length} bids)` +
-            (panel.length ? `, panel locked: ${panel.length} verifiers` : ''));
+            (pool.length
+              ? `, pool of ${pool.length} pinned, panel seeded from future ` +
+                `checkpoint #${seedCp}`
+              : ''));
         hub.send({ type: 'contract', to: win.provider, contract,
                    sig: sign(id.privateKey, contract), pub: id.pub,
                    pre_auth, pre_auth_sig: sign(id.privateKey, pre_auth) });

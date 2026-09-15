@@ -18,6 +18,7 @@ const { attachLineReader, sendLine, verify, sha256, canon,
         genIdentity, sign, net } = require('./lib/wire');
 const eeff = require('./lib/eeff');
 const discovery = require('./lib/discovery');
+const panel = require('./lib/panel');
 
 const PORT = Number(process.env.HUB_PORT || 47180);
 const BIND = process.env.HUB_BIND || '127.0.0.1'; // 0.0.0.0 for LAN pilots
@@ -76,7 +77,11 @@ function makeCheckpoint() {
     root: sha256(canon(heads)),
     receipts_count: receipts.length,
   };
-  checkpoints.push({ cp, sig: sign(hubId.privateKey, cp) });
+  const entry = { cp, sig: sign(hubId.privateKey, cp) };
+  checkpoints.push(entry);
+  // Panels are seeded from a checkpoint that does not exist yet (§4 #6), so
+  // every agent needs to learn roots as they are minted.
+  broadcast({ type: 'checkpoint', cp, sig: entry.sig });
   return cp;
 }
 
@@ -174,12 +179,23 @@ function handleForced(msg, sock) {
       !verify(req.pub, pre_auth, pre_auth_sig)) {
     return fail(sock, 'forced: invalid pre_authorization', ref);
   }
-  // 3. 2-of-3 PASS attestations from the contract-locked panel (FR-041)
+  // 3. 2-of-3 PASS attestations from the panel the seed checkpoint selects.
+  // Re-derived here, not read off the contract: otherwise a requester could
+  // fan out to a panel of its choosing and have the attestations accepted.
+  const seedEntry = checkpoints[contract.panel_seed_cp];
+  if (!seedEntry) {
+    return fail(sock, `forced: seed checkpoint #${contract.panel_seed_cp} not minted yet`, ref);
+  }
+  if (panel.poolHash(contract.verifier_pool) !== contract.verifier_pool_hash) {
+    return fail(sock, 'forced: verifier pool does not match its pinned hash', ref);
+  }
+  const expected = new Set(panel.deriveDids(
+    contract.verifier_pool, ref, seedEntry.cp.root));
   const passers = new Set();
   for (const { attestation, sig } of attestations) {
     const v = agents.get(attestation.verifier);
     if (!v || v.role !== 'verifier') continue;
-    if (!contract.verifiers.includes(attestation.verifier)) continue;
+    if (!expected.has(attestation.verifier)) continue;
     if (attestation.contract_id !== ref || attestation.verdict !== 'PASS') continue;
     if (verify(v.pub, attestation, sig)) passers.add(attestation.verifier);
   }
@@ -196,10 +212,22 @@ function handleForced(msg, sock) {
   }
   if (!validateSchedule(receipt, sock, ref)) return;
   console.log(`[hub] FORCED settlement ${ref}: requester refused, ` +
-    `pre_auth + ${passers.size}-of-${contract.verifiers.length} quorum stands in`);
+    `pre_auth + ${passers.size}-of-${expected.size} quorum stands in ` +
+    `(panel seeded from checkpoint #${contract.panel_seed_cp})`);
   applySettlement('forced', receipt,
     { requester: `pre_auth:${pre_auth_sig}`, provider: provider_sig }, evidence);
 }
+
+// §2.2 calls for a periodic public checkpoint, and a future-seeded panel
+// needs one: with checkpoints minted only on settlement, a contract awaiting
+// verification in a quiet network would wait for a seed that never arrives.
+const CHECKPOINT_MS = Number(process.env.HUB_CHECKPOINT_MS || 1200);
+// Unconditionally, including before the first settlement. An empty-heads
+// checkpoint is well-formed (root = hash of {}), and gating on chains.size
+// deadlocked a fresh network: the first contract's panel seed is a checkpoint
+// that only a settlement would have minted, and that settlement needed the
+// panel. A network whose first task wanted a quorum could never start.
+setInterval(makeCheckpoint, CHECKPOINT_MS).unref();
 
 // --- server ---------------------------------------------------------------
 const server = net.createServer((sock) => {
@@ -240,6 +268,9 @@ const server = net.createServer((sock) => {
             .map(([did, a]) => ({ did, pub: a.pub, box_pub: a.boxPub })),
           lock: { checkpoint_seq: latest ? latest.cp.seq : -1,
                   root: latest ? latest.cp.root : sha256('genesis') },
+          // The seq a contract written now must seed its panel from: one that
+          // has not been minted, so its root cannot be ground against.
+          next_checkpoint_seq: checkpoints.length,
         });
         break;
       }
