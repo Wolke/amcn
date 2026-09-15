@@ -204,7 +204,7 @@ $env:AMCN_PROVIDER_KEY='sk-test-anything'
 node agent.js configs\provider.json
 ```
 
-**`hubHost` 請用手填 IP，不要用 `"discover"`**。跨機 UDP 發現尚未修（§4 #18），而 Windows 防火牆預設擋入向 UDP，只會多一個變數。
+**`hubHost` 兩種都可用**。跨機 UDP 發現實測可行（§4 #18 已撤銷），但 Windows 防火牆可能擋入向 UDP 47179，第一次執行時若跳出提示請允許。不確定時先用手填 IP——它不依賴廣播；要確認發現能否使用就跑 `node discovery-probe.js resolve`。
 
 **不需要安裝任何大語言模型**。試點跑 `adapter.baseUrl: null` 的確定性 mock，沒有 API 呼叫也沒有費用；`sk-test-anything` 只是佔位字串，唯一要求是非空（因為 adapter 是 key-gated，那個 gate 本身就是 P-02 的示範）。接上真實模型反而會讓 `sha256_eq` 驗收失敗，見第 5 節。
 
