@@ -61,6 +61,8 @@ class Market:
     def __init__(self, ledger: Ledger, rng: random.Random,
                  risk_thin: float = 0.03, risk_base: float = 0.01,
                  starter_cc: float = 20.0,
+                 repay_discount: float = 0.35,
+                 band_low_cl_frac: float | None = None,
                  trace: str | None = None) -> None:
         self.ledger = ledger
         self.rng = rng
@@ -70,6 +72,15 @@ class Market:
         self.risk_thin = risk_thin
         self.risk_base = risk_base
         self.starter_cc = starter_cc
+        # UC-02 repayment priority. The 0.35 default is what this simulator has
+        # always used; proposal-B §8.4 says 10% and the node prototype shipped
+        # 10%, so the two disagree — amcn_sim.sweep_repay exists to settle it
+        # from the economics rather than from whichever document was read last.
+        self.repay_discount = repay_discount
+        # When set, the band's low bound is this fraction of the live credit
+        # line (§8.4, and what node/lib/strategy.js computes) instead of the
+        # agent's fixed target_balance_low.
+        self.band_low_cl_frac = band_low_cl_frac
         self.trace = trace              # agent id whose diary we record
         self.trace_log: list[str] = []
 
@@ -119,6 +130,13 @@ class Market:
         self.stats.posted += 1
 
     # --- supply side ----------------------------------------------------
+    def band_low(self, a: Agent, tick: int,
+                 peers: dict[str, Agent] | None = None) -> float:
+        if self.band_low_cl_frac is None:
+            return a.target_balance_low
+        return self.band_low_cl_frac * credit_limit(
+            a, tick, peers, self.starter_cc)
+
     def collect_offers(self, agents: dict[str, Agent], tick: int) -> list[Offer]:
         offers = []
         for a in agents.values():
@@ -126,7 +144,7 @@ class Market:
                 continue
             bal = self.ledger.balance(a.aid)
             surplus = a.projected_surplus(tick)
-            repaying = bal < a.target_balance_low  # UC-02: work off debt
+            repaying = bal < self.band_low(a, tick, agents)  # UC-02
             if surplus < 1.0 and not repaying:
                 continue
             if bal >= a.target_balance_high and not repaying:
@@ -136,7 +154,7 @@ class Market:
             expiry_urgency = max(0.0, 1.0 - a.days_to_expiry(tick) / a.cycle_days)
             discount = 0.45 * waste_risk * expiry_urgency
             if repaying:
-                discount = max(discount, 0.35)
+                discount = max(discount, self.repay_discount)
             ask = max(REF_PRICE * (1 + a.min_margin) * (1 - discount),
                       REF_PRICE * 0.4)
             units = min(a.max_supply_per_tick,

@@ -26,6 +26,7 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         scenario: str = "baseline", out_dir: str | None = None,
         starter_cc: float = 20.0, risk_thin: float = 0.03,
         risk_base: float = 0.01, deadbeat_frac: float | None = None,
+        repay_discount: float = 0.35, band_low_cl_frac: float | None = None,
         trace: str | None = None) -> Report:
     sc_deadbeat, washer_frac, expiry_cliff = SCENARIOS[scenario]
     if deadbeat_frac is None:
@@ -41,7 +42,8 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                      None)
     market = Market(ledger, random.Random(seed + 1),
                     risk_thin=risk_thin, risk_base=risk_base,
-                    starter_cc=starter_cc, trace=trace)
+                    starter_cc=starter_cc, repay_discount=repay_discount,
+                    band_low_cl_frac=band_low_cl_frac, trace=trace)
     ticks = days * TICKS_PER_DAY
     report = Report(days=days, n_agents=n_agents)
 
@@ -68,7 +70,8 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                                      f"units，額度回到 {a.quota_capacity:.0f}；"
                                      f"餘額 {ledger.balance(a.aid):+.1f} CC"
                                      + ("（開始還債供應, UC-02）"
-                                        if ledger.balance(a.aid) < a.target_balance_low else ""))
+                                        if ledger.balance(a.aid)
+                                        < market.band_low(a, tick, agents) else ""))
                 a.remaining_quota = a.quota_capacity  # unused quota expires
             demand = a.draw_demand(tick)
             if demand <= a.remaining_quota:
