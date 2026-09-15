@@ -68,6 +68,8 @@ class Market:
                  verifier_rate: float = 0.04,
                  canary_rate: float = 0.03,
                  slash_frac: float = 0.10,
+                 slash_threshold: float = 0.25,
+                 slash_min_samples: int = 5,
                  trace: str | None = None) -> None:
         self.ledger = ledger
         self.rng = rng
@@ -95,6 +97,16 @@ class Market:
         self.verifier_rate = verifier_rate
         self.canary_rate = canary_rate
         self.slash_frac = slash_frac
+        # §4 #27: slashing on every canary failure taxes ordinary competence
+        # error — with competence 0.94-0.995 a wrong PASS on known-bad work is
+        # a certainty over enough samples, and a zero-cheater population still
+        # lost 4.6% of verifier income. A lazy verifier fails 50-100% of the
+        # canaries it sees while an honest one fails under ~6%, so a rate
+        # threshold over a minimum sample separates them cleanly and a single
+        # unlucky verdict costs nothing.
+        self.slash_threshold = slash_threshold
+        self.slash_min_samples = slash_min_samples
+        self.honest_error_forgiven = 0
         self.canary_seq = 0
         self.canary_caught = 0
         self.canary_missed = 0
@@ -255,13 +267,19 @@ class Market:
             v.canary_seen += 1
             if verdict:  # voted PASS on known-bad work
                 v.canary_failed += 1
+                self.canary_caught += 1
+                rate = v.canary_failed / v.canary_seen
+                if (v.canary_seen < self.slash_min_samples
+                        or rate < self.slash_threshold):
+                    # Below the evidence bar: recorded, not punished.
+                    self.honest_error_forgiven += 1
+                    continue
                 amount = min(v.stake_cc * self.slash_frac,
                              max(self.ledger.balance(v.vid), 0.0))
                 if amount > 0:
                     self.ledger.slash(tick, cid, v.vid, amount)
                     v.slashed_cc += amount
                     self.slashed_cc += amount
-                self.canary_caught += 1
             else:
                 self.canary_missed += 1
 

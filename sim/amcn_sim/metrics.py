@@ -50,6 +50,7 @@ class Report:
     canary_caught: int = 0
     canary_missed: int = 0
     slashed_cc: float = 0.0
+    honest_error_forgiven: int = 0  # canary failures under the evidence bar
     lazy_detect_rate: float | None = None  # slashes / lazy-verifier canary votes
     max_exposure_ratio: float | None = None  # single contract / stake (§4 #7)
     unmet_demand_units: float = 0.0
@@ -194,6 +195,7 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
     report.canary_caught = market.canary_caught
     report.canary_missed = market.canary_missed
     report.slashed_cc = market.slashed_cc
+    report.honest_error_forgiven = getattr(market, 'honest_error_forgiven', 0)
 
     return report
 def render_text(r: Report, scenario: str) -> str:
@@ -220,6 +222,7 @@ def render_text(r: Report, scenario: str) -> str:
         f"金絲雀支出 / 佔結算量           : {f(r.canary_spend_cc)} CC / {f(r.canary_share_of_volume*100)}%",
         f"金絲雀抓到 / 漏掉               : {r.canary_caught} / {r.canary_missed}",
         f"沒收押金總額                    : {f(r.slashed_cc)} CC",
+        f"未達證據門檻而寬恕的失敗        : {r.honest_error_forgiven} 次",
         f"偷懶者被抓率                    : {'n/a' if r.lazy_detect_rate is None else f(r.lazy_detect_rate*100)+'%'}",
         f"單筆最大經手/押金比 (§4 #7 ≤3)  : {'n/a' if r.max_exposure_ratio is None else f(r.max_exposure_ratio)}",
         f"還債週期 平均/中位            : {f(r.mean_debt_cycle_days,1)} / {f(r.median_debt_cycle_days,1)} 天",
