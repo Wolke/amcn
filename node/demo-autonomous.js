@@ -286,10 +286,28 @@ async function main() {
 
   // §20-4: conservation and reconstruction, same as the scripted demo.
   const sum = Object.values(balances).reduce((s, v) => s + v, 0);
+  // Same derivation as demo.js: receipts plus the published rules. Stake
+  // escrow (§4 #28) is a deterministic function of each receipt's verifier
+  // postings, so a replay has to apply it too — I fixed demo.js first and
+  // left this file replaying receipts alone, which reported a broken ledger
+  // when the ledger was fine.
+  const STAKE_TARGET_CC = 5, STAKE_ESCROW_FRAC = 0.5;
   const rebuilt = {};
+  const heldStake = {};
+  const addR = (acct, amt) => {
+    rebuilt[acct] = +((rebuilt[acct] || 0) + amt).toFixed(6);
+  };
   for (const r of receipts) {
+    for (const p of r.receipt.postings) addR(p.account, p.amount_cc);
     for (const p of r.receipt.postings) {
-      rebuilt[p.account] = +((rebuilt[p.account] || 0) + p.amount_cc).toFixed(6);
+      if (!(r.receipt.verifier_pool || []).includes(p.account) || p.amount_cc <= 0) continue;
+      const room = +(STAKE_TARGET_CC - (heldStake[p.account] || 0)).toFixed(4);
+      if (room <= 0) continue;
+      const take = +Math.min(room, p.amount_cc * STAKE_ESCROW_FRAC).toFixed(4);
+      if (take <= 0) continue;
+      heldStake[p.account] = +((heldStake[p.account] || 0) + take).toFixed(4);
+      addR(p.account, -take);
+      addR('protocol:stake', take);
     }
   }
   check('§20-4 Σ=0 且收據重建 = Hub 帳',
