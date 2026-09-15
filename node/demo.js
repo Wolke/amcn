@@ -7,7 +7,8 @@
 'use strict';
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { connect, verify, sha256, canon, net } = require('./lib/wire');
+const { connect, verify, sha256, canon, net, PROTOCOL_VERSION } =
+  require('./lib/wire');
 const discovery = require('./lib/discovery');
 const strategy = require('./lib/strategy');
 const panelLib = require('./lib/panel');
@@ -30,12 +31,17 @@ const PAYLOAD_3 = 'classify: is this task spam? return JSON verdict';
 
 // Frame shapes that used to crash the hub: bad DER pubkey, non-JSON, wrong
 // field types, and handler-reachable frames with required fields missing.
+// Version-stamped on purpose: without `v` the reader rejects them at the
+// version gate (§4 #33) and the handlers — the thing this gate exists to
+// protect — are never reached, quietly turning the DoS test into a test of
+// the version check. One unversioned frame is kept to cover that path too.
 const JUNK_FRAMES = [
-  '{"type":"register","did":"did:demo:attacker","pub":"AAAA","box_pub":"AAAA","sig":"AAAA"}',
+  `{"v":${PROTOCOL_VERSION},"type":"register","did":"did:demo:attacker","pub":"AAAA","box_pub":"AAAA","sig":"AAAA"}`,
   'not json at all',
-  '{"type":"register","did":"x","pub":null,"sig":12345}',
-  '{"type":"receipt"}',
-  '{"type":"forced_settlement"}',
+  `{"v":${PROTOCOL_VERSION},"type":"register","did":"x","pub":null,"sig":12345}`,
+  `{"v":${PROTOCOL_VERSION},"type":"receipt"}`,
+  `{"v":${PROTOCOL_VERSION},"type":"forced_settlement"}`,
+  '{"v":99,"type":"register","did":"y","pub":"AAAA","sig":"AAAA"}',
 ];
 
 const results = [];
@@ -164,6 +170,19 @@ async function main() {
     const ids = ex.receipts.map((r) => r.receipt.contract_id);
     return new Set(ids).size === ids.length;
   })();
+
+  // §4 #33: a wrong-version frame must be refused, and a right-version one
+  // must still work. Mixed versions used to crash an agent mid-contract
+  // rather than fail cleanly.
+  const askExport = (version, ms) => new Promise((resolve) => {
+    const t = setTimeout(() => { c.sock.destroy(); resolve(false); }, ms);
+    const c = connect(PORT, (m) => {
+      if (m.type === 'ledger_export') { clearTimeout(t); c.sock.destroy(); resolve(true); }
+    });
+    c.sock.write(JSON.stringify({ v: version, type: 'export' }) + '\n');
+  });
+  const wrongVersionRefused = !(await askExport(99, 1500));
+  const rightVersionWorks = await askExport(PROTOCOL_VERSION, 2500);
 
   // Regression gate: a malformed frame from any LAN peer must not be able to
   // kill the hub. It could — createPublicKey() throws on bad DER and the throw
@@ -356,6 +375,10 @@ async function main() {
   check('UDP 發現（同機）：找到 Hub 且錯誤的 pin 被拒絕；跨機未驗證，見 §4 #18',
     !!beacon && beacon.port === PORT && beacon.pub === hub_pub && wrongPin === null,
     beacon ? `beacon → ${beacon.host}:${beacon.port} ${beacon.did}, wrong pin rejected` : 'no beacon heard');
+
+  check(`§4 #33 協議版本閘門：v99 的請求無回應、v${PROTOCOL_VERSION} 正常回應`,
+    wrongVersionRefused && rightVersionWorks,
+    `wrong version refused: ${wrongVersionRefused}, current version served: ${rightVersionWorks}`);
 
   check('畸形 frame 不能打掉 Hub（§16 區網可用性回歸閘門）', hubSurvived,
     `${JUNK_FRAMES.length} 類畸形 frame 後 Hub 仍正常回應 export`);

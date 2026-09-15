@@ -14,7 +14,7 @@
 // either two receipt signatures or contract+pre_auth+quorum evidence,
 // all verifiable offline from the export.
 'use strict';
-const { attachLineReader, sendLine, verify, sha256, canon,
+const { attachLineReader, sendLine, verify, sha256, canon, PROTOCOL_VERSION,
         genIdentity, sign, net } = require('./lib/wire');
 const eeff = require('./lib/eeff');
 const discovery = require('./lib/discovery');
@@ -409,7 +409,8 @@ server.on('error', (err) => {
 
 server.listen(PORT, BIND, () => {
   console.log(
-    `[hub] listening on ${BIND}:${PORT} — starter CL ${eeff.STARTER_CC}, fee ${eeff.FEE_RATE * 100}%, ` +
+    `[hub] listening on ${BIND}:${PORT} — protocol v${PROTOCOL_VERSION}, ` +
+    `starter CL ${eeff.STARTER_CC}, fee ${eeff.FEE_RATE * 100}%, ` +
     `risk ${eeff.RISK_THIN * 100}%/${eeff.RISK_BASE * 100}%, hash-chained + checkpointed`);
   if (process.env.HUB_BEACON === '0') {
     console.log('[hub] discovery beacon disabled (HUB_BEACON=0)');

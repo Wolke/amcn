@@ -46,6 +46,18 @@ const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const hmac = (key, s) =>
   crypto.createHmac('sha256', key).update(s).digest('hex').slice(0, 16);
 
+// --- protocol version -------------------------------------------------
+// §4 #33 / NFR-004. Carried on the message envelope, not inside signed
+// bodies: receipt/contract/pre_auth signatures are computed over those exact
+// objects, so adding a field to them would invalidate every signature and
+// force both parties to agree on placement. The envelope is unsigned relay
+// metadata, which is what a version negotiation needs anyway.
+//
+// A mismatch used to be a crash: a pre-W9 provider read c.verifiers.length on
+// a W9 contract that no longer had the field and died mid-contract, taking
+// the requester with it. Now it is a logged rejection.
+const PROTOCOL_VERSION = 1;
+
 // --- TCP JSON-lines ---------------------------------------------------
 // A peer that never sends '\n' would otherwise grow buf without bound.
 const MAX_LINE = 16 * 1024 * 1024;
@@ -72,6 +84,14 @@ function attachLineReader(sock, onMsg, onRaw) {
       try { if (onRaw) onRaw(line); } catch { /* audit log must not break the reader */ }
       let msg;
       try { msg = JSON.parse(line); } catch { continue; }
+      // Refuse before a handler can misread a shape it does not know. An
+      // absent v means a node older than versioning itself.
+      if (msg && msg.v !== PROTOCOL_VERSION) {
+        console.error(`[wire] rejected ${msg.type || 'frame'}: protocol v` +
+          `${msg.v === undefined ? '(none)' : msg.v} — this node speaks v` +
+          `${PROTOCOL_VERSION}. Upgrade every machine, not one of them.`);
+        continue;
+      }
       // Handlers parse untrusted frames; isolate a throw to this one frame
       // so a malformed message degrades to "ignored", not "network down".
       try {
@@ -98,7 +118,9 @@ function attachLineReader(sock, onMsg, onRaw) {
 
 function sendLine(sock, obj) {
   if (!sock || sock.destroyed) return false;
-  sock.write(JSON.stringify(obj) + '\n');
+  // Stamped here so no call site can forget it.
+  sock.write(JSON.stringify(
+    obj && obj.v === undefined ? { v: PROTOCOL_VERSION, ...obj } : obj) + '\n');
   return true;
 }
 
@@ -128,4 +150,5 @@ function connect(port, onMsg, host = '127.0.0.1') {
 module.exports = {
   genIdentity, canon, sign, verify, sha256, hmac,
   attachLineReader, sendLine, connect, connectLazy, net,
+  PROTOCOL_VERSION,
 };

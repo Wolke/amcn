@@ -14,8 +14,8 @@
 //            acceptance: 'dsl-local'|'judge-quorum', asserts:[...]}] }
 'use strict';
 const http = require('node:http');
-const { genIdentity, sign, verify, sha256, canon, connect, connectLazy } =
-  require('./lib/wire');
+const { genIdentity, sign, verify, sha256, canon, connect, connectLazy,
+        PROTOCOL_VERSION } = require('./lib/wire');
 const { genBoxKeys, seal, open } = require('./lib/e2e');
 const { runAsserts, assertsHash } = require('./lib/dsl');
 const keystore = require('./lib/keystore');
@@ -490,7 +490,7 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
 
 const regBody = { did: id.did, pub: id.pub, box_pub: box.boxPub };
 hub.send({ type: 'register', ...regBody, sig: sign(id.privateKey, regBody) });
-console.log(`DID ${cfg.name} ${id.did}`);
+console.log(`DID ${cfg.name} ${id.did} (protocol v${PROTOCOL_VERSION})`);
 
 // minimal Owner Console (§9.9 / FR-081): GET /status for state,
 // POST /post to manually publish a task (two-machine pilots).
