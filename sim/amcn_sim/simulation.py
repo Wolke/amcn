@@ -8,7 +8,7 @@ import random
 from pathlib import Path
 
 from .agents import (DEADBEAT, TICKS_PER_DAY, WASHER, Agent, DebtEpisode,
-                     build_population, credit_limit)
+                     build_population, build_verifiers, credit_limit)
 from .ledger import Ledger
 from .market import Market
 from .metrics import DailySnapshot, Report, finalize, median_price_in, render_text
@@ -27,6 +27,9 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         starter_cc: float = 20.0, risk_thin: float = 0.03,
         risk_base: float = 0.01, deadbeat_frac: float | None = None,
         repay_discount: float = 0.35, band_low_cl_frac: float | None = -0.15,
+        n_verifiers: int = 9, verifier_rate: float = 0.04,
+        canary_rate: float = 0.03, verifier_lazy_frac: float = 0.0,
+        verifier_stake_cc: float = 50.0,
         trace: str | None = None) -> Report:
     sc_deadbeat, washer_frac, expiry_cliff = SCENARIOS[scenario]
     if deadbeat_frac is None:
@@ -40,10 +43,15 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                       if a.behavior == "honest"
                       and a.mean_daily_demand * a.cycle_days > a.quota_capacity),
                      None)
+    verifiers = build_verifiers(n_verifiers, seed,
+                                lazy_frac=verifier_lazy_frac,
+                                stake_cc=verifier_stake_cc)
     market = Market(ledger, random.Random(seed + 1),
                     risk_thin=risk_thin, risk_base=risk_base,
                     starter_cc=starter_cc, repay_discount=repay_discount,
-                    band_low_cl_frac=band_low_cl_frac, trace=trace)
+                    band_low_cl_frac=band_low_cl_frac,
+                    verifiers=verifiers, verifier_rate=verifier_rate,
+                    canary_rate=canary_rate, trace=trace)
     ticks = days * TICKS_PER_DAY
     report = Report(days=days, n_agents=n_agents)
 

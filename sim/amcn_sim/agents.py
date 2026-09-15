@@ -24,6 +24,56 @@ TICKS_PER_DAY = 24  # 1 tick = 1 hour
 
 
 @dataclass
+class Verifier:
+    """A staked verification node (proposal-C §7, final-architecture §2.2).
+
+    The node prototype has had verifiers since Phase 1, but this simulator
+    did not, which is why the 4% verifier fee it ships has no GATE-0
+    evidence behind it (§4 #25). Modelled here so the rate, the stake floor
+    and the canary rate can be swept instead of asserted.
+    """
+
+    vid: str
+    stake_cc: float = 50.0
+    # Probability of reaching the correct verdict when it actually checks.
+    competence: float = 0.98
+    # A lazy verifier skips the work and votes with whatever it expects the
+    # majority to say. Commit-reveal is what makes that a gamble rather than
+    # a free ride, so here it means "votes without checking".
+    lazy_prob: float = 0.0
+    earned_cc: float = 0.0
+    assignments: int = 0
+    canary_seen: int = 0
+    canary_failed: int = 0
+    slashed_cc: float = 0.0
+    online: bool = True
+
+    def exposure_ratio(self, contract_price: float) -> float:
+        """§4 #7: single-contract exposure against stake. The integrated
+        ruling caps handled value at stake x 3."""
+        return contract_price / self.stake_cc if self.stake_cc else float("inf")
+
+
+def build_verifiers(n: int, seed: int, lazy_frac: float = 0.0,
+                    stake_cc: float = 50.0) -> list[Verifier]:
+    r = random.Random(seed + 9001)
+    out = []
+    n_lazy = int(n * lazy_frac)
+    for i in range(n):
+        out.append(Verifier(
+            vid=f"verifier:{i:04d}",
+            stake_cc=stake_cc * r.uniform(0.8, 1.6),
+            competence=r.uniform(0.94, 0.995),
+            lazy_prob=0.0,
+        ))
+    idx = list(range(n))
+    r.shuffle(idx)
+    for i in idx[:n_lazy]:
+        out[i].lazy_prob = r.uniform(0.5, 1.0)
+    return out
+
+
+@dataclass
 class DebtEpisode:
     start_tick: int
     end_tick: int | None = None  # None = still in debt

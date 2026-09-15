@@ -10,10 +10,11 @@ Simplifications vs the real protocol (documented, per SDD §19 Phase 0):
 
 from __future__ import annotations
 
+import hashlib
 import random
 from dataclasses import dataclass, field
 
-from .agents import Agent, credit_limit
+from .agents import Agent, Verifier, credit_limit
 from .ledger import Ledger
 
 REF_PRICE = 1.0          # CC per unit: public reference cost (SDD §14.2)
@@ -63,6 +64,10 @@ class Market:
                  starter_cc: float = 20.0,
                  repay_discount: float = 0.35,
                  band_low_cl_frac: float | None = -0.15,
+                 verifiers: list[Verifier] | None = None,
+                 verifier_rate: float = 0.04,
+                 canary_rate: float = 0.03,
+                 slash_frac: float = 0.10,
                  trace: str | None = None) -> None:
         self.ledger = ledger
         self.rng = rng
@@ -83,8 +88,60 @@ class Market:
         # (median debt cycle 33-40d). Set None to fall back to the agent's
         # fixed target_balance_low.
         self.band_low_cl_frac = band_low_cl_frac
+        # Verification market (§4 #25). An empty pool means every task settles
+        # on the deterministic path alone, which is what this simulator did
+        # before and what the `--no-verifiers` control run reproduces.
+        self.verifiers: list[Verifier] = verifiers or []
+        self.verifier_rate = verifier_rate
+        self.canary_rate = canary_rate
+        self.slash_frac = slash_frac
+        self.canary_seq = 0
+        self.canary_caught = 0
+        self.canary_missed = 0
+        self.canary_spend_cc = 0.0
+        self.verifier_fees_cc = 0.0
+        self.slashed_cc = 0.0
         self.trace = trace              # agent id whose diary we record
         self.trace_log: list[str] = []
+
+    # --- verification market -------------------------------------------
+    def panel_for(self, contract_id: str, seed: str, size: int = 3
+                  ) -> list[Verifier]:
+        """Same rule as node/lib/panel.js: sort the pool by
+        sha256(seed + contract_id + id) and take the first `size`. The seed is
+        a future checkpoint root in the protocol (§4 #6); here it stands in as
+        an opaque per-contract value the requester does not choose."""
+        live = [v for v in self.verifiers if v.online]
+        if len(live) < size:
+            return []
+        keyed = sorted(live, key=lambda v: hashlib.sha256(
+            (seed + contract_id + v.vid).encode()).hexdigest())
+        return keyed[:size]
+
+    def _verdicts(self, panel: list[Verifier], truth: bool,
+                  expected_majority: bool) -> list[bool]:
+        """A lazy verifier votes the expected majority without checking; an
+        honest one checks and is right with probability `competence`."""
+        out = []
+        for v in panel:
+            if self.rng.random() < v.lazy_prob:
+                out.append(expected_majority)
+            else:
+                out.append(truth if self.rng.random() < v.competence
+                           else not truth)
+        return out
+
+    def _pay_panel(self, panel: list[Verifier], price: float
+                   ) -> list[tuple[str, float]]:
+        if not panel:
+            return []
+        total = price * self.verifier_rate
+        each = total / len(panel)
+        for v in panel:
+            v.earned_cc += each
+            v.assignments += 1
+        self.verifier_fees_cc += total
+        return [(v.vid, each) for v in panel]
 
     def _risk_rate(self, a: Agent, tick: int) -> float:
         young = a.age_days(tick) < 30.0
@@ -165,8 +222,52 @@ class Market:
                 offers.append(Offer(a.aid, units, ask))
         return offers
 
+    def inject_canary(self, agents: dict[str, Agent], tick: int) -> None:
+        """Treasury posts a decoy with a known answer (proposal-C §7, 2-5% of
+        volume). A verifier that votes wrong on it is not merely unlucky —
+        the answer was known — so it is slashed. This is what gives a lazy
+        verifier a cost, and therefore what makes the fee rate priceable at
+        all (§4 #8's deterrence claim rests on it).
+        """
+        if not self.verifiers or self.rng.random() >= self.canary_rate:
+            return
+        candidates = [a for a in agents.values()
+                      if a.online and a.remaining_quota >= 2.0]
+        if not candidates:
+            return
+        provider = self.rng.choice(candidates)
+        self.canary_seq += 1
+        cid = f"canary{self.canary_seq:06d}"
+        units = 2.0
+        price = units * REF_PRICE
+        panel = self.panel_for(cid, f"cp{tick // 4}")
+        if not panel:
+            return
+        # The decoy is planted as bad work, so the correct verdict is FAIL.
+        # A lazy verifier voting the expected majority (PASS) is caught.
+        verdicts = self._verdicts(panel, truth=False, expected_majority=True)
+        provider.remaining_quota -= units
+        payouts = self._pay_panel(panel, price)
+        self.ledger.canary_spend(tick, cid, provider.aid, price,
+                                 verifier_payouts=payouts)
+        self.canary_spend_cc += price
+        for v, verdict in zip(panel, verdicts):
+            v.canary_seen += 1
+            if verdict:  # voted PASS on known-bad work
+                v.canary_failed += 1
+                amount = min(v.stake_cc * self.slash_frac,
+                             max(self.ledger.balance(v.vid), 0.0))
+                if amount > 0:
+                    self.ledger.slash(tick, cid, v.vid, amount)
+                    v.slashed_cc += amount
+                    self.slashed_cc += amount
+                self.canary_caught += 1
+            else:
+                self.canary_missed += 1
+
     # --- matching + execution -------------------------------------------
     def clear(self, agents: dict[str, Agent], tick: int) -> None:
+        self.inject_canary(agents, tick)
         offers = self.collect_offers(agents, tick)
         offers.sort(key=lambda o: o.ask_per_unit)
         by_provider = {o.provider: o for o in offers}
@@ -213,8 +314,16 @@ class Market:
         self.stats.matched += 1
         self.stats.wait_ticks.append(tick - task.posted_tick)
         provider.remaining_quota -= task.units
-        ok = (self.rng.random() < provider.reliability and
-              self.rng.random() < provider.quality)
+        truth = (self.rng.random() < provider.reliability and
+                 self.rng.random() < provider.quality)
+        # The panel decides what the network acts on, which is not always the
+        # truth — that gap is the whole point of pricing verification.
+        panel = self.panel_for(task.task_id, f"cp{tick // 4}")
+        if panel:
+            verdicts = self._verdicts(panel, truth, expected_majority=True)
+            ok = sum(verdicts) >= 2
+        else:
+            ok = truth
         if not ok:
             # verification failed: no settlement (FR-051), dispute recorded
             provider.tasks_failed += 1
@@ -225,8 +334,9 @@ class Market:
             return
         fee = price * FEE_RATE
         risk = price * self._risk_rate(requester, tick)
+        payouts = self._pay_panel(panel, price)
         self.ledger.settle(tick, task.task_id, requester.aid, provider.aid,
-                           price, fee, risk)
+                           price, fee, risk, verifier_payouts=payouts)
         provider.tasks_completed += 1
         provider.earned_cc += price - fee - risk
         requester.spent_cc += price

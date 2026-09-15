@@ -45,7 +45,10 @@ cd node && node demo-autonomous.js
 # 兩支 demo 都可用 DEMO_PORT_OFFSET=100 與跑中的試點並存
 
 # 還債政策參數掃描（折價 × band 定義 × 情境，約 10 分鐘）
-cd sim && python3 -m amcn_sim.sweep_repay
+cd sim && python3 -u -m amcn_sim.sweep_repay
+
+# 驗證市場掃描（費率 × 金絲雀率 × 偷懶比例，約 5 分鐘）
+cd sim && python3 -u -m amcn_sim.sweep_verifier
 ```
 
 注意：大規模模擬（>1,000 agents 或 --all-scenarios 全量）耗時較長，先與 Owner 確認再跑。

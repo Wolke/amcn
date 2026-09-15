@@ -59,15 +59,48 @@ class Ledger:
 
     def settle(self, tick: int, contract_id: str, requester: str,
                provider: str, price_cc: float, fee_cc: float,
-               risk_cc: float = 0.0) -> LedgerEvent:
+               risk_cc: float = 0.0,
+               verifier_payouts: list[tuple[str, float]] | None = None
+               ) -> LedgerEvent:
+        # Verifier compensation is an explicit posting, not a silent
+        # deduction (§4 #5 / A⑦ / C⑤: it used to vanish from the journal
+        # entry). It comes out of the provider's gross so the requester still
+        # pays exactly the contract price.
+        payouts = verifier_payouts or []
+        verifier_total = sum(amt for _, amt in payouts)
         postings = [
             Posting(requester, -price_cc),
-            Posting(provider, price_cc - fee_cc - risk_cc),
+            Posting(provider, price_cc - fee_cc - risk_cc - verifier_total),
             Posting(TREASURY, fee_cc),
         ]
         if risk_cc > 0:
             postings.append(Posting(INSURANCE, risk_cc))
+        postings.extend(Posting(aid, amt) for aid, amt in payouts)
         return self.post(tick, "settlement", contract_id, postings)
+
+    def slash(self, tick: int, contract_id: str, verifier: str,
+              amount_cc: float) -> LedgerEvent:
+        """Canary failure: stake moves from the verifier to the insurance
+        pool, which is what funds the next canary batch."""
+        return self.post(tick, "slash", contract_id, [
+            Posting(verifier, -amount_cc),
+            Posting(INSURANCE, amount_cc),
+        ])
+
+    def canary_spend(self, tick: int, contract_id: str, provider: str,
+                     price_cc: float,
+                     verifier_payouts: list[tuple[str, float]] | None = None
+                     ) -> LedgerEvent:
+        """Treasury pays for a decoy task with a known answer (FR-083: marked
+        as a test transaction, kept out of the real-volume statistics)."""
+        payouts = verifier_payouts or []
+        verifier_total = sum(amt for _, amt in payouts)
+        postings = [
+            Posting(TREASURY, -price_cc),
+            Posting(provider, price_cc - verifier_total),
+        ]
+        postings.extend(Posting(aid, amt) for aid, amt in payouts)
+        return self.post(tick, "canary", contract_id, postings)
 
     def write_off(self, tick: int, account: str) -> float:
         """Absorb a defaulted negative balance: insurance pool first,

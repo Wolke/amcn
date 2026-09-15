@@ -40,6 +40,18 @@ class Report:
     wash_settled_cc: float = 0.0
     wash_share: float = 0.0
     credit_velocity_per_month: float = 0.0
+    # Verification market (§4 #25)
+    verifier_fees_cc: float = 0.0
+    verifier_fee_share: float = 0.0        # fees / settled volume
+    mean_verifier_revenue_cc: float = 0.0
+    min_verifier_revenue_cc: float = 0.0
+    canary_spend_cc: float = 0.0
+    canary_share_of_volume: float = 0.0
+    canary_caught: int = 0
+    canary_missed: int = 0
+    slashed_cc: float = 0.0
+    lazy_detect_rate: float | None = None  # slashes / lazy-verifier canary votes
+    max_exposure_ratio: float | None = None  # single contract / stake (§4 #7)
     unmet_demand_units: float = 0.0
     failed_verifications: int = 0
     treasury_cc: float = 0.0
@@ -158,9 +170,32 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
         report.conservation_ok = True
     except Exception:
         report.conservation_ok = False
+    # --- verification market (§4 #25) --------------------------------
+    vs = [v for v in getattr(market, 'verifiers', [])]
+    report.verifier_fees_cc = market.verifier_fees_cc
+    report.verifier_fee_share = (market.verifier_fees_cc / report.settled_cc
+                                 if report.settled_cc else 0.0)
+    if vs:
+        revs = [ledger.balance(v.vid) for v in vs]
+        report.mean_verifier_revenue_cc = sum(revs) / len(revs)
+        report.min_verifier_revenue_cc = min(revs)
+        lazy_votes = sum(v.canary_seen for v in vs if v.lazy_prob > 0)
+        lazy_caught = sum(v.canary_failed for v in vs if v.lazy_prob > 0)
+        report.lazy_detect_rate = (lazy_caught / lazy_votes
+                                   if lazy_votes else None)
+        prices = [p for _, p in market.stats.prices_per_unit]
+        if prices:
+            worst = max(prices) * 48  # a large single contract
+            report.max_exposure_ratio = max(
+                v.exposure_ratio(worst) for v in vs)
+    report.canary_spend_cc = market.canary_spend_cc
+    report.canary_share_of_volume = (market.canary_spend_cc / report.settled_cc
+                                     if report.settled_cc else 0.0)
+    report.canary_caught = market.canary_caught
+    report.canary_missed = market.canary_missed
+    report.slashed_cc = market.slashed_cc
+
     return report
-
-
 def render_text(r: Report, scenario: str) -> str:
     def f(x, nd=2):
         return "n/a" if x is None else f"{x:.{nd}f}"
@@ -178,6 +213,15 @@ def render_text(r: Report, scenario: str) -> str:
         "-- 信用循環 --",
         f"總結算量                      : {r.settled_cc:,.0f} CC",
         f"Credit velocity (月結算/未償) : {f(r.credit_velocity_per_month)}x",
+        "",
+        "-- 驗證市場 --",
+        f"Verifier 費用 / 佔結算量        : {f(r.verifier_fees_cc)} CC / {f(r.verifier_fee_share*100)}%",
+        f"Verifier 平均 / 最低淨收入      : {f(r.mean_verifier_revenue_cc)} / {f(r.min_verifier_revenue_cc)} CC",
+        f"金絲雀支出 / 佔結算量           : {f(r.canary_spend_cc)} CC / {f(r.canary_share_of_volume*100)}%",
+        f"金絲雀抓到 / 漏掉               : {r.canary_caught} / {r.canary_missed}",
+        f"沒收押金總額                    : {f(r.slashed_cc)} CC",
+        f"偷懶者被抓率                    : {'n/a' if r.lazy_detect_rate is None else f(r.lazy_detect_rate*100)+'%'}",
+        f"單筆最大經手/押金比 (§4 #7 ≤3)  : {'n/a' if r.max_exposure_ratio is None else f(r.max_exposure_ratio)}",
         f"還債週期 平均/中位            : {f(r.mean_debt_cycle_days,1)} / {f(r.median_debt_cycle_days,1)} 天",
         f"期末仍負債的 episodes         : {r.open_debt_episodes}",
         "",
