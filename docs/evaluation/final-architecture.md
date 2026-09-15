@@ -132,6 +132,8 @@
 | 15 | **P1** | `contract_id` 可重複：任務 id 為 `t-<設定名>-<seq>`，`seq` 每次啟動歸零且設定名不唯一，導致兩個不同 DID 持有相同 contract_id 的收據。W1 已凍結的 schema 中 contract_id 是結算冪等鍵，識別碼不唯一將使 W9 爭議、W11 紅隊重放、W12 §20 證據包出現雙重計算 | **已修**（id 併入 DID 標籤；Hub 以 `settledIds` 拒絕重複結算，雙簽與強制路徑共用同一守門；`demo.js` 重放斷言） |
 | 16 | **P2** | Hub 的 `receipt`／`task`／`forced_settlement` handler 對缺必要欄位的 frame 會丟例外。目前由 #13 的 frame 層 try/catch 接住並記錄為 `[wire] dropped frame`，但缺逐欄位驗證，錯誤訊息對送出方也不具指引性 | 未修。建議與 W1 schema v1 的欄位驗證一併實作 |
 | 17 | **P2** | Hub 帳本與 Agent 身分皆不持久化：帳本在記憶體、`export` 有出口無 import 入口，`agent.js` 每次啟動 `genIdentity()` 產生新 DID。任一邊重啟即歸零，且被棄置的負餘額身分會在帳上留下永不償還的洞（試點實測留下一筆 −10 CC） | 未修，屬 W10「帳本匯出重建」範圍。§2.2 Ledger 列已承諾「全部狀態可由公開簽署事件重建」，出口已具備，缺 import |
+| 18 | **P1** | `demo.js` 的發現檢查（#14 交付）是**同機驗證**：agent 與 Hub 在同一台機器上，只是經由區網位址連線。試點實測機器 2 用 `hubHost: "discover"` **無法**連上，改手填 IP 才成功——綠燈的檢查給了假保證。相關 commit `af5836a` 的描述「Verified on the real LAN: an agent with no IP and no port discovered 192.168.50.30 and registered」為錯誤陳述 | 未修。待判定是網路環境（Wi-Fi client isolation／不同介面／訪客網路阻擋 UDP 廣播）或 beacon 實作缺陷。無論哪者，該檢查須更名為「同機發現」，跨機發現需要真正的兩機自動化驗證才可宣稱 |
+| 19 | **P2** | `now providing` 由 `agent.js` 的純計時器觸發，不檢查 Hub 連線狀態：一個從未註冊成功的 agent 在 `provide.afterMs` 後照樣印出該行。試點中因此誤判機器 2 已上線 | 未修。供應狀態的 log 應以「已註冊且可出價」為前提，或分成 `provide armed` 與 `providing`（已連線）兩種訊息 |
 
 ---
 

@@ -256,7 +256,10 @@ async function main() {
       Math.abs((afterReplay.balances[a] || 0) - balances[a]) < 1e-9),
     `replay refused: "${replay}", ${ex.receipts.length} receipts unchanged`);
 
-  check('UDP 發現：無需手填 IP 即找到 Hub，且錯誤的 pin 被拒絕（§2.1 協議內發現）',
+  // Same-host only: this agent and the hub run on one machine, so a green
+  // result says nothing about cross-machine broadcast — machine 2 could not
+  // discover the hub in the pilot and needed a hand-typed IP (§4 #18).
+  check('UDP 發現（同機）：找到 Hub 且錯誤的 pin 被拒絕；跨機未驗證，見 §4 #18',
     !!beacon && beacon.port === PORT && beacon.pub === hub_pub && wrongPin === null,
     beacon ? `beacon → ${beacon.host}:${beacon.port} ${beacon.did}, wrong pin rejected` : 'no beacon heard');
 
