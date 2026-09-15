@@ -25,12 +25,21 @@ function sign(privateKey, obj) {
   return crypto.sign(null, Buffer.from(canon(obj)), privateKey).toString('base64');
 }
 
+// Inputs are attacker-controlled (any LAN peer can send a frame), so a
+// malformed key or signature must be a failed verification, never a throw:
+// createPublicKey() rejects bad DER by throwing, which would otherwise escape
+// the socket 'data' handler and kill the process.
 function verify(pubB64, obj, sigB64) {
-  const key = crypto.createPublicKey({
-    key: Buffer.from(pubB64, 'base64'), type: 'spki', format: 'der',
-  });
-  return crypto.verify(null, Buffer.from(canon(obj)), key,
-    Buffer.from(sigB64, 'base64'));
+  if (typeof pubB64 !== 'string' || typeof sigB64 !== 'string') return false;
+  try {
+    const key = crypto.createPublicKey({
+      key: Buffer.from(pubB64, 'base64'), type: 'spki', format: 'der',
+    });
+    return crypto.verify(null, Buffer.from(canon(obj)), key,
+      Buffer.from(sigB64, 'base64'));
+  } catch {
+    return false;
+  }
 }
 
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
@@ -38,8 +47,14 @@ const hmac = (key, s) =>
   crypto.createHmac('sha256', key).update(s).digest('hex').slice(0, 16);
 
 // --- TCP JSON-lines ---------------------------------------------------
+// A peer that never sends '\n' would otherwise grow buf without bound.
+const MAX_LINE = 16 * 1024 * 1024;
+
 function attachLineReader(sock, onMsg, onRaw) {
   let buf = '';
+  // Unhandled 'error' on a socket is fatal to the process; a peer that
+  // disconnects mid-frame (ECONNRESET) must not be able to do that.
+  sock.on('error', () => sock.destroy());
   sock.on('data', (chunk) => {
     buf += chunk.toString('utf8');
     let i;
@@ -47,15 +62,32 @@ function attachLineReader(sock, onMsg, onRaw) {
       const line = buf.slice(0, i);
       buf = buf.slice(i + 1);
       if (!line.trim()) continue;
-      if (onRaw) onRaw(line);
+      // onRaw first and for every line, parseable or not: it is the hub's
+      // full-traffic audit log (the NFR-005 plaintext scan reads it).
+      try { if (onRaw) onRaw(line); } catch { /* audit log must not break the reader */ }
       let msg;
       try { msg = JSON.parse(line); } catch { continue; }
-      onMsg(msg, sock);
+      // Handlers parse untrusted frames; isolate a throw to this one frame
+      // so a malformed message degrades to "ignored", not "network down".
+      try {
+        onMsg(msg, sock);
+      } catch (err) {
+        console.error(`[wire] dropped frame (${msg && msg.type}): ${err.message}`);
+      }
+    }
+    if (buf.length > MAX_LINE) {
+      console.error('[wire] oversized frame, dropping connection');
+      buf = '';
+      sock.destroy();
     }
   });
 }
 
-function sendLine(sock, obj) { sock.write(JSON.stringify(obj) + '\n'); }
+function sendLine(sock, obj) {
+  if (!sock || sock.destroyed) return false;
+  sock.write(JSON.stringify(obj) + '\n');
+  return true;
+}
 
 function connect(port, onMsg, host = '127.0.0.1') {
   const sock = net.connect(port, host);

@@ -7,7 +7,7 @@
 'use strict';
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { connect, verify, sha256, canon } = require('./lib/wire');
+const { connect, verify, sha256, canon, net } = require('./lib/wire');
 
 const PORT = 47180;
 const KEY_A = 'sk-demo-A-SECRET-9f3a1c';
@@ -15,6 +15,16 @@ const KEY_B = 'sk-demo-B-SECRET-77e0d2';
 const PAYLOAD_1 = 'debug: TypeError in settle() when postings list is empty';
 const PAYLOAD_2 = 'summarize: mutual credit conservation rules, 3 bullets';
 const PAYLOAD_3 = 'classify: is this task spam? return JSON verdict';
+
+// Frame shapes that used to crash the hub: bad DER pubkey, non-JSON, wrong
+// field types, and handler-reachable frames with required fields missing.
+const JUNK_FRAMES = [
+  '{"type":"register","did":"did:demo:attacker","pub":"AAAA","box_pub":"AAAA","sig":"AAAA"}',
+  'not json at all',
+  '{"type":"register","did":"x","pub":null,"sig":12345}',
+  '{"type":"receipt"}',
+  '{"type":"forced_settlement"}',
+];
 
 const results = [];
 const check = (name, ok, detail) => {
@@ -100,6 +110,25 @@ async function main() {
     c.send({ type: 'export' });
   });
   const consoleA = await (await fetch('http://127.0.0.1:47201/status')).json();
+
+  // Regression gate: a malformed frame from any LAN peer must not be able to
+  // kill the hub. It could — createPublicKey() throws on bad DER and the throw
+  // escaped the socket 'data' handler, taking the hub and every connected
+  // verifier down with it. Probed after the export above, so the junk lands in
+  // raw_log only after the NFR-005 plaintext scan has captured its copy.
+  await new Promise((resolve) => {
+    const c = connect(PORT, () => {});
+    JUNK_FRAMES.forEach((line) => c.sock.write(line + '\n'));
+    setTimeout(() => { c.sock.destroy(); resolve(); }, 200);
+  });
+  const hubSurvived = await new Promise((resolve) => {
+    const t = setTimeout(() => resolve(false), 3000);
+    const c = connect(PORT, (m) => {
+      if (m.type === 'ledger_export') { clearTimeout(t); c.sock.destroy(); resolve(true); }
+    });
+    c.send({ type: 'export' });
+  });
+
   procs.forEach((p) => p.kill());
 
   const { receipts, pubkeys, balances, credit_lines, chains, checkpoints,
@@ -176,6 +205,9 @@ async function main() {
     Math.abs(consoleA.balance_cc - balances[A]) < 1e-6 &&
     consoleA.settled.length >= 2,
     `A console: ${consoleA.balance_cc.toFixed(2)} CC, ${consoleA.settled.length} settlements`);
+
+  check('畸形 frame 不能打掉 Hub（§16 區網可用性回歸閘門）', hubSurvived,
+    `${JUNK_FRAMES.length} 類畸形 frame 後 Hub 仍正常回應 export`);
 
   const failed = results.filter(([, ok]) => !ok).length;
   console.log(`\n結果：${results.length - failed}/${results.length} PASS`);

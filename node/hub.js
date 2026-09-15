@@ -261,6 +261,12 @@ const server = net.createServer((sock) => {
   }, (line) => rawLog.push(line));
 });
 
+server.on('error', (err) => {
+  console.error(`[hub] listen failed on ${BIND}:${PORT}: ${err.code || err.message}` +
+    (err.code === 'EADDRINUSE' ? ' — another hub is already running, or set HUB_PORT' : ''));
+  process.exit(1);
+});
+
 server.listen(PORT, BIND, () => console.log(
   `[hub] listening on ${BIND}:${PORT} — starter CL ${eeff.STARTER_CC}, fee ${eeff.FEE_RATE * 100}%, ` +
   `risk ${eeff.RISK_THIN * 100}%/${eeff.RISK_BASE * 100}%, hash-chained + checkpointed`));
