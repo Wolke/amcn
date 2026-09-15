@@ -95,8 +95,16 @@ async function main() {
     name: 'A', consolePort: CONSOLE_A_PORT,
     adapter: { baseUrl: `http://127.0.0.1:${FAKE_A_PORT}`, key: { env: 'A_PROVIDER_KEY', service: 'amcn-demo-a' } },
     provide: { afterMs: 2200, pricePerUnit: 0.95, repayment: true },
-    posts: [{ atMs: 600, units: 40, maxPriceCC: 45, payload: PAYLOAD_1,
-              acceptance: 'dsl-local', asserts: SHA_OK }],
+    posts: [
+      { atMs: 600, units: 40, maxPriceCC: 45, payload: PAYLOAD_1,
+        acceptance: 'dsl-local', asserts: SHA_OK },
+      // Non-essential, and timed inside A's repayment window (A settles its
+      // borrow around 2s and climbs back out around 4s), so FR-055 must pause
+      // it rather than let it consume while the node is under its band.
+      { atMs: 3000, units: 5, maxPriceCC: 6, essential: false,
+        payload: 'optional: nice-to-have cleanup task',
+        acceptance: 'dsl-local', asserts: SHA_OK },
+    ],
   }, { A_PROVIDER_KEY: KEY_A })));
   // B: provider; later a MALICIOUS requester who refuses to settle (T3)
   procs.push(spawnProc('agent.js', agentCfg({
@@ -239,6 +247,24 @@ async function main() {
   check('§20-2/3 閉環：A 額度內借 40 → 服務第三方 → 期末轉正',
     receipts[0].receipt.postings.find((p) => p.account === A).amount_cc === -40 &&
     balances[A] > 0, `A: 0 → -40 → ${balances[A].toFixed(2)} CC`);
+
+  // FR-055 / UC-02: A borrows 40, which puts it under -0.3 x CL, so it must
+  // switch to repayment — discount its supply 10% and pause the non-essential
+  // post — then climb back into the band and switch out again.
+  const aSupplied = receipts.find((r) => r.receipt.provider === A);
+  const paidToA = aSupplied &&
+    -aSupplied.receipt.postings.find((p) => p.account === aSupplied.receipt.requester).amount_cc;
+  const st = consoleA.strategy;
+  check('FR-055 目標餘額區間＋還債排程：跌破 low → 供給折價 10%、非必要消費暫停 → 回到區間（UC-02）',
+    !!st && st.repay_episodes >= 1 && st.paused_posts === 1 &&
+    st.mode === 'normal' && Math.abs(paidToA - 48 * 0.855) < 1e-6,
+    st && `episodes=${st.repay_episodes}, paused=${st.paused_posts}, ` +
+      `A 折價後收 ${paidToA} CC (48u × 0.855), 期末 mode=${st.mode}`);
+
+  check('§20-10 平均還債時間可輸出',
+    !!st && typeof st.avg_repayment_ms === 'number' && st.avg_repayment_ms > 0 &&
+    st.in_repayment_since === null,
+    st && `avg_repayment_ms=${st.avg_repayment_ms}`);
 
   check('F-1 反洗量即時生效：B 有收入但單一對手 → 信用零成長',
     credit_lines[B] <= 50 + 1e-6, `CL(B)=${credit_lines[B].toFixed(1)}`);

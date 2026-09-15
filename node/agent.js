@@ -19,6 +19,7 @@ const { genBoxKeys, seal, open } = require('./lib/e2e');
 const { runAsserts, assertsHash } = require('./lib/dsl');
 const keystore = require('./lib/keystore');
 const discovery = require('./lib/discovery');
+const strategy = require('./lib/strategy');
 const adapter = require('./adapter');
 
 const cfg = process.env.AGENT_CONFIG
@@ -40,6 +41,25 @@ const asRequester = new Map();   // contract_id -> {contract, payload, panel, at
 const asProvider = new Map();    // contract_id -> {contract, contract_sigs, pre_auth, pre_auth_sig, output, attest:[], timer, settled}
 const pendingFees = new Map();   // contract_id -> {role, provider, delivery_hash, output}
 const console_ = { balance: 0, creditLine: 0, settled: [] };
+let mode = 'normal';
+const repayTracker = strategy.newTracker();
+
+// FR-055 / UC-02: recompute the target band from the live credit line and
+// switch strategy when the balance leaves it. Called after registration and
+// after every settlement or credit update.
+function refreshMode(why) {
+  const band = strategy.bandFor(cfg, console_.creditLine);
+  const next = strategy.modeFor(console_.balance, band);
+  if (next === mode) return;
+  const closed = strategy.trackTransition(repayTracker, next);
+  mode = next;
+  log(`strategy → ${mode} (balance ${console_.balance.toFixed(2)} CC, ` +
+      `band [${band.low.toFixed(2)}, ${band.high}], ${why})` +
+      (closed !== null ? ` — repaid in ${(closed / 1000).toFixed(1)}s` : '') +
+      (mode === 'repay'
+        ? `; supply discounted ${strategy.REPAY_DISCOUNT * 100}%, non-essential posts paused`
+        : ''));
+}
 
 function panelFor(contractId) { // seeded, checkpoint-locked (FR-041)
   const { verifiers, lock } = verifierDir;
@@ -69,20 +89,28 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
     case 'registered':
       console_.creditLine = msg.credit_line;
       log(`registered, dynamic credit line ${msg.credit_line.toFixed(1)} CC`);
+      refreshMode('registered');
+      break;
+
+    case 'credit_update':
+      console_.creditLine = msg.credit_line;
+      refreshMode('credit line moved');
       break;
 
     case 'verifiers': verifierDir = msg; break;
 
     case 'task': {
       if (!providing) break;
+      const unitPrice = strategy.priceFor(cfg.provide.pricePerUnit, mode);
       const bid = {
         task_id: msg.task.task_id, provider: id.did,
-        price_cc: +(msg.task.units * cfg.provide.pricePerUnit).toFixed(4),
+        price_cc: +(msg.task.units * unitPrice).toFixed(4),
         box_pub: box.boxPub,
       };
       hub.send({ type: 'bid', to: msg.task.requester, bid,
                  sig: sign(id.privateKey, bid), pub: id.pub });
-      log(`bid ${bid.price_cc} CC on ${msg.task.task_id}`);
+      log(`bid ${bid.price_cc} CC on ${msg.task.task_id}` +
+        (mode === 'repay' ? ` (repayment discount, ${unitPrice}/unit)` : ''));
       break;
     }
 
@@ -243,6 +271,7 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
         console_.settled.push({ contract_id: msg.receipt.contract_id,
                                 kind: msg.kind, delta_cc: me.amount_cc });
         log(`settled(${msg.kind}) ${msg.receipt.contract_id}: my delta ${me.amount_cc.toFixed(2)} CC`);
+        refreshMode('settled');
       }
       break;
     }
@@ -280,11 +309,23 @@ if (cfg.consolePort) {
       return;
     }
     res.writeHead(200, { 'content-type': 'application/json' });
+    const band = strategy.bandFor(cfg, console_.creditLine);
     res.end(JSON.stringify({
       name: cfg.name, did: id.did,
       balance_cc: console_.balance,
       credit_line_cc: console_.creditLine,
       settled: console_.settled,
+      // FR-055 strategy state + §20-10 平均還債時間
+      strategy: {
+        mode,
+        target_band_cc: [band.low, band.high],
+        supply_price_per_unit: cfg.provide
+          ? strategy.priceFor(cfg.provide.pricePerUnit, mode) : null,
+        repay_episodes: repayTracker.episodes.length,
+        avg_repayment_ms: strategy.avgRepaymentMs(repayTracker),
+        in_repayment_since: repayTracker.since,
+        paused_posts: pausedPosts.length,
+      },
     }));
   }).listen(cfg.consolePort, '127.0.0.1',
     () => log(`owner console on http://127.0.0.1:${cfg.consolePort}/status`));
@@ -293,8 +334,10 @@ if (cfg.consolePort) {
 if (cfg.provide) {
   setTimeout(() => {
     providing = true;
-    log(`now providing at ${cfg.provide.pricePerUnit} CC/unit` +
-        (cfg.provide.repayment ? ' (repayment mode, UC-02)' : ''));
+    // Says "armed", not "providing": this fires on a timer and proves nothing
+    // about the hub connection (§4 #19). Bids only happen once registered.
+    log(`supply armed at ${cfg.provide.pricePerUnit} CC/unit, strategy ${mode}` +
+        (hub.sock ? '' : ' — WARNING: not connected to a hub yet'));
   }, cfg.provide.afterMs);
 }
 
@@ -305,6 +348,7 @@ if (cfg.provide) {
 // identity, and genIdentity() runs per process.
 const idTag = id.did.slice(-8);
 let postSeq = 0;
+const pausedPosts = [];
 function postTask(post) {
   postSeq += 1;
   hub.send({ type: 'list_verifiers' }); // refresh panel directory + lock
@@ -355,5 +399,12 @@ function postTask(post) {
 }
 
 for (const post of cfg.posts || []) {
-  setTimeout(() => postTask(post), post.atMs);
+  setTimeout(() => {
+    if (!strategy.mayPost(post, mode)) {
+      log(`post paused (non-essential, mode ${mode}): ${post.units}u`);
+      pausedPosts.push(post);
+      return;
+    }
+    postTask(post);
+  }, post.atMs);
 }

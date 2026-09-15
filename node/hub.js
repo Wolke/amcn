@@ -133,6 +133,13 @@ function applySettlement(kind, receipt, sigs, evidence) {
     receipt.postings.map((p) => `${p.account.slice(0, 18)}=${p.amount_cc.toFixed(2)}`)
       .join(' ') + ` | checkpoint#${cp.seq} ${cp.root.slice(0, 12)}`);
   broadcast({ type: 'settled', receipt, kind });
+  // The band's low bound is -0.3 x CL (FR-055), and CL moves with every
+  // settlement, so each party needs its new line, not the one it got at
+  // registration.
+  for (const did of [receipt.requester, receipt.provider]) {
+    const a = agents.get(did);
+    if (a) sendLine(a.sock, { type: 'credit_update', did, credit_line: clOf(did) });
+  }
 }
 
 function handleReceipt(msg, sock) {
