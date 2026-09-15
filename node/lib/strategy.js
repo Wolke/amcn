@@ -12,9 +12,16 @@
 // settlement that pushed the node under to the one that brings it back.
 'use strict';
 
+// Both numbers come from amcn_sim.sweep_repay, not from proposal-B §8.4,
+// whose 10% / -0.3xCL pair the sweep overturned: under the high_default
+// scenario 10% fails GATE-0 G3 (bad debt 6.5-7% > insurance income 4.6-4.7%)
+// at every band, and -0.30xCL fails G4 (median debt cycle 33-40d > 30d) at
+// every discount. 35% + -0.15xCL is the only strong pass on G3/G4/G5 in both
+// scenarios, with the shortest debt cycle (14d) and without 50%'s price
+// collapse (last-week unit price 0.69 vs 0.53).
 const DEFAULT_HIGH_CC = 100;
-const LOW_CL_FRACTION = -0.3;
-const REPAY_DISCOUNT = 0.10;
+const LOW_CL_FRACTION = -0.15;
+const REPAY_DISCOUNT = 0.35;
 
 // Band from policy, falling back to the §8.4 defaults. low is derived from the
 // live credit line, so it moves as the line does.

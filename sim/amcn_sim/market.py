@@ -62,7 +62,7 @@ class Market:
                  risk_thin: float = 0.03, risk_base: float = 0.01,
                  starter_cc: float = 20.0,
                  repay_discount: float = 0.35,
-                 band_low_cl_frac: float | None = None,
+                 band_low_cl_frac: float | None = -0.15,
                  trace: str | None = None) -> None:
         self.ledger = ledger
         self.rng = rng
@@ -77,9 +77,11 @@ class Market:
         # 10%, so the two disagree — amcn_sim.sweep_repay exists to settle it
         # from the economics rather than from whichever document was read last.
         self.repay_discount = repay_discount
-        # When set, the band's low bound is this fraction of the live credit
-        # line (§8.4, and what node/lib/strategy.js computes) instead of the
-        # agent's fixed target_balance_low.
+        # The band's low bound as a fraction of the live credit line,
+        # recomputed per tick. -0.15 is the amcn_sim.sweep_repay result;
+        # §8.4's -0.30 fails GATE-0 G4 under high_default at every discount
+        # (median debt cycle 33-40d). Set None to fall back to the agent's
+        # fixed target_balance_low.
         self.band_low_cl_frac = band_low_cl_frac
         self.trace = trace              # agent id whose diary we record
         self.trace_log: list[str] = []

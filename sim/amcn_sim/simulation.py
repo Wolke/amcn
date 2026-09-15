@@ -26,7 +26,7 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         scenario: str = "baseline", out_dir: str | None = None,
         starter_cc: float = 20.0, risk_thin: float = 0.03,
         risk_base: float = 0.01, deadbeat_frac: float | None = None,
-        repay_discount: float = 0.35, band_low_cl_frac: float | None = None,
+        repay_discount: float = 0.35, band_low_cl_frac: float | None = -0.15,
         trace: str | None = None) -> Report:
     sc_deadbeat, washer_frac, expiry_cliff = SCENARIOS[scenario]
     if deadbeat_frac is None:

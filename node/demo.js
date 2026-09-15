@@ -9,6 +9,7 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { connect, verify, sha256, canon, net } = require('./lib/wire');
 const discovery = require('./lib/discovery');
+const strategy = require('./lib/strategy');
 
 // Every port is derived from one offset so the demo can run alongside a live
 // pilot stack (which holds 47180 and the 47201 console) without colliding:
@@ -255,11 +256,16 @@ async function main() {
   const paidToA = aSupplied &&
     -aSupplied.receipt.postings.find((p) => p.account === aSupplied.receipt.requester).amount_cc;
   const st = consoleA.strategy;
-  check('FR-055 目標餘額區間＋還債排程：跌破 low → 供給折價 10%、非必要消費暫停 → 回到區間（UC-02）',
+  // Percentages read from lib/strategy.js so this label cannot go stale the
+  // way the "now providing" log did (§4 #19).
+  const discPct = strategy.REPAY_DISCOUNT * 100;
+  check(`FR-055 目標餘額區間＋還債排程：跌破 low → 供給折價 ${discPct}%、非必要消費暫停 → 回到區間（UC-02）`,
     !!st && st.repay_episodes >= 1 && st.paused_posts === 1 &&
-    st.mode === 'normal' && Math.abs(paidToA - 48 * 0.855) < 1e-6,
+    st.mode === 'normal' &&
+    Math.abs(paidToA - 48 * strategy.priceFor(0.95, 'repay')) < 1e-6,
     st && `episodes=${st.repay_episodes}, paused=${st.paused_posts}, ` +
-      `A 折價後收 ${paidToA} CC (48u × 0.855), 期末 mode=${st.mode}`);
+      `A 折價後收 ${paidToA} CC (48u × ${strategy.priceFor(0.95, 'repay')}), ` +
+      `期末 mode=${st.mode}`);
 
   check('§20-10 平均還債時間可輸出',
     !!st && typeof st.avg_repayment_ms === 'number' && st.avg_repayment_ms > 0 &&
