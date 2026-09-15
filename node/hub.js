@@ -15,7 +15,7 @@
 // all verifiable offline from the export.
 'use strict';
 const { attachLineReader, sendLine, verify, sha256, canon, PROTOCOL_VERSION,
-        genIdentity, sign, net } = require('./lib/wire');
+        genIdentity, identityFromSeed, sign, net } = require('./lib/wire');
 const eeff = require('./lib/eeff');
 const discovery = require('./lib/discovery');
 const panel = require('./lib/panel');
@@ -50,7 +50,14 @@ const SLASH_THRESHOLD = Number(process.env.HUB_SLASH_THRESHOLD || 0.25);
 const SLASH_MIN_SAMPLES = Number(process.env.HUB_SLASH_MIN_SAMPLES || 5);
 const SLASH_MIN_FAILURES = Number(process.env.HUB_SLASH_MIN_FAILURES || 3);
 
-const hubId = genIdentity(); // signs checkpoints
+// §4 #14: hubPin only meant anything for one hub lifetime, because a fresh
+// keypair every start changed the identity agents were told to pin. With
+// HUB_SEED the hub keeps its DID across restarts, which is what makes
+// rotation a real operation: move the hub, keep the seed, and every pinned
+// agent follows it to the new address.
+const hubId = process.env.HUB_SEED
+  ? identityFromSeed(process.env.HUB_SEED)
+  : genIdentity(); // signs checkpoints
 const settledIds = new Set(); // contract_id idempotency keys
 const stakes = new Map();     // verifier did -> CC held in protocol:stake
 const canaryStats = new Map(); // verifier did -> {seen, failed, slashed_cc}
@@ -560,6 +567,9 @@ server.on('error', (err) => {
 server.listen(PORT, BIND, () => {
   console.log(
     `[hub] listening on ${BIND}:${PORT} — protocol v${PROTOCOL_VERSION}, ` +
+    // The DID an agent pins with hubPin, so it must not depend on whether
+    // the beacon happens to be enabled.
+    `hub did ${discovery.didOf(hubId.pub)}, ` +
     `starter CL ${eeff.STARTER_CC}, fee ${eeff.FEE_RATE * 100}%, ` +
     `risk ${eeff.RISK_THIN * 100}%/${eeff.RISK_BASE * 100}%, hash-chained + checkpointed`);
   if (process.env.HUB_BEACON === '0') {
@@ -567,8 +577,11 @@ server.listen(PORT, BIND, () => {
   } else {
     // Targets follow BIND, so the hub only ever advertises addresses it serves.
     const b = discovery.startBeacon(hubId, PORT, { bind: BIND });
-    console.log(`[hub] discovery beacon on udp/${b.port} → ${b.targets.join(', ')}, ` +
-      `hub did ${discovery.didOf(hubId.pub)}`);
+    console.log(`[hub] discovery beacon on udp/${b.port} → ${b.targets.join(', ')}`);
+  }
+  if (!process.env.HUB_SEED) {
+    console.log('[hub] no HUB_SEED: this hub\'s DID changes on every restart, ' +
+      'so agents pinning it (hubPin) must be reconfigured after a restart');
   }
   if (CANARY_DID) {
     console.log(`[hub] canary issuer authorised: ${CANARY_DID} ` +

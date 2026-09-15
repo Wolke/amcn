@@ -28,8 +28,10 @@ ipconfig getifaddr en0     # macOS，例如 192.168.1.10
 
 ```bash
 cd ai-exchage/node
-HUB_BIND=0.0.0.0 node hub.js
+HUB_SEED='pick-any-stable-string' HUB_BIND=0.0.0.0 node hub.js
 ```
+
+`HUB_SEED` 讓 Hub 的身分（`hub did`）跨重啟不變。沒設也能跑，但每次重啟 DID 都會變，任何用 `hubPin` 釘住它的 agent 都得重新設定（§4 #14）。啟動 log 會印出 `hub did`，那就是 `hubPin` 要填的值。
 
 看到 `[hub] listening on 0.0.0.0:47180` 即成功。macOS 第一次會跳「允許接受連入網路連線？」→ 按允許。
 
