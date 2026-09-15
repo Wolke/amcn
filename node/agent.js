@@ -20,6 +20,7 @@ const { runAsserts, assertsHash } = require('./lib/dsl');
 const keystore = require('./lib/keystore');
 const discovery = require('./lib/discovery');
 const strategy = require('./lib/strategy');
+const demand = require('./lib/demand');
 const adapter = require('./adapter');
 
 const cfg = process.env.AGENT_CONFIG
@@ -39,8 +40,11 @@ let verifierDir = { verifiers: [], lock: null };
 const pendingBids = new Map();   // task_id -> {task, post, bids, timer}
 const asRequester = new Map();   // contract_id -> {contract, payload, panel, attest:[], done}
 const asProvider = new Map();    // contract_id -> {contract, contract_sigs, pre_auth, pre_auth_sig, output, attest:[], timer, settled}
+const bidUnits = new Map();     // task_id -> units bid on, to spend quota on award
 const pendingFees = new Map();   // contract_id -> {role, provider, delivery_hash, output}
-const console_ = { balance: 0, creditLine: 0, settled: [] };
+const console_ = { balance: 0, creditLine: 0, settled: [],
+                   autoPosts: 0, manualPosts: 0, scriptedPosts: 0,
+                   withheld: [] };
 let mode = 'normal';
 const repayTracker = strategy.newTracker();
 
@@ -101,12 +105,19 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
 
     case 'task': {
       if (!providing) break;
+      // Quota is the thing being sold. Bidding without checking it offers
+      // capacity the agent does not have — the simulator's collect_offers has
+      // always gated on remaining_quota and this side never did.
+      if (console_.quota && console_.quota.remaining < msg.task.units) {
+        break;
+      }
       const unitPrice = strategy.priceFor(cfg.provide.pricePerUnit, mode);
       const bid = {
         task_id: msg.task.task_id, provider: id.did,
         price_cc: +(msg.task.units * unitPrice).toFixed(4),
         box_pub: box.boxPub,
       };
+      bidUnits.set(bid.task_id, msg.task.units);
       hub.send({ type: 'bid', to: msg.task.requester, bid,
                  sig: sign(id.privateKey, bid), pub: id.pub });
       log(`bid ${bid.price_cc} CC on ${msg.task.task_id}` +
@@ -130,9 +141,32 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
       hub.send({ type: 'contract_ack', to: c.requester,
                  contract_id: c.contract_id, sig: mySig });
       const payload = open(box.boxPriv, c.payload_box);
+      const soldUnits = bidUnits.get(c.contract_id.replace(/^c-/, '')) || 0;
+      if (console_.quota && soldUnits) {
+        console_.quota.remaining =
+          +(console_.quota.remaining - soldUnits).toFixed(3);
+        console_.quota.soldUnits =
+          +((console_.quota.soldUnits || 0) + soldUnits).toFixed(3);
+      }
       log(`awarded ${c.contract_id} @ ${c.price_cc} CC (contract dual-signed, ` +
-          `panel ${c.verifiers.length} verifiers) — executing locally`);
-      const output = await adapter.complete(adapterCfg, payload);
+          `panel ${c.verifiers.length} verifiers) — executing locally` +
+          (soldUnits ? `, ${soldUnits}u quota spent` : ''));
+      let output;
+      try {
+        output = await adapter.complete(adapterCfg, payload);
+      } catch (err) {
+        // This handler is async, so a throw here escapes as an unhandled
+        // rejection and kills the process mid-contract — a real provider
+        // endpoint returning 500 was enough to do it.
+        log(`execution FAILED on ${c.contract_id}: ${err.message} — ` +
+            'no delivery will be sent; the requester may force-settle');
+        asProvider.set(c.contract_id, {
+          contract: c, contract_sigs: { requester: msg.sig, provider: mySig },
+          pre_auth: msg.pre_auth, pre_auth_sig: msg.pre_auth_sig,
+          output: null, attest: [], settled: false, failed: err.message,
+        });
+        break;
+      }
       asProvider.set(c.contract_id, {
         contract: c, contract_sigs: { requester: msg.sig, provider: mySig },
         pre_auth: msg.pre_auth, pre_auth_sig: msg.pre_auth_sig,
@@ -298,6 +332,7 @@ if (cfg.consolePort) {
           if (!post.acceptance || !Array.isArray(post.asserts)) {
             throw new Error('post needs acceptance + asserts (FR-011)');
           }
+          console_.manualPosts += 1;   // Owner Console / MCP — attended
           const taskId = postTask(post);
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ ok: true, task_id: taskId }));
@@ -342,12 +377,38 @@ if (cfg.consolePort) {
         in_repayment_since: repayTracker.since,
         paused_posts: pausedPosts.length,
       },
+      // §20-8: publishes that required a human, versus ones the policy made
+      // on its own. An unattended run must show manual + scripted == 0.
+      publishing: {
+        auto_posts: console_.autoPosts,
+        manual_posts: console_.manualPosts,
+        scripted_posts: console_.scriptedPosts,
+        withheld: console_.withheld,
+      },
+      quota: console_.quota ? {
+        capacity_units: console_.quota.capacity,
+        remaining_units: console_.quota.remaining,
+        cycles: console_.quota.cycles,
+        consumed_units: console_.quota.consumedUnits,
+        expired_units: console_.quota.expiredUnits,
+        shortfall_units: console_.quota.shortfallUnits,
+        sold_units: console_.quota.soldUnits || 0,
+        exhaustions: console_.quota.exhaustions,
+      } : null,
     }));
   }).listen(cfg.consolePort, '127.0.0.1',
     () => log(`owner console on http://127.0.0.1:${cfg.consolePort}/status`));
 }
 
-if (cfg.provide) {
+// Bidding commits this agent to executing the work. Without a resolvable
+// adapter it cannot, and the failure would land after the contract is
+// dual-signed — leaving the requester to force-settle against a provider that
+// never had a chance. So refuse to arm supply at all.
+if (cfg.provide && !adapterCfg) {
+  log('supply NOT armed: provide is set but no adapter is configured — ' +
+      'an agent that cannot execute must not bid');
+}
+if (cfg.provide && adapterCfg) {
   setTimeout(() => {
     providing = true;
     // Says "armed", not "providing": this fires on a timer and proves nothing
@@ -421,6 +482,63 @@ for (const post of cfg.posts || []) {
       pausedPosts.push(post);
       return;
     }
+    console_.scriptedPosts += 1;  // cfg.posts timetable — also not policy
     postTask(post);
   }, post.atMs);
+}
+
+// --- unattended demand loop (W8: UC-01 step 1, §20-8) --------------------
+// The agent buys because it noticed its own quota ran out, with no timetable
+// and nobody asking. §6.2 forbids requiring a human to find tasks per item.
+if (cfg.policy && cfg.policy.demand) {
+  const rng = demand.makeRng(cfg.seed != null
+    ? cfg.seed : demand.seedFrom(id.did));
+  const quota = demand.newQuota(cfg.policy);
+  console_.quota = quota;
+  const tickMs = cfg.policy.demand.tickMs || 1000;
+
+  setInterval(() => {
+    const expired = demand.maybeReset(quota);
+    if (expired !== null) {
+      log(`quota cycle reset: ${expired.toFixed(1)}u expired, ` +
+          `back to ${quota.capacity}u`);
+    }
+    const units = demand.drawDemand(rng, cfg.policy);
+    const { local, shortfall } = demand.consume(quota, units);
+    if (shortfall <= 0) return;   // own quota covered it; no market activity
+
+    // UC-01 steps 2-3: policy decides whether the shortfall may be bought.
+    const plan = demand.planPurchase(shortfall, {
+      balance: console_.balance, creditLine: console_.creditLine,
+      policy: cfg.policy,
+    });
+    if (plan.withheld) {
+      console_.withheld.push(plan.withheld);
+      log(`quota exhausted, purchase withheld: ${plan.withheld}`);
+      return;
+    }
+    // FR-055: while under the band, discretionary consumption waits. Buying
+    // to cover a shortfall is the agent's own work, so it is essential only
+    // if the Owner said so.
+    const post = {
+      units: plan.units,
+      maxPriceCC: plan.maxPriceCC,
+      payload: `auto: ${plan.units}u inference, own quota exhausted ` +
+               `(cycle ${quota.cycles}, remaining ${quota.remaining}u)`,
+      acceptance: (cfg.policy.acceptance || {}).method || 'judge-quorum',
+      asserts: (cfg.policy.acceptance || {}).asserts
+        || [{ op: 'sha256_eq' }, { op: 'max_len', arg: 512 }],
+      essential: cfg.policy.essentialPurchases !== false,
+    };
+    if (!strategy.mayPost(post, mode)) {
+      pausedPosts.push(post);
+      log(`quota exhausted but purchase paused (non-essential, mode ${mode})`);
+      return;
+    }
+    console_.autoPosts += 1;
+    log(`quota exhausted (used ${local.toFixed(1)}u, short ` +
+        `${shortfall.toFixed(1)}u) → auto-posting ${plan.units}u ` +
+        `@ max ${plan.maxPriceCC} CC${plan.trimmed ? ' (trimmed to credit)' : ''}`);
+    postTask(post);
+  }, tickMs).unref();
 }

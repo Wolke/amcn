@@ -6,8 +6,14 @@
 
 ```bash
 cd node
-node demo.js    # 約 5 秒，8 項驗收檢查（§20 縮小版＋Phase 1 追加）
+node demo.js              # 約 15 秒，16 項驗收（腳本驅動，回歸閘門）
+node demo-autonomous.js   # 約 20 秒，12 項驗收（W8：全程零人工）
+
+# 兩者可與跑中的試點並存：
+DEMO_PORT_OFFSET=100 node demo.js
 ```
+
+`demo.js` 用 `posts: [{atMs, ...}]` 時間表驅動，證明機制正確；`demo-autonomous.js` 沒有任何時間表與 Console 呼叫，每筆任務都來自 Agent 自行偵測額度耗盡（§20-8／§6.2）。
 
 ## 展示的閉環（SDD §27）
 
@@ -32,6 +38,8 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `fake-provider.js` | 本機 key-gated OpenAI-compatible 端點，讓真 HTTP 路徑可測而不花錢 |
 | `lib/strategy.js` | FR-055 目標餘額區間＋還債排程器：`[low, high]` 預設 `[-0.3×CL, +100]`，跌破 low 則供給折價、暫停非必要消費；§20-10 平均還債時間 |
 | `lib/discovery.js` | §2.1「協議內發現與輪替」的區網部分：Hub 簽署 UDP 信標，Agent 以 `hubHost: "discover"` 自動尋找並可用 `hubPin` 釘住身分（跨機尚未驗證，見 §4 #18）|
+| `lib/demand.js` | W8 無人觸發源：自有額度／需求模型，額度耗盡（UC-01 步驟 1）自動轉為任務；含 Owner 預算上限與週期相位錯開 |
+| `demo-autonomous.js` | W8 驗收：§27 閉環全程零人工（12 項斷言）。無 `posts` 時間表、無 Console 呼叫 |
 | `mcp-server.js` | §23.1 需求側入口：MCP server（JSON-RPC over stdio，協議 2025-06-18），三個 tool `amcn_balance` / `amcn_publish_task` / `amcn_request_inference`。不持有任何金鑰，只經 127.0.0.1 的 Owner Console 操作本機 Agent |
 
 ## Demo 自動斷言（11 項）
