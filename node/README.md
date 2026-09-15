@@ -9,6 +9,7 @@ cd node
 node demo.js              # 約 15 秒，16 項驗收（腳本驅動，回歸閘門）
 node demo-autonomous.js   # 約 20 秒，12 項驗收（W8：全程零人工）
 node demo-canary.js       # 約 30 秒，6 項驗收（W9：金絲雀沒收偷懶者押注）
+node demo-rebuild.js      # 約 25 秒，7 項驗收（W10：第二排序器重建帳本）
 
 # 兩者可與跑中的試點並存：
 DEMO_PORT_OFFSET=100 node demo.js
@@ -40,6 +41,9 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `lib/strategy.js` | FR-055 目標餘額區間＋還債排程器：`[low, high]` 預設 `[-0.3×CL, +100]`，跌破 low 則供給折價、暫停非必要消費；§20-10 平均還債時間 |
 | `lib/discovery.js` | §2.1「協議內發現與輪替」的區網部分：Hub 簽署 UDP 信標，Agent 以 `hubHost: "discover"` 自動尋找並可用 `hubPin` 釘住身分（跨機尚未驗證，見 §4 #18）|
 | `lib/demand.js` | W8 無人觸發源：自有額度／需求模型，額度耗盡（UC-01 步驟 1）自動轉為任務；含 Owner 預算上限與週期相位錯開 |
+| `lib/rebuild.js` | W10 帳本重建：從匯出檔**驗證式**重構（逐筆驗簽、pubkey 自證、鏈重算、信用額度由收據重放），任何不符即拒絕。鏈條目規則與 `hub.js` 共用同一份實作 |
+| `ledger-dump.js` | 災難匯出：把 Hub 完整帳本寫成檔案 |
+| `demo-rebuild.js` | W10 驗收（7 項）：第二排序器從匯出重建、餘額／額度一致、竄改檔被拒 |
 | `canary.js` | W9 金絲雀稽核（proposal-C §7）：獨立進程發布「斷言不可能被滿足」的暗樁任務，唯一正確裁決是 FAIL；投 PASS 的 verifier 被記錄，達到證據門檻即沒收押注。身分由 seed 決定，需在 Hub 設 `HUB_CANARY_DID` 授權 |
 | `demo-canary.js` | W9 金絲雀驗收（6 項）：偷懶 verifier 被沒收、誠實者未受罰、押注帳務一致、Σ=0 |
 | `panel.js` / `panel.cmd` | 專用 Verifier panel 主機（INSTALL §6）：探測 Hub、啟動 N 個 Verifier、全數註冊後回報、Ctrl-C 一次停完。跨平台，Windows 免改 PowerShell 執行原則 |

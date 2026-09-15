@@ -19,6 +19,7 @@ const { attachLineReader, sendLine, verify, sha256, canon, PROTOCOL_VERSION,
 const eeff = require('./lib/eeff');
 const discovery = require('./lib/discovery');
 const panel = require('./lib/panel');
+const rebuildLib = require('./lib/rebuild');
 
 const PORT = Number(process.env.HUB_PORT || 47180);
 const BIND = process.env.HUB_BIND || '127.0.0.1'; // 0.0.0.0 for LAN pilots
@@ -77,6 +78,7 @@ function applyPostings(kind, ref, postings) {
     balances.set(p.account, bal(p.account) + p.amount_cc);
     chainAppend(p.account, idx, p.amount_cc);
   }
+  events.push({ kind, ref, postings, receipt_idx: idx });
   makeCheckpoint();
   return true;
 }
@@ -85,6 +87,15 @@ const balances = new Map();
 const receipts = [];         // {kind:'dual'|'forced', receipt, sigs, evidence?}
 const chains = new Map();    // account -> [{seq,prev_hash,receipt_idx,delta_cc,balance_after,hash}]
 const checkpoints = [];
+// Every posting set applied, in order. §2.2 promises 「全部狀態可由公開簽署
+// 事件重建」, and receipts alone cannot deliver that: stake escrow, slashing
+// and canary payouts also move CC, and slashing/canary are not derivable
+// from receipts at all. The simulator's ledger.py has always kept a full
+// event list; this side only had receipts, so an export could not be
+// rebuilt. W10's export->rebuild is what surfaced it.
+const events = [];          // {kind, ref, postings, receipt_idx?}
+// Stats replayed from an import, adopted when the DID registers.
+const importedStats = new Map();
 const rawLog = [];
 
 const bal = (a) => balances.get(a) || 0;
@@ -118,17 +129,8 @@ function feeTerms(requesterDid, price, panelSize = 0) {
 // --- hash chain + checkpoints ------------------------------------------
 function chainAppend(account, receiptIdx, delta) {
   const chain = chains.get(account) || [];
-  const prev = chain.at(-1);
-  const entry = {
-    account,
-    seq: chain.length,
-    prev_hash: prev ? prev.hash : sha256(account),
-    receipt_idx: receiptIdx,
-    delta_cc: delta,
-    balance_after: +(bal(account)).toFixed(6),
-  };
-  entry.hash = sha256(canon(entry));
-  chain.push(entry);
+  // Shared with lib/rebuild.js so an append and a replay cannot disagree.
+  chain.push(rebuildLib.chainEntry(account, chain, receiptIdx, delta, bal(account)));
   chains.set(account, chain);
 }
 function makeCheckpoint() {
@@ -268,6 +270,8 @@ function applySettlement(kind, receipt, sigs, evidence) {
     (prov.stats.earnedBy.get(receipt.requester) || 0) + provNet);
   prov.stats.completed += 1;
   receipts.push({ kind, receipt, sigs, evidence });
+  events.push({ kind: 'settlement', ref: receipt.contract_id,
+                postings: receipt.postings, receipt_idx: idx });
   settledIds.add(receipt.contract_id);
   const cp = makeCheckpoint();
   console.log(`[hub] SETTLED(${kind}) ${receipt.contract_id}: ` +
@@ -444,6 +448,47 @@ function handleForced(msg, sock) {
     { requester: `pre_auth:${pre_auth_sig}`, provider: provider_sig }, evidence);
 }
 
+// W10: start as a second sequencer from a disaster export. Verified, not
+// trusted — see lib/rebuild.js. A refusal to start is the correct outcome
+// when the export does not check out; carrying on with an unverified ledger
+// would make the sequencer exactly the trust root §2.2 says it is not.
+if (process.env.HUB_IMPORT) {
+  const file = process.env.HUB_IMPORT;
+  let ex;
+  try {
+    ex = JSON.parse(require('node:fs').readFileSync(file, 'utf8'));
+  } catch (err) {
+    console.error(`[hub] cannot read import ${file}: ${err.message}`);
+    process.exit(1);
+  }
+  const r = rebuildLib.rebuild(ex, { expectHubDid: process.env.HUB_EXPECT_DID || null });
+  if (!r.ok) {
+    console.error(`[hub] REFUSING to start: import failed verification ` +
+      `(${r.errors.length} problems)`);
+    for (const e of r.errors.slice(0, 10)) console.error(`  - ${e}`);
+    if (r.errors.length > 10) console.error(`  … and ${r.errors.length - 10} more`);
+    process.exit(1);
+  }
+  for (const [k, v] of r.balances) balances.set(k, v);
+  for (const [k, v] of r.chains) chains.set(k, v);
+  for (const [k, v] of r.stakes) stakes.set(k, v);
+  for (const [k, v] of r.canaryStats) canaryStats.set(k, v);
+  for (const c of r.canaryScored) canarySeen.add(c);
+  for (const c of r.settledIds) settledIds.add(c);
+  receipts.push(...r.receipts);
+  events.push(...r.events);
+  checkpoints.push(...r.checkpoints);
+  // Stats drive the credit line, and they were recomputed from the receipts
+  // rather than copied, so an imported agent cannot inherit standing the
+  // ledger does not justify. The agent entry is created on registration;
+  // park the stats until then.
+  for (const [did, st] of r.stats) importedStats.set(did, st);
+  console.log(`[hub] rebuilt from ${file}: ${r.summary.receipts} receipts, ` +
+    `${r.summary.events} events, ${r.summary.accounts} accounts, ` +
+    `${r.summary.checkpoints} checkpoints — all signatures and chains verified` +
+    (r.hubDid ? `, origin hub ${r.hubDid}` : ''));
+}
+
 // §2.2 calls for a periodic public checkpoint, and a future-seeded panel
 // needs one: with checkpoints minted only on settlement, a contract awaiting
 // verification in a quiet network would wait for a seed that never arrives.
@@ -482,7 +527,8 @@ const server = net.createServer((sock) => {
         agents.set(msg.did, {
           pub: msg.pub, boxPub: msg.box_pub, sock, online: true,
           // Keep the history on reconnect: stats drive the credit line.
-          stats: prior ? prior.stats : eeff.newStats(),
+          stats: prior ? prior.stats
+            : (importedStats.get(msg.did) || eeff.newStats()),
           role: msg.role || 'agent',
         });
         balances.set(msg.did, bal(msg.did));
@@ -559,6 +605,8 @@ const server = net.createServer((sock) => {
           checkpoints,
           stakes: Object.fromEntries(stakes),
           canary_stats: Object.fromEntries(canaryStats),
+          canary_scored: [...canarySeen],
+          events,
           hub_pub: hubId.pub,
           raw_log: rawLog.join('\n'),
         });

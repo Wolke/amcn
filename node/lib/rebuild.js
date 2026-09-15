@@ -1,0 +1,245 @@
+// Ledger rebuild from an export — W10「帳本匯出重建」, and the mechanism §2.2
+// promises when it says 「全部狀態可由公開簽署事件重建」.
+//
+// The point is that a *second* sequencer can reconstruct the ledger without
+// trusting the first one, so almost nothing in the export is taken on faith:
+//
+//   receipts     re-verified signature by signature. A dual settlement needs
+//                both parties over the exact receipt; a forced one needs the
+//                provider's signature plus the requester's pre_authorization
+//                from its evidence bundle, because in a forced settlement the
+//                requester refused to sign — that is what T-05 is.
+//   pubkeys      self-certifying: did:demo is sha256(pub), so the mapping is
+//                checked rather than believed.
+//   balances     recomputed by replaying the event log; the export's copy is
+//                only ever compared against the result.
+//   chains       hashes and links recomputed the same way the hub builds them.
+//   stakes       recomputed from the escrow rule over settlement events.
+//   credit lines recomputed from stats replayed out of the receipts, so an
+//                importer never inherits a credit line it cannot justify.
+//   checkpoints  the one thing that is not derivable, since periodic ones are
+//                minted on a clock and correspond to no receipt. They are
+//                verified against hub_pub, and the caller may pin the hub DID
+//                it expects — a sequencer that reuses HUB_SEED continues the
+//                same identity, which is what makes rotation work (§4 #14).
+//
+// Any mismatch is a refusal. A sequencer that starts from an unverified
+// ledger is worse than one that will not start.
+'use strict';
+const { verify, sha256, canon } = require('./wire');
+const eeff = require('./eeff');
+
+const EPS = 1e-6;
+const didOf = (pub) => 'did:demo:' + sha256(pub).slice(0, 16);
+
+// The single definition of a hash-chain entry, used by the hub when it
+// appends and by the rebuild when it replays. It lived in two places and the
+// copies drifted — the replay omitted `account` and rounded delta_cc — so a
+// clean export failed its own verification with "chain hash mismatch". One
+// rule, one implementation.
+function chainEntry(account, chain, receiptIdx, delta, balanceAfter) {
+  const prev = chain.at(-1);
+  const entry = {
+    account,
+    seq: chain.length,
+    prev_hash: prev ? prev.hash : sha256(account),
+    receipt_idx: receiptIdx,
+    delta_cc: delta,
+    balance_after: +balanceAfter.toFixed(6),
+  };
+  entry.hash = sha256(canon(entry));
+  return entry;
+}
+
+function rebuild(ex, opts = {}) {
+  const errors = [];
+  const fail = (m) => { errors.push(m); return null; };
+  const {
+    stakeTargetCc = 5, stakeEscrowFrac = 0.5, expectHubDid = null,
+  } = opts;
+
+  if (!ex || !Array.isArray(ex.receipts) || !Array.isArray(ex.events)) {
+    return { ok: false, errors: ['export missing receipts or events — an ' +
+      'export without the full event log cannot be rebuilt (stake escrow, ' +
+      'slashing and canary payouts are not derivable from receipts alone)'] };
+  }
+
+  // --- pubkeys must certify their own DIDs -----------------------------
+  const pubkeys = ex.pubkeys || {};
+  for (const [did, pub] of Object.entries(pubkeys)) {
+    if (didOf(pub) !== did) fail(`pubkey does not hash to its DID: ${did}`);
+  }
+
+  // --- every receipt re-verified ---------------------------------------
+  const byContract = new Map();
+  ex.receipts.forEach((r, i) => {
+    const rec = r && r.receipt;
+    if (!rec) return fail(`receipt ${i} has no body`);
+    if (byContract.has(rec.contract_id)) {
+      fail(`duplicate contract_id in export: ${rec.contract_id}`);
+    }
+    byContract.set(rec.contract_id, r);
+    const sum = rec.postings.reduce((t, p) => t + p.amount_cc, 0);
+    if (Math.abs(sum) > 1e-9) fail(`receipt ${rec.contract_id} postings sum ${sum}`);
+    const provPub = pubkeys[rec.provider];
+    if (!provPub || !verify(provPub, rec, r.sigs && r.sigs.provider)) {
+      fail(`receipt ${rec.contract_id}: provider signature invalid`);
+    }
+    const reqSig = r.sigs && r.sigs.requester;
+    if (typeof reqSig === 'string' && reqSig.startsWith('pre_auth:')) {
+      const ev = r.evidence || {};
+      if (!ev.pre_auth || !verify(pubkeys[rec.requester], ev.pre_auth, ev.pre_auth_sig)) {
+        fail(`receipt ${rec.contract_id}: forced settlement without a valid ` +
+          'pre_authorization');
+      }
+      if (ev.pre_auth && ev.pre_auth.contract_id !== rec.contract_id) {
+        fail(`receipt ${rec.contract_id}: pre_authorization is for another contract`);
+      }
+    } else if (!verify(pubkeys[rec.requester], rec, reqSig)) {
+      fail(`receipt ${rec.contract_id}: requester signature invalid`);
+    }
+  });
+
+  // --- replay the event log --------------------------------------------
+  const balances = new Map();
+  const chains = new Map();
+  const stakes = new Map();
+  const bal = (a) => balances.get(a) || 0;
+
+  const chainAppend = (account, receiptIdx, delta) => {
+    const chain = chains.get(account) || [];
+    chain.push(chainEntry(account, chain, receiptIdx, delta, bal(account)));
+    chains.set(account, chain);
+  };
+
+  for (const [i, e] of ex.events.entries()) {
+    if (!e || !Array.isArray(e.postings)) { fail(`event ${i} malformed`); continue; }
+    const sum = e.postings.reduce((t, p) => t + p.amount_cc, 0);
+    if (Math.abs(sum) > 1e-9) { fail(`event ${i} (${e.kind}) sum ${sum} != 0`); continue; }
+    // A settlement event must correspond to a receipt that verified above;
+    // otherwise CC could be moved by an event nobody signed.
+    if (e.kind === 'settlement' && !byContract.has(e.ref)) {
+      fail(`settlement event ${i} has no signed receipt: ${e.ref}`);
+      continue;
+    }
+    for (const p of e.postings) {
+      balances.set(p.account, bal(p.account) + p.amount_cc);
+      chainAppend(p.account, e.receipt_idx, p.amount_cc);
+    }
+    // An escrow event moves CC out of one verifier and into the stake
+    // account, so the verifier's (negative) posting is what it now holds.
+    if (e.kind === 'stake_escrow') {
+      for (const p of e.postings) {
+        if (p.account === 'protocol:stake' || p.amount_cc >= 0) continue;
+        stakes.set(p.account, +((stakes.get(p.account) || 0) - p.amount_cc).toFixed(4));
+      }
+    }
+    // A slash moves CC out of the stake account into insurance. Which
+    // verifier lost it is not in the postings — the account is pooled — so
+    // it comes from canary_stats below, and the two must agree.
+  }
+
+  // Stake holdings: derived from escrow minus slashing, and the account must
+  // equal the sum of holdings.
+  for (const [did, st] of Object.entries(ex.canary_stats || {})) {
+    if (st && st.slashed_cc) {
+      stakes.set(did, +((stakes.get(did) || 0) - st.slashed_cc).toFixed(4));
+    }
+  }
+  const stakeSum = [...stakes.values()].reduce((t, v) => t + v, 0);
+  const stakeAccount = bal('protocol:stake');
+  if (Math.abs(stakeSum - stakeAccount) > EPS) {
+    fail(`rebuilt stake holdings ${stakeSum.toFixed(4)} != protocol:stake ` +
+      `${stakeAccount.toFixed(4)}`);
+  }
+
+  // --- compare against the export's own copies -------------------------
+  const conserved = [...balances.values()].reduce((t, v) => t + v, 0);
+  if (Math.abs(conserved) > 1e-9) fail(`rebuilt Σ balances = ${conserved}`);
+
+  for (const [acct, v] of Object.entries(ex.balances || {})) {
+    if (Math.abs(bal(acct) - v) > EPS) {
+      fail(`balance mismatch ${acct}: rebuilt ${bal(acct)} vs export ${v}`);
+    }
+  }
+  for (const [acct, chain] of Object.entries(ex.chains || {})) {
+    const mine = chains.get(acct) || [];
+    if (mine.length !== chain.length) {
+      fail(`chain length mismatch ${acct}: ${mine.length} vs ${chain.length}`);
+      continue;
+    }
+    for (let i = 0; i < chain.length; i++) {
+      if (mine[i].hash !== chain[i].hash) {
+        fail(`chain hash mismatch ${acct}#${i}`);
+        break;
+      }
+    }
+  }
+
+  // --- credit lines from replayed stats, never inherited ---------------
+  const stats = new Map();
+  const statsOf = (did) => stats.get(did) || null;
+  const ensure = (did) => {
+    if (!stats.has(did)) stats.set(did, eeff.newStats());
+    return stats.get(did);
+  };
+  for (const r of ex.receipts) {
+    const rec = r.receipt;
+    const price = -rec.postings.find((p) => p.account === rec.requester).amount_cc;
+    const provNet = rec.postings.find((p) => p.account === rec.provider).amount_cc;
+    const req = ensure(rec.requester), prov = ensure(rec.provider);
+    req.paidTo.set(rec.provider, (req.paidTo.get(rec.provider) || 0) + price);
+    prov.earnedBy.set(rec.requester, (prov.earnedBy.get(rec.requester) || 0) + provNet);
+    prov.completed += 1;
+  }
+  const creditLines = {};
+  for (const did of stats.keys()) {
+    creditLines[did] = eeff.creditLine(did, stats.get(did), statsOf);
+  }
+  for (const [did, v] of Object.entries(ex.credit_lines || {})) {
+    const mine = creditLines[did];
+    if (mine === undefined) continue;   // an agent with no settlements yet
+    if (Math.abs(mine - v) > 1e-3) {
+      fail(`credit line mismatch ${did}: rebuilt ${mine.toFixed(3)} vs export ${v.toFixed(3)}`);
+    }
+  }
+
+  // --- checkpoints: the only signed-by-sequencer artefact --------------
+  const cps = ex.checkpoints || [];
+  if (ex.hub_pub) {
+    if (expectHubDid && didOf(ex.hub_pub) !== expectHubDid) {
+      fail(`export is from hub ${didOf(ex.hub_pub)}, expected ${expectHubDid}`);
+    }
+    for (const entry of cps) {
+      if (!verify(ex.hub_pub, entry.cp, entry.sig)) {
+        fail(`checkpoint #${entry.cp && entry.cp.seq} signature invalid`);
+      }
+    }
+  } else if (cps.length) {
+    fail('checkpoints present but no hub_pub to verify them against');
+  }
+
+  if (errors.length) return { ok: false, errors };
+  return {
+    ok: true,
+    errors: [],
+    balances, chains, stakes,
+    stats,
+    creditLines,
+    checkpoints: cps,
+    receipts: ex.receipts,
+    events: ex.events,
+    settledIds: new Set([...byContract.keys()]),
+    canaryStats: new Map(Object.entries(ex.canary_stats || {})),
+    canaryScored: new Set(ex.canary_scored || []),
+    hubDid: ex.hub_pub ? didOf(ex.hub_pub) : null,
+    summary: {
+      receipts: ex.receipts.length,
+      events: ex.events.length,
+      accounts: balances.size,
+      checkpoints: cps.length,
+    },
+  };
+}
+
+module.exports = { rebuild, didOf, chainEntry };

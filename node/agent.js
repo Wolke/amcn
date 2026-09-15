@@ -599,11 +599,19 @@ if (cfg.consolePort) {
 // adapter it cannot, and the failure would land after the contract is
 // dual-signed — leaving the requester to force-settle against a provider that
 // never had a chance. So refuse to arm supply at all.
-if (cfg.provide && !adapterCfg) {
-  log('supply NOT armed: provide is set but no adapter is configured — ' +
-      'an agent that cannot execute must not bid');
+// #21 guarded against a missing adapter *config*, but a config whose key
+// does not resolve is the same thing from the counterparty's point of view:
+// the agent bids, wins, and fails at execution after the contract is signed.
+// Seen in demo-rebuild.js, where the provider's key env var was unset and it
+// kept winning work it could not do.
+const canExecute = !!(adapterCfg && adapterCfg.apiKey);
+if (cfg.provide && !canExecute) {
+  log('supply NOT armed: ' + (adapterCfg
+    ? 'the adapter key did not resolve (check the env var or keystore)'
+    : 'provide is set but no adapter is configured') +
+    ' — an agent that cannot execute must not bid');
 }
-if (cfg.provide && adapterCfg) {
+if (cfg.provide && canExecute) {
   setTimeout(() => {
     providing = true;
     // Says "armed", not "providing": this fires on a timer and proves nothing
