@@ -146,12 +146,35 @@ function send() {
   });
 }
 
-if (mode === 'listen') listen();
+// The decisive test: run the exact path an agent runs, with no registration
+// and no side effects. listen proves datagrams arrive; this proves whether
+// resolveHubTarget does anything with them.
+async function resolveTest() {
+  printInterfaces();
+  const cfg = { hubHost: 'discover', hubPort: null, beaconPort: PORT,
+                hubPin: process.argv[3] || null };
+  console.log(`呼叫 resolveHubTarget（agent 使用的同一函式），` +
+    `beaconPort ${PORT}${cfg.hubPin ? `, pin ${cfg.hubPin}` : ''}…`);
+  const t0 = Date.now();
+  const target = await discovery.resolveHubTarget(cfg, (m) => console.log(`  [agent log] ${m}`));
+  const ms = Date.now() - t0;
+  console.log(`\n結果（${ms}ms）：host ${target.host}, port ${target.port}`);
+  if (target.host === '127.0.0.1' && !cfg.hubPin) {
+    console.log('→ 退回 127.0.0.1，代表發現失敗（#18 重現）');
+  } else {
+    console.log('→ 發現成功，#18 在這台機器上不重現');
+  }
+  process.exit(0);
+}
+
+if (mode === 'resolve') resolveTest();
+else if (mode === 'listen') listen();
 else if (mode === 'send') send();
 else {
   console.log('用法：');
   console.log('  在無法發現 Hub 的那台：  node discovery-probe.js listen');
   console.log('  在 Hub 那台：            node discovery-probe.js send');
+  console.log('  測真實發現路徑：          node discovery-probe.js resolve [pin]');
   console.log('');
   printInterfaces();
   process.exit(1);
