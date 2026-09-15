@@ -12,7 +12,14 @@ const discovery = require('./lib/discovery');
 const { genBoxKeys, open } = require('./lib/e2e');
 const { runAsserts, assertsHash } = require('./lib/dsl');
 
-const cfg = JSON.parse(process.env.AGENT_CONFIG);
+// Same resolution as agent.js: env for scripted runs, a file path for
+// humans. configs/verifier.example.json shipped from the first commit but
+// nothing could load it — env was the only path, which also meant every
+// verifier had to be started with shell-quoted JSON (a real obstacle on
+// PowerShell, where bash's single-quote form does not work).
+const cfg = process.env.AGENT_CONFIG
+  ? JSON.parse(process.env.AGENT_CONFIG)
+  : JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
 const id = genIdentity();
 const box = genBoxKeys();
 const log = (m) => console.log(`[${cfg.name} ${id.did}] ${m}`);

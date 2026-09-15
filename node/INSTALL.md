@@ -1,8 +1,10 @@
-# 兩台電腦跑 AMCN 試點：安裝指南
+# 多台電腦跑 AMCN 試點：安裝指南
 
 目標：機器 1 跑 Hub＋Provider Agent＋3 個 Verifier，機器 2 跑 Requester Agent，跨區網完成一次「借用 → 驗收 → 結算」，然後角色互換測還債。
 
-## 0. 前置需求（兩台都要）
+有第三台機器時，Verifier panel 應該搬到它上面（第 6 節）——三個 Verifier 與交易雙方同機時，2-of-3 quorum 的獨立性只存在於協議層（§4 #31）。
+
+## 0. 前置需求（每台都要）
 
 - **Node.js ≥ 20**（零第三方套件，不需要 npm install）
   ```bash
@@ -10,7 +12,8 @@
   brew install node
   node --version   # 確認 ≥ v20
   ```
-- 兩台在**同一個區網**（同一台路由器/Wi-Fi）。
+- 各台在**同一個區網**（同一台路由器/Wi-Fi）。
+- 最少兩台（機器 1 = Hub＋Provider，機器 2 = Requester）。有第三台請看第 6 節——把 Verifier panel 移出去是目前最大的架構改善。Windows 也可以，見第 6 節。
 - 取得專案：把整個 `ai-exchage` 資料夾複製到兩台機器（AirDrop、隨身碟、`scp -r`，或推到私人 GitHub repo 再 clone 都可以）。只有 `node/` 目錄是必要的。
 
 ## 1. 機器 1：Hub＋Provider＋Verifiers
@@ -34,10 +37,14 @@ HUB_BIND=0.0.0.0 node hub.js
 
 ```bash
 cd ai-exchage/node
-AGENT_CONFIG='{"name":"V1","hubPort":47180}' node verifier.js &
-AGENT_CONFIG='{"name":"V2","hubPort":47180}' node verifier.js &
-AGENT_CONFIG='{"name":"V3","hubPort":47180}' node verifier.js &
+for i in 1 2 3; do cp configs/verifier-$i.example.json configs/verifier-$i.json; done
+# 同機執行時把 hubHost 改成 127.0.0.1（範本預設是區網 IP，給機器 3 用的）
+node verifier.js configs/verifier-1.json &
+node verifier.js configs/verifier-2.json &
+node verifier.js configs/verifier-3.json &
 ```
+
+⚠️ 把三個 Verifier 都跑在機器 1 上時，「2-of-3 quorum」在**部署層級上只是裝飾**——同一台機器、同一個 OS、同一個 Owner，單點故障或單一入侵即可同時控制整個 panel，而 FR-041 的隨機抽選正是為了防這件事（見 §4 #31）。有第三台機器時請改用第 6 節。
 
 **1d. 啟動 Provider Agent**：
 
@@ -124,7 +131,50 @@ curl -s http://127.0.0.1:47202/status | python3 -m json.tool   # 機器 2 的餘
 `"asserts": [{"op":"max_len","arg":2000},{"op":"contains","arg":"關鍵詞"}]`。
 這是原型已知限制（見 README 誠實清單）——正式版驗收 DSL 會有 schema/test-suite 等強斷言。
 
-## 6. 疑難排解
+## 6. 機器 3：獨立的 Verifier panel（強烈建議）
+
+這是第三台機器最有價值的用途，比再開一個交易 Agent 重要得多：**讓 quorum 第一次真正獨立**。Verifier 不需要 API key、不需要任何模型、不參與信用——它只需要 Node.js ≥ 20 和連得到 Hub。
+
+在機器 3 上：
+
+```bash
+cd ai-exchage/node
+for i in 1 2 3; do cp configs/verifier-$i.example.json configs/verifier-$i.json; done
+# 把三個檔的 hubHost 都改成機器 1 的 IP（步驟 1a）
+node verifier.js configs/verifier-1.json &
+node verifier.js configs/verifier-2.json &
+node verifier.js configs/verifier-3.json &
+```
+
+然後**把機器 1 的三個 Verifier 停掉**（否則 pool 會有 6 個，panel 仍可能抽到同機的）。機器 1 的 Hub log 應該顯示三筆來自機器 3 的 `registered ... (verifier)`。
+
+三個 process 在同一台機器仍不是完全獨立，但已經把 panel 與交易雙方分離到不同的故障域——這是 §4 #31 想要的改善方向。
+
+### Windows 機器
+
+程式碼本身跨平台（`lib/keystore.js` 只在 macOS 走 Keychain，其他平台直接用環境變數；模擬器是純 Python stdlib）。兩個差異：
+
+**PowerShell 不支援 bash 的單引號 JSON**。這也是為什麼 `verifier.js` 與 `agent.js` 都接受設定檔路徑——用檔案就完全避開引號問題：
+
+```powershell
+cd ai-exchage\node
+copy configs\verifier-1.example.json configs\verifier-1.json
+# 編輯 hubHost 為機器 1 的 IP
+node verifier.js configs\verifier-1.json
+```
+
+若真的需要環境變數形式（例如 Provider 的 API key）：
+
+```powershell
+$env:AMCN_PROVIDER_KEY='sk-test-anything'
+node agent.js configs\provider.json
+```
+
+**`hubHost` 請用手填 IP，不要用 `"discover"`**。跨機 UDP 發現尚未修（§4 #18），而 Windows 防火牆預設擋入向 UDP，只會多一個變數。
+
+**不需要安裝任何大語言模型**。試點跑 `adapter.baseUrl: null` 的確定性 mock，沒有 API 呼叫也沒有費用；`sk-test-anything` 只是佔位字串，唯一要求是非空（因為 adapter 是 key-gated，那個 gate 本身就是 P-02 的示範）。接上真實模型反而會讓 `sha256_eq` 驗收失敗，見第 5 節。
+
+## 7. 疑難排解
 
 | 症狀 | 原因與解法 |
 |---|---|
@@ -136,14 +186,15 @@ curl -s http://127.0.0.1:47202/status | python3 -m json.tool   # 機器 2 的餘
 | `no hub beacon heard` | Hub 沒設 `HUB_BIND=0.0.0.0`（綁 loopback 時只會往 127.0.0.1 廣告）；或兩台不在同一廣播網段（跨 VLAN／訪客網路／Wi-Fi 隔離會擋 UDP 廣播）→ 改回手填 IP |
 | `no beacon matching pinned hub` | `hubPin` 與 Hub 現在的身分不符。Hub 重啟會換身分，照它新印出的 `hub did` 更新 |
 
-## 7. 安全注意（試點範圍）
+## 8. 安全注意（試點範圍）
 
 - Hub 綁 `0.0.0.0` 只該在**受信任的區網**做；傳輸層目前無 TLS（訊息本身有簽章、payload 有 E2E 加密，但 metadata 是明文）。不要暴露到公網。
 - Console（47201/47202）只綁 localhost，這是刻意的——它是 Owner 的控制面。
+- **Verifier panel 與交易雙方應在不同機器**（第 6 節）。同機 panel 使 2-of-3 quorum 的獨立性只存在於協議層（§4 #31）。
 - API key 永遠只在 agent 進程的機器上；試點時可用 `sk-test-anything` 假 key 跑 mock adapter，完全不花錢。
 
-## 8. 已知限制（試點範圍內會撞到的）
+## 9. 已知限制（試點範圍內會撞到的）
 
 - **Hub 與 Agent 的狀態都不持久化**。Hub 帳本在記憶體，`export` 有出口但沒有 import 入口；而 `agent.js` 每次啟動都 `genIdentity()` 產生**新 DID**（keystore 只保管 API key，不保管身分）。所以任一邊重啟，餘額與信用歷史都會歸零、無法延續。想留證據就在重啟前把 `export` 的輸出存檔——收據本身是雙簽的，離線可獨立驗證。
 - **Hub 身分每次重啟改變**，所以 `hubPin` 只在單次 Hub 生命週期內有意義，真正的「發現與輪替」還需要 Hub 身分持久化。
-- **傳輸層無 TLS**。訊息有簽章、payload 有 E2E 加密，但 metadata 是明文（見第 7 節）。
+- **傳輸層無 TLS**。訊息有簽章、payload 有 E2E 加密，但 metadata 是明文（見第 8 節）。

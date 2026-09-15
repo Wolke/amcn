@@ -19,13 +19,23 @@ const { connect, verify, sha256, canon } = require('./lib/wire');
 const OFFSET = Number(process.env.DEMO_PORT_OFFSET || 0);
 const PORT = 47180 + OFFSET;
 const CONSOLE_BASE = 47211 + OFFSET;
-// A full repayment cycle has to fit inside the window or the closed-loop
-// check is a coin flip. Two things were tried and rejected: loosening the
-// assertion, which hides the thing being demonstrated, and making one agent
-// demand-heavy so it reliably dips — that just turned it into a chronic
-// debtor that dipped every run and returned in none, the mirror of the sink
-// this file already guards against. The window is the honest lever.
-const RUN_MS = Number(process.env.DEMO_RUN_MS || 30000);
+// Whether anyone crosses the band inside a fixed window is a property of
+// burst timing, so asserting a completed repayment cycle after a flat sleep
+// was asserting a probabilistic event as if it were deterministic — it
+// passed 4 runs in a row, then 1 in 3. Three fixes were tried and rejected:
+// loosening the assertion (hides the thing being demonstrated), making one
+// agent demand-heavy so it reliably dips (it became a chronic debtor that
+// dipped every run and returned in none, the mirror of the sink this
+// population already guards against), and simply lengthening the window
+// (raises the odds, does not remove the coin flip).
+//
+// So the harness watches for the phenomenon instead of betting on a window:
+// it runs at least MIN_MS so the circulation checks have data, then polls
+// until a repayment episode has actually closed, up to MAX_MS. In the common
+// case this is faster than the old fixed sleep.
+const MIN_MS = Number(process.env.DEMO_MIN_MS || 14000);
+const MAX_MS = Number(process.env.DEMO_MAX_MS || 75000);
+const POLL_MS = 1000;
 
 const results = [];
 const check = (name, ok, detail) => {
@@ -115,8 +125,33 @@ async function main() {
   await new Promise((r) => setTimeout(r, 300));
   for (const a of POP) procs.push(spawnProc('agent.js', agentCfg(a)));
 
-  console.log(`\n-- 無人運行 ${RUN_MS / 1000}s：沒有 posts 時間表，沒有 Console 呼叫 --\n`);
-  await new Promise((r) => setTimeout(r, RUN_MS));
+  console.log(`\n-- 無人運行（最少 ${MIN_MS / 1000}s，最多 ${MAX_MS / 1000}s）：` +
+    `沒有 posts 時間表，沒有 Console 呼叫 --\n`);
+  const readConsoles = async () => {
+    const out = {};
+    for (const a of POP) {
+      try {
+        out[a.name] =
+          await (await fetch(`http://127.0.0.1:${a.consolePort}/status`)).json();
+      } catch { out[a.name] = null; }
+    }
+    return out;
+  };
+  const closedEpisode = (cs) => POP.some((a) => {
+    const c = cs[a.name];
+    return c && c.strategy.repay_episodes >= 1 && c.strategy.avg_repayment_ms > 0;
+  });
+
+  await new Promise((r) => setTimeout(r, MIN_MS));
+  const deadline = Date.now() + (MAX_MS - MIN_MS);
+  let observed = closedEpisode(await readConsoles());
+  while (!observed && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    observed = closedEpisode(await readConsoles());
+  }
+  const elapsed = ((Date.now() - (deadline - (MAX_MS - MIN_MS)) + MIN_MS) / 1000).toFixed(1);
+  console.log(`\n-- 觀察${observed ? '到' : '未觀察到'}完整還債週期，` +
+    `執行 ${elapsed}s 後匯出 --\n`);
 
   const ex = await new Promise((resolve) => {
     const c = connect(PORT, (m) => { if (m.type === 'ledger_export') resolve(m); });
