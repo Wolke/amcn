@@ -14,8 +14,8 @@
 //            acceptance: 'dsl-local'|'judge-quorum', asserts:[...]}] }
 'use strict';
 const http = require('node:http');
-const { genIdentity, sign, verify, sha256, canon, connect, connectLazy,
-        PROTOCOL_VERSION } = require('./lib/wire');
+const { genIdentity, identityFromSeed, sign, verify, sha256, canon, connect,
+        connectLazy, PROTOCOL_VERSION } = require('./lib/wire');
 const { genBoxKeys, seal, open } = require('./lib/e2e');
 const { runAsserts, assertsHash } = require('./lib/dsl');
 const keystore = require('./lib/keystore');
@@ -28,7 +28,18 @@ const adapter = require('./adapter');
 const cfg = process.env.AGENT_CONFIG
   ? JSON.parse(process.env.AGENT_CONFIG)
   : JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
-const id = genIdentity();
+// §4 #17 / W10「帳本匯出重建」的前半：一個會活過重啟的身分。
+// Without it every restart abandoned whatever the old DID held — this pilot
+// left a +16.52 CC balance nobody can ever spend and a -10 CC debt nobody
+// will ever repay, both belonging to identities that no longer exist. It is
+// also the precondition for the ledger half: rebuilding a ledger whose
+// account holders have all changed DIDs reconstructs balances for people who
+// are not there.
+//
+// The hub already reuses an agent's stats when the same DID re-registers
+// (§4 #35), so a stable DID keeps the credit-line history too, not just the
+// balance.
+const id = cfg.seed ? identityFromSeed(cfg.seed) : genIdentity();
 const box = genBoxKeys();
 const log = (m) => console.log(`[${cfg.name} ${id.did}] ${m}`);
 
@@ -167,7 +178,16 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
   switch (msg.type) {
     case 'registered':
       console_.creditLine = msg.credit_line;
-      log(`registered, dynamic credit line ${msg.credit_line.toFixed(1)} CC`);
+      // Adopt the hub's view rather than assuming a fresh start: a seeded
+      // identity that restarts still owes what it owed (§4 #17).
+      if (typeof msg.balance_cc === 'number') {
+        console_.balance = msg.balance_cc;
+        console_.resumedFrom = { balance_cc: msg.balance_cc,
+                                 settlements: msg.settlements || 0 };
+      }
+      log(`registered, dynamic credit line ${msg.credit_line.toFixed(1)} CC` +
+          (msg.balance_cc ? `, resuming at ${msg.balance_cc.toFixed(2)} CC ` +
+            `after ${msg.settlements || 0} prior settlements` : ''));
       refreshMode('registered');
       break;
 
@@ -551,6 +571,7 @@ if (cfg.consolePort) {
         in_repayment_since: repayTracker.since,
         paused_posts: pausedPosts.length,
       },
+      resumed_from: console_.resumedFrom || null,
       // §20-8: publishes that required a human, versus ones the policy made
       // on its own. An unattended run must show manual + scripted == 0.
       publishing: {

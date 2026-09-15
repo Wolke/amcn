@@ -6,7 +6,8 @@
 // env AGENT_CONFIG: { name, hubPort, hubHost?, hubPin?, beaconPort? }
 // hubHost "discover" uses the UDP beacon instead of a hand-copied IP.
 'use strict';
-const { genIdentity, sign, verify, sha256, canon, connectLazy } = require('./lib/wire');
+const { genIdentity, identityFromSeed, sign, verify, sha256, canon,
+        connectLazy } = require('./lib/wire');
 const crypto = require('node:crypto');
 const discovery = require('./lib/discovery');
 const { genBoxKeys, open } = require('./lib/e2e');
@@ -20,7 +21,11 @@ const { runAsserts, assertsHash } = require('./lib/dsl');
 const cfg = process.env.AGENT_CONFIG
   ? JSON.parse(process.env.AGENT_CONFIG)
   : JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
-const id = genIdentity();
+// A verifier without a stable identity abandons its escrowed stake on
+// every restart (§4 #28), which is the same hole as #17 wearing a
+// different hat — and it would make the stake unenforceable by simply
+// restarting.
+const id = cfg.seed ? identityFromSeed(cfg.seed) : genIdentity();
 const box = genBoxKeys();
 const log = (m) => console.log(`[${cfg.name} ${id.did}] ${m}`);
 // contract_id -> {attestation, nonce, commitment, commitSig} held between

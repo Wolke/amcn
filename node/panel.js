@@ -26,6 +26,9 @@ const [hostArg, portArg, sizeArg] = process.argv.slice(2);
 const HOST = hostArg || '127.0.0.1';
 const PORT = Number(portArg || 47180);
 const SIZE = Number(sizeArg || 3);
+// AMCN_PANEL_SEED keeps verifier identities stable across restarts. Without
+// it each restart abandons the panel's escrowed stake (§4 #17/#28).
+const SEED = process.env.AMCN_PANEL_SEED || null;
 
 const major = Number(process.versions.node.split('.')[0]);
 if (major < 20) {
@@ -67,7 +70,12 @@ function stopAll(code) {
 }
 
 async function main() {
-  console.log(`AMCN Verifier panel → hub ${HOST}:${PORT}, ${SIZE} verifiers`);
+  console.log(`AMCN Verifier panel → hub ${HOST}:${PORT}, ${SIZE} verifiers` +
+    (SEED ? `, seeded identities (${SEED}-V1…)` : ', ephemeral identities'));
+  if (!SEED) {
+    console.log('提示：設 AMCN_PANEL_SEED 可讓 verifier 身分跨重啟不變，' +
+      '否則每次重啟都會棄置已託管的押注（§4 #17/#28）');
+  }
   console.log('（Verifier 不需要 API key、不需要模型、不參與信用）\n');
 
   if (!await probe(HOST, PORT)) {
@@ -83,7 +91,10 @@ async function main() {
 
   let registered = 0;
   for (let i = 1; i <= SIZE; i++) {
+    // Derived per verifier from one operator-supplied base, so a panel
+    // restart keeps each verifier's identity — and therefore its stake.
     const cfg = { name: `V${i}`, hubHost: HOST, hubPort: PORT };
+    if (SEED) cfg.seed = `${SEED}-V${i}`;
     const child = spawn(process.execPath, [path.join(__dirname, 'verifier.js')], {
       env: { ...process.env, AGENT_CONFIG: JSON.stringify(cfg) },
       stdio: ['ignore', 'pipe', 'pipe'],

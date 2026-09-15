@@ -486,8 +486,18 @@ const server = net.createServer((sock) => {
           role: msg.role || 'agent',
         });
         balances.set(msg.did, bal(msg.did));
+        // Hand back what this identity already holds. A seeded agent that
+        // restarts keeps its DID and therefore its debt (§4 #17), but its
+        // own view starts at zero — and the strategy engine reads that
+        // balance, so a restarted agent carrying real debt would believe it
+        // was at zero, skip repayment mode, and overestimate what it can
+        // spend until the hub refused it.
         sendLine(sock, { type: 'registered', did: msg.did,
-                         credit_line: clOf(msg.did), fee_rate: eeff.FEE_RATE });
+                         credit_line: clOf(msg.did), fee_rate: eeff.FEE_RATE,
+                         balance_cc: bal(msg.did),
+                         stake_cc: stakes.get(msg.did) || 0,
+                         settlements: receipts.filter((r) =>
+                           r.receipt.postings.some((p) => p.account === msg.did)).length });
         console.log(`[hub] registered ${msg.did} (${msg.role || 'agent'}, CL ${clOf(msg.did).toFixed(1)})`);
         break;
       }
