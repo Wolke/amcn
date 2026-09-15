@@ -75,7 +75,15 @@ function attachLineReader(sock, onMsg, onRaw) {
       // Handlers parse untrusted frames; isolate a throw to this one frame
       // so a malformed message degrades to "ignored", not "network down".
       try {
-        onMsg(msg, sock);
+        const r = onMsg(msg, sock);
+        // agent.js's handler is async, and an async throw becomes an
+        // unhandled rejection that kills the process — the catch below only
+        // ever saw synchronous throws. A pre-W9 provider receiving a W9
+        // contract died exactly this way, mid-contract, on a live pilot.
+        if (r && typeof r.then === 'function') {
+          r.catch((err) => console.error(
+            `[wire] dropped frame (${msg && msg.type}): ${err.message}`));
+        }
       } catch (err) {
         console.error(`[wire] dropped frame (${msg && msg.type}): ${err.message}`);
       }

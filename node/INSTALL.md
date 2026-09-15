@@ -219,3 +219,4 @@ node agent.js configs\provider.json
 - **Hub 與 Agent 的狀態都不持久化**。Hub 帳本在記憶體，`export` 有出口但沒有 import 入口；而 `agent.js` 每次啟動都 `genIdentity()` 產生**新 DID**（keystore 只保管 API key，不保管身分）。所以任一邊重啟，餘額與信用歷史都會歸零、無法延續。想留證據就在重啟前把 `export` 的輸出存檔——收據本身是雙簽的，離線可獨立驗證。
 - **Hub 身分每次重啟改變**，所以 `hubPin` 只在單次 Hub 生命週期內有意義，真正的「發現與輪替」還需要 Hub 身分持久化。
 - **傳輸層無 TLS**。訊息有簽章、payload 有 E2E 加密，但 metadata 是明文（見第 8 節）。
+- **協議沒有版本欄位，升級必須所有機器同時做**（§4 #33）。混版節點會拒絕互通——`git pull` 後請把**每一台**的 Hub 與 Agent 都重啟，不要只更新其中一台。實測中一台舊版 provider 收到新版合約時會拒絕該筆並記錄 `[wire] dropped frame`（修復前是直接崩潰）。
