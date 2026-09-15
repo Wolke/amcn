@@ -70,6 +70,7 @@ class Market:
                  slash_frac: float = 0.10,
                  slash_threshold: float = 0.25,
                  slash_min_samples: int = 5,
+                 slash_min_failures: int = 3,
                  trace: str | None = None) -> None:
         self.ledger = ledger
         self.rng = rng
@@ -106,6 +107,13 @@ class Market:
         # unlucky verdict costs nothing.
         self.slash_threshold = slash_threshold
         self.slash_min_samples = slash_min_samples
+        # §4 #30: a rate threshold on a small denominator is not evidence. At
+        # pool 90 each verifier saw only ~6 canaries, where 2 unlucky misses
+        # is already 33% — and honest nodes started losing stake again (25.85
+        # CC), re-opening #27 at scale. Requiring an absolute count as well
+        # means a single run of bad luck cannot cross the bar, while a lazy
+        # verifier failing half its canaries reaches 3 quickly.
+        self.slash_min_failures = slash_min_failures
         self.honest_error_forgiven = 0
         self.canary_seq = 0
         self.canary_caught = 0
@@ -241,7 +249,22 @@ class Market:
         verifier a cost, and therefore what makes the fee rate priceable at
         all (§4 #8's deterrence claim rests on it).
         """
-        if not self.verifiers or self.rng.random() >= self.canary_rate:
+        if not self.verifiers:
+            return
+        # §4 #29: proposal-C §7 specifies canaries as 2-5% *of network volume*,
+        # but this was a per-tick injection probability, which delivered
+        # 0.5-1.3% instead — the configured number did not mean what the
+        # proposal said. Now it is a target share and injection tracks it, so
+        # `canary_rate=0.03` really is 3% of settled volume.
+        real_volume = self.stats.settled_cc
+        if real_volume <= 0:
+            return  # nothing to sample yet
+        share = self.canary_spend_cc / real_volume
+        if share >= self.canary_rate:
+            return
+        # Jitter so the decoys do not land on a predictable cadence a
+        # colluding verifier could learn.
+        if self.rng.random() < 0.5:
             return
         candidates = [a for a in agents.values()
                       if a.online and a.remaining_quota >= 2.0]
@@ -270,6 +293,7 @@ class Market:
                 self.canary_caught += 1
                 rate = v.canary_failed / v.canary_seen
                 if (v.canary_seen < self.slash_min_samples
+                        or v.canary_failed < self.slash_min_failures
                         or rate < self.slash_threshold):
                     # Below the evidence bar: recorded, not punished.
                     self.honest_error_forgiven += 1
