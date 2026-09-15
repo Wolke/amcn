@@ -17,6 +17,7 @@
 const { attachLineReader, sendLine, verify, sha256, canon,
         genIdentity, sign, net } = require('./lib/wire');
 const eeff = require('./lib/eeff');
+const discovery = require('./lib/discovery');
 
 const PORT = Number(process.env.HUB_PORT || 47180);
 const BIND = process.env.HUB_BIND || '127.0.0.1'; // 0.0.0.0 for LAN pilots
@@ -267,6 +268,16 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-server.listen(PORT, BIND, () => console.log(
-  `[hub] listening on ${BIND}:${PORT} — starter CL ${eeff.STARTER_CC}, fee ${eeff.FEE_RATE * 100}%, ` +
-  `risk ${eeff.RISK_THIN * 100}%/${eeff.RISK_BASE * 100}%, hash-chained + checkpointed`));
+server.listen(PORT, BIND, () => {
+  console.log(
+    `[hub] listening on ${BIND}:${PORT} — starter CL ${eeff.STARTER_CC}, fee ${eeff.FEE_RATE * 100}%, ` +
+    `risk ${eeff.RISK_THIN * 100}%/${eeff.RISK_BASE * 100}%, hash-chained + checkpointed`);
+  if (process.env.HUB_BEACON === '0') {
+    console.log('[hub] discovery beacon disabled (HUB_BEACON=0)');
+  } else {
+    // Targets follow BIND, so the hub only ever advertises addresses it serves.
+    const b = discovery.startBeacon(hubId, PORT, { bind: BIND });
+    console.log(`[hub] discovery beacon on udp/${b.port} → ${b.targets.join(', ')}, ` +
+      `hub did ${discovery.didOf(hubId.pub)}`);
+  }
+});

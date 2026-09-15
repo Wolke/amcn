@@ -53,8 +53,13 @@ const MAX_LINE = 16 * 1024 * 1024;
 function attachLineReader(sock, onMsg, onRaw) {
   let buf = '';
   // Unhandled 'error' on a socket is fatal to the process; a peer that
-  // disconnects mid-frame (ECONNRESET) must not be able to do that.
-  sock.on('error', () => sock.destroy());
+  // disconnects mid-frame (ECONNRESET) must not be able to do that. Log it
+  // rather than swallowing it — silently dropping ECONNREFUSED turns "cannot
+  // reach the hub" into a process that prints nothing at all.
+  sock.on('error', (err) => {
+    console.error(`[wire] socket error: ${err.code || err.message}`);
+    sock.destroy();
+  });
   sock.on('data', (chunk) => {
     buf += chunk.toString('utf8');
     let i;
@@ -89,6 +94,23 @@ function sendLine(sock, obj) {
   return true;
 }
 
+// The hub address may be unknown at module load (UDP discovery). Hand back a
+// handle immediately and queue sends until the socket exists, so callers can
+// keep `const hub = connect(...)` at module scope instead of restructuring
+// everything into an async bootstrap.
+function connectLazy(targetPromise, onMsg) {
+  const queued = [];
+  let live = null;
+  targetPromise.then(({ host, port }) => {
+    live = connect(port, onMsg, host);
+    while (queued.length) live.send(queued.shift());
+  });
+  return {
+    send: (obj) => { if (live) live.send(obj); else queued.push(obj); },
+    get sock() { return live && live.sock; },
+  };
+}
+
 function connect(port, onMsg, host = '127.0.0.1') {
   const sock = net.connect(port, host);
   attachLineReader(sock, onMsg);
@@ -97,5 +119,5 @@ function connect(port, onMsg, host = '127.0.0.1') {
 
 module.exports = {
   genIdentity, canon, sign, verify, sha256, hmac,
-  attachLineReader, sendLine, connect, net,
+  attachLineReader, sendLine, connect, connectLazy, net,
 };

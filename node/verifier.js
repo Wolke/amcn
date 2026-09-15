@@ -3,9 +3,11 @@
 // verdict (FR-044). Deterministic judge for the prototype; an LLM judge
 // slots in behind the same message flow.
 //
-// env AGENT_CONFIG: { name, hubPort }
+// env AGENT_CONFIG: { name, hubPort, hubHost?, hubPin?, beaconPort? }
+// hubHost "discover" uses the UDP beacon instead of a hand-copied IP.
 'use strict';
-const { genIdentity, sign, verify, connect } = require('./lib/wire');
+const { genIdentity, sign, verify, connectLazy } = require('./lib/wire');
+const discovery = require('./lib/discovery');
 const { genBoxKeys, open } = require('./lib/e2e');
 const { runAsserts, assertsHash } = require('./lib/dsl');
 
@@ -14,7 +16,7 @@ const id = genIdentity();
 const box = genBoxKeys();
 const log = (m) => console.log(`[${cfg.name} ${id.did}] ${m}`);
 
-const hub = connect(cfg.hubPort, (msg) => {
+const hub = connectLazy(discovery.resolveHubTarget(cfg, log), (msg) => {
   switch (msg.type) {
     case 'registered':
       log('registered as verifier');

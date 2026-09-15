@@ -57,9 +57,22 @@ AMCN_PROVIDER_KEY='sk-test-anything' node agent.js configs/provider.json
 ```bash
 cd ai-exchage/node
 cp configs/requester.example.json configs/requester.json
-# 編輯 configs/requester.json：把 hubHost 改成機器 1 的 IP（步驟 1a）
 node agent.js configs/requester.json
 ```
+
+範本的 `hubHost` 已經是 `"discover"`，所以**不需要查也不需要填機器 1 的 IP**：Hub 每秒往區網廣播一則自己簽署的公告（udp/47179），Agent 啟動時聽到就自動連上，看到
+`discovered hub 192.168.1.10:47180 (did:demo:…)` 即成功。這也是步驟 1a 查 IP 只剩「備用」用途的原因。
+
+想固定成手填 IP（例如兩台不在同一廣播網段）就把 `hubHost` 改成該 IP，行為與舊版完全相同。
+
+**釘住 Hub 身分（建議）**：廣播網段上任何機器都能冒充 Hub 回應。Hub 啟動時會印出
+`hub did did:demo:…`，把它填進 `configs/requester.json` 的 `hubPin`，Agent 就只接受那個身分的公告，對不上時會持續等待而**不會**改連別處：
+
+```json
+{ "hubHost": "discover", "hubPin": "did:demo:<機器 1 印出的 hub did>" }
+```
+
+注意 Hub 的身分目前每次重啟都會換（見第 8 節），所以 Hub 重開後 `hubPin` 要跟著更新。
 
 看到 `registered, dynamic credit line 46.3 CC` 表示已跨機連上 Hub（同樣的 0.925 新戶係數，見步驟 1d）。
 
@@ -120,9 +133,17 @@ curl -s http://127.0.0.1:47202/status | python3 -m json.tool   # 機器 2 的餘
 | quorum 沒反應 | 3 個 Verifier 沒起來（Hub log 應有三筆 `registered ... (verifier)`） |
 | 驗收 FAIL | 用了真實 LLM 卻配 `sha256_eq`（見第 5 節） |
 | 埠被占用 | 換 `HUB_PORT`／`consolePort`，兩邊設定要一致 |
+| `no hub beacon heard` | Hub 沒設 `HUB_BIND=0.0.0.0`（綁 loopback 時只會往 127.0.0.1 廣告）；或兩台不在同一廣播網段（跨 VLAN／訪客網路／Wi-Fi 隔離會擋 UDP 廣播）→ 改回手填 IP |
+| `no beacon matching pinned hub` | `hubPin` 與 Hub 現在的身分不符。Hub 重啟會換身分，照它新印出的 `hub did` 更新 |
 
 ## 7. 安全注意（試點範圍）
 
 - Hub 綁 `0.0.0.0` 只該在**受信任的區網**做；傳輸層目前無 TLS（訊息本身有簽章、payload 有 E2E 加密，但 metadata 是明文）。不要暴露到公網。
 - Console（47201/47202）只綁 localhost，這是刻意的——它是 Owner 的控制面。
 - API key 永遠只在 agent 進程的機器上；試點時可用 `sk-test-anything` 假 key 跑 mock adapter，完全不花錢。
+
+## 8. 已知限制（試點範圍內會撞到的）
+
+- **Hub 與 Agent 的狀態都不持久化**。Hub 帳本在記憶體，`export` 有出口但沒有 import 入口；而 `agent.js` 每次啟動都 `genIdentity()` 產生**新 DID**（keystore 只保管 API key，不保管身分）。所以任一邊重啟，餘額與信用歷史都會歸零、無法延續。想留證據就在重啟前把 `export` 的輸出存檔——收據本身是雙簽的，離線可獨立驗證。
+- **Hub 身分每次重啟改變**，所以 `hubPin` 只在單次 Hub 生命週期內有意義，真正的「發現與輪替」還需要 Hub 身分持久化。
+- **傳輸層無 TLS**。訊息有簽章、payload 有 E2E 加密，但 metadata 是明文（見第 7 節）。

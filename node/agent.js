@@ -14,10 +14,11 @@
 //            acceptance: 'dsl-local'|'judge-quorum', asserts:[...]}] }
 'use strict';
 const http = require('node:http');
-const { genIdentity, sign, verify, sha256, connect } = require('./lib/wire');
+const { genIdentity, sign, verify, sha256, connect, connectLazy } = require('./lib/wire');
 const { genBoxKeys, seal, open } = require('./lib/e2e');
 const { runAsserts, assertsHash } = require('./lib/dsl');
 const keystore = require('./lib/keystore');
+const discovery = require('./lib/discovery');
 const adapter = require('./adapter');
 
 const cfg = process.env.AGENT_CONFIG
@@ -60,7 +61,10 @@ function requestSettlement(contractId, role, provider, output) {
   hub.send({ type: 'fee_quote', contract_id: contractId, requester, price });
 }
 
-const hub = connect(cfg.hubPort || 47180, async (msg) => {
+// hubHost: "discover" opts into the UDP beacon (lib/discovery.js) instead of
+// a hand-copied IP. Any other value, including absent, keeps the previous
+// behaviour exactly — existing configs and demo.js are unaffected.
+const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
   switch (msg.type) {
     case 'registered':
       console_.creditLine = msg.credit_line;
@@ -245,7 +249,7 @@ const hub = connect(cfg.hubPort || 47180, async (msg) => {
 
     case 'error': log(`hub error: ${msg.why} (${msg.ref})`); break;
   }
-}, cfg.hubHost || '127.0.0.1');
+});
 
 const regBody = { did: id.did, pub: id.pub, box_pub: box.boxPub };
 hub.send({ type: 'register', ...regBody, sig: sign(id.privateKey, regBody) });

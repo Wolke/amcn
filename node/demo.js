@@ -8,8 +8,17 @@
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { connect, verify, sha256, canon, net } = require('./lib/wire');
+const discovery = require('./lib/discovery');
 
-const PORT = 47180;
+// Every port is derived from one offset so the demo can run alongside a live
+// pilot stack (which holds 47180 and the 47201 console) without colliding:
+//   DEMO_PORT_OFFSET=100 node demo.js
+const PORT_OFFSET = Number(process.env.DEMO_PORT_OFFSET || 0);
+const PORT = 47180 + PORT_OFFSET;
+const FAKE_A_PORT = 47191 + PORT_OFFSET;
+const FAKE_B_PORT = 47192 + PORT_OFFSET;
+const CONSOLE_A_PORT = 47201 + PORT_OFFSET;
+const BEACON_PORT = 47179 + PORT_OFFSET;
 const KEY_A = 'sk-demo-A-SECRET-9f3a1c';
 const KEY_B = 'sk-demo-B-SECRET-77e0d2';
 const PAYLOAD_1 = 'debug: TypeError in settle() when postings list is empty';
@@ -71,9 +80,10 @@ function verifyChains(chains, checkpoints, hubPub) {
 async function main() {
   console.log('== AMCN Phase 1 round 3: quorum + forced settlement + hash chain ==\n');
   const procs = [];
-  procs.push(spawnProc('hub.js', { HUB_PORT: String(PORT) }));
-  procs.push(spawnProc('fake-provider.js', { FAKE_PORT: '47191', FAKE_KEY: KEY_A }));
-  procs.push(spawnProc('fake-provider.js', { FAKE_PORT: '47192', FAKE_KEY: KEY_B }));
+  procs.push(spawnProc('hub.js',
+    { HUB_PORT: String(PORT), HUB_BEACON_PORT: String(BEACON_PORT) }));
+  procs.push(spawnProc('fake-provider.js', { FAKE_PORT: String(FAKE_A_PORT), FAKE_KEY: KEY_A }));
+  procs.push(spawnProc('fake-provider.js', { FAKE_PORT: String(FAKE_B_PORT), FAKE_KEY: KEY_B }));
   await new Promise((r) => setTimeout(r, 300));
   for (const v of ['V1', 'V2', 'V3']) {
     procs.push(spawnProc('verifier.js', agentCfg({ name: v })));
@@ -82,8 +92,8 @@ async function main() {
   const SHA_OK = [{ op: 'sha256_eq' }, { op: 'max_len', arg: 64 }];
   // A: borrows (T1), then provides; exposes an Owner Console
   procs.push(spawnProc('agent.js', agentCfg({
-    name: 'A', consolePort: 47201,
-    adapter: { baseUrl: 'http://127.0.0.1:47191', key: { env: 'A_PROVIDER_KEY', service: 'amcn-demo-a' } },
+    name: 'A', consolePort: CONSOLE_A_PORT,
+    adapter: { baseUrl: `http://127.0.0.1:${FAKE_A_PORT}`, key: { env: 'A_PROVIDER_KEY', service: 'amcn-demo-a' } },
     provide: { afterMs: 2200, pricePerUnit: 0.95, repayment: true },
     posts: [{ atMs: 600, units: 40, maxPriceCC: 45, payload: PAYLOAD_1,
               acceptance: 'dsl-local', asserts: SHA_OK }],
@@ -91,7 +101,7 @@ async function main() {
   // B: provider; later a MALICIOUS requester who refuses to settle (T3)
   procs.push(spawnProc('agent.js', agentCfg({
     name: 'B', refuseToSettle: true,
-    adapter: { baseUrl: 'http://127.0.0.1:47192', key: { env: 'B_PROVIDER_KEY', service: 'amcn-demo-b' } },
+    adapter: { baseUrl: `http://127.0.0.1:${FAKE_B_PORT}`, key: { env: 'B_PROVIDER_KEY', service: 'amcn-demo-b' } },
     provide: { afterMs: 0, pricePerUnit: 1.0 },
     posts: [{ atMs: 5200, units: 30, maxPriceCC: 35, payload: PAYLOAD_3,
               acceptance: 'judge-quorum', asserts: SHA_OK }],
@@ -109,7 +119,15 @@ async function main() {
     const c = connect(PORT, (m) => { if (m.type === 'ledger_export') resolve(m); });
     c.send({ type: 'export' });
   });
-  const consoleA = await (await fetch('http://127.0.0.1:47201/status')).json();
+  const consoleA = await (await fetch(`http://127.0.0.1:${CONSOLE_A_PORT}/status`)).json();
+
+  // Discovery: an agent with no hand-copied IP must find the hub from its
+  // signed UDP beacon, and a wrong pin must be rejected (otherwise anyone on
+  // the broadcast domain could answer for the hub).
+  const beacon = await discovery.discoverHub({ port: BEACON_PORT, timeoutMs: 4000 });
+  const wrongPin = await discovery.discoverHub({
+    port: BEACON_PORT, timeoutMs: 1200, pin: 'did:demo:0000000000000000',
+  });
 
   // Regression gate: a malformed frame from any LAN peer must not be able to
   // kill the hub. It could — createPublicKey() throws on bad DER and the throw
@@ -205,6 +223,10 @@ async function main() {
     Math.abs(consoleA.balance_cc - balances[A]) < 1e-6 &&
     consoleA.settled.length >= 2,
     `A console: ${consoleA.balance_cc.toFixed(2)} CC, ${consoleA.settled.length} settlements`);
+
+  check('UDP 發現：無需手填 IP 即找到 Hub，且錯誤的 pin 被拒絕（§2.1 協議內發現）',
+    !!beacon && beacon.port === PORT && beacon.pub === hub_pub && wrongPin === null,
+    beacon ? `beacon → ${beacon.host}:${beacon.port} ${beacon.did}, wrong pin rejected` : 'no beacon heard');
 
   check('畸形 frame 不能打掉 Hub（§16 區網可用性回歸閘門）', hubSurvived,
     `${JUNK_FRAMES.length} 類畸形 frame 後 Hub 仍正常回應 export`);
