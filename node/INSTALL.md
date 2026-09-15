@@ -28,8 +28,12 @@ ipconfig getifaddr en0     # macOS，例如 192.168.1.10
 
 ```bash
 cd ai-exchage/node
-HUB_SEED='pick-any-stable-string' HUB_BIND=0.0.0.0 node hub.js
+HUB_SEED='pick-any-stable-string' \
+HUB_DUMP_PATH=out/ledger.json \
+HUB_BIND=0.0.0.0 node hub.js
 ```
+
+`HUB_DUMP_PATH` 每 10 秒自動把完整帳本寫檔（`HUB_DUMP_MS` 可調）。Hub 掛掉後用 `HUB_IMPORT=out/ledger.json` 啟動即可接續——第二排序器會**驗證**整份匯出（逐筆驗簽、鏈重算、信用額度重放）才接受，不符就拒絕啟動。沒設 `HUB_DUMP_PATH` 的話，Hub 一旦停止，那本帳就沒了。
 
 `HUB_SEED` 讓 Hub 的身分（`hub did`）跨重啟不變。沒設也能跑，但每次重啟 DID 都會變，任何用 `hubPin` 釘住它的 agent 都得重新設定（§4 #14）。啟動 log 會印出 `hub did`，那就是 `hubPin` 要填的值。
 

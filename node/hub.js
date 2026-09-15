@@ -448,6 +448,54 @@ function handleForced(msg, sock) {
     { requester: `pre_auth:${pre_auth_sig}`, provider: provider_sig }, evidence);
 }
 
+// One definition of the export, shared by the `export` message and the
+// auto-dump, so a dumped ledger can never differ from a queried one.
+function buildExport() {
+  return {
+    receipts,
+    pubkeys: Object.fromEntries([...agents].map(([d, a]) => [d, a.pub])),
+    balances: Object.fromEntries(balances),
+    credit_lines: Object.fromEntries(
+      [...agents].filter(([, a]) => a.role === 'agent')
+        .map(([d]) => [d, clOf(d)])),
+    chains: Object.fromEntries(chains),
+    checkpoints,
+    stakes: Object.fromEntries(stakes),
+    canary_stats: Object.fromEntries(canaryStats),
+    canary_scored: [...canarySeen],
+    events,
+    hub_pub: hubId.pub,
+    raw_log: rawLog.join('\n'),
+  };
+}
+
+// A disaster export you have to remember to take is not disaster recovery.
+// The pilot proved it: export->import shipped, then the hub went down with
+// nobody having run ledger-dump.js, and that ledger was gone regardless.
+// HUB_DUMP_PATH writes the same artefact on a timer, so the most a crash
+// costs is one interval.
+function startAutoDump() {
+  const file = process.env.HUB_DUMP_PATH;
+  if (!file) return;
+  const ms = Number(process.env.HUB_DUMP_MS || 10000);
+  const fs = require('node:fs');
+  fs.mkdirSync(require('node:path').dirname(file), { recursive: true });
+  const write = () => {
+    try {
+      // Written to a temp path and renamed, so a crash mid-write cannot
+      // leave a truncated file where a recoverable one used to be.
+      const tmp = `${file}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(buildExport()));
+      fs.renameSync(tmp, file);
+    } catch (err) {
+      console.error(`[hub] auto-dump failed: ${err.message}`);
+    }
+  };
+  setInterval(write, ms).unref();
+  write();
+  console.log(`[hub] auto-dump every ${ms}ms → ${file}`);
+}
+
 // W10: start as a second sequencer from a disaster export. Verified, not
 // trusted — see lib/rebuild.js. A refusal to start is the correct outcome
 // when the export does not check out; carrying on with an unverified ledger
@@ -593,25 +641,10 @@ const server = net.createServer((sock) => {
       case 'forced_settlement': handleForced(msg, sock); break;
       case 'canary_result': handleCanaryResult(msg, sock); break;
       case 'export': {
-        sendLine(sock, {
-          type: 'ledger_export',
-          receipts,
-          pubkeys: Object.fromEntries([...agents].map(([d, a]) => [d, a.pub])),
-          balances: Object.fromEntries(balances),
-          credit_lines: Object.fromEntries(
-            [...agents].filter(([, a]) => a.role === 'agent')
-              .map(([d]) => [d, clOf(d)])),
-          chains: Object.fromEntries(chains),
-          checkpoints,
-          stakes: Object.fromEntries(stakes),
-          canary_stats: Object.fromEntries(canaryStats),
-          canary_scored: [...canarySeen],
-          events,
-          hub_pub: hubId.pub,
-          raw_log: rawLog.join('\n'),
-        });
+        sendLine(sock, { type: 'ledger_export', ...buildExport() });
         break;
       }
+
     }
   }, (line) => rawLog.push(line));
 });
@@ -641,6 +674,7 @@ server.listen(PORT, BIND, () => {
     console.log('[hub] no HUB_SEED: this hub\'s DID changes on every restart, ' +
       'so agents pinning it (hubPin) must be reconfigured after a restart');
   }
+  startAutoDump();
   if (CANARY_DID) {
     console.log(`[hub] canary issuer authorised: ${CANARY_DID} ` +
       '(may spend Treasury on decoy tasks)');
