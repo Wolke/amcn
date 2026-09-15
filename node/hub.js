@@ -35,10 +35,26 @@ const INSURANCE = 'protocol:insurance';
 const STAKE = 'protocol:stake';
 const STAKE_TARGET_CC = Number(process.env.HUB_STAKE_TARGET_CC || 5);
 const STAKE_ESCROW_FRAC = Number(process.env.HUB_STAKE_ESCROW_FRAC || 0.5);
+// proposal-C §7: 「Treasury 定期以隨機身分發布已知答案任務」. The issuer is a
+// separate agent, not the hub: having the hub originate tasks would make the
+// sequencer a market participant, which §2.2's "第一個排序器不是信任根" is
+// specifically trying to avoid. The cost is a privileged DID — one identity
+// whose signed canary reports the hub acts on, and which spends Treasury
+// funds. That privilege is why it is operator-configured and named in the
+// startup log rather than inferred.
+const CANARY_DID = process.env.HUB_CANARY_DID || null;
+// §4 #27/#30: punish a pattern, not a single unlucky verdict, and require an
+// absolute count so a small sample cannot cross a rate threshold by luck.
+const SLASH_FRAC = Number(process.env.HUB_SLASH_FRAC || 0.10);
+const SLASH_THRESHOLD = Number(process.env.HUB_SLASH_THRESHOLD || 0.25);
+const SLASH_MIN_SAMPLES = Number(process.env.HUB_SLASH_MIN_SAMPLES || 5);
+const SLASH_MIN_FAILURES = Number(process.env.HUB_SLASH_MIN_FAILURES || 3);
 
 const hubId = genIdentity(); // signs checkpoints
 const settledIds = new Set(); // contract_id idempotency keys
 const stakes = new Map();     // verifier did -> CC held in protocol:stake
+const canaryStats = new Map(); // verifier did -> {seen, failed, slashed_cc}
+const canarySeen = new Set();  // canary contract_ids already scored
 
 // Post a balanced set that is not a settlement (escrow, slashing). Same
 // conservation and hash-chain rules; kept separate so `receipts` stays the
@@ -288,6 +304,81 @@ function handleReceipt(msg, sock) {
   applySettlement('dual', receipt, sigs);
 }
 
+// A canary result: the issuer reports how the panel judged a decoy whose
+// correct verdict is knowable. Recorded per verifier, and a pattern of
+// passing known-bad work costs stake.
+function handleCanaryResult(msg, sock) {
+  const { report, sig, attestations } = msg;
+  const ref = report && report.contract_id;
+  if (!CANARY_DID) return fail(sock, 'canary reports not enabled on this hub', ref);
+  const issuer = agents.get(report.issuer);
+  if (!issuer || report.issuer !== CANARY_DID) {
+    return fail(sock, 'canary report from an unauthorised issuer', ref);
+  }
+  if (!verify(issuer.pub, report, sig)) {
+    return fail(sock, 'bad canary report signature', ref);
+  }
+  if (canarySeen.has(ref)) return fail(sock, 'canary already scored', ref);
+  if (report.expected_verdict !== 'FAIL') {
+    return fail(sock, 'canary must expect FAIL (its asserts are unsatisfiable)', ref);
+  }
+  const panelDids = panel.deriveDids(report.verifier_pool, ref, report.seed_root);
+  if (panel.poolHash(report.verifier_pool) !== report.verifier_pool_hash) {
+    return fail(sock, 'canary pool does not match its pinned hash', ref);
+  }
+  canarySeen.add(ref);
+
+  const wrong = [];
+  for (const e of attestations || []) {
+    const a = e && e.attestation;
+    if (!a || a.contract_id !== ref) continue;
+    const v = agents.get(a.verifier);
+    if (!v || v.role !== 'verifier' || !panelDids.includes(a.verifier)) continue;
+    if (!verify(v.pub, a, e.sig)) continue;
+    // Same accountability bar as a settlement: the reveal must open a
+    // commitment made before the verifier saw anyone else's verdict.
+    if (typeof e.nonce !== 'string' || sha256(canon(a) + e.nonce) !== e.commitment) continue;
+    if (!verify(v.pub, { contract_id: ref, verifier: a.verifier,
+                         commitment: e.commitment }, e.commit_sig)) continue;
+    const st = canaryStats.get(a.verifier) || { seen: 0, failed: 0, slashed_cc: 0 };
+    st.seen += 1;
+    if (a.verdict === 'PASS') { st.failed += 1; wrong.push(a.verifier); }
+    canaryStats.set(a.verifier, st);
+  }
+
+  const slashed = [];
+  for (const did of wrong) {
+    const st = canaryStats.get(did);
+    const rate = st.failed / st.seen;
+    if (st.seen < SLASH_MIN_SAMPLES || st.failed < SLASH_MIN_FAILURES ||
+        rate < SLASH_THRESHOLD) continue;  // recorded, not punished
+    const held = stakes.get(did) || 0;
+    const take = +Math.min(held, STAKE_TARGET_CC * SLASH_FRAC).toFixed(4);
+    if (take <= 0) continue;
+    stakes.set(did, +(held - take).toFixed(4));
+    st.slashed_cc = +(st.slashed_cc + take).toFixed(4);
+    // Forfeited stake funds the insurance pool, which is what absorbs the
+    // bad debt that undetected bad work produces.
+    applyPostings('slash', ref, [{ account: STAKE, amount_cc: -take },
+                                 { account: INSURANCE, amount_cc: take }]);
+    slashed.push(`${did.slice(0, 18)}=-${take}`);
+  }
+
+  // FR-083: the decoy is real work for the provider, paid by Treasury and
+  // marked a test transaction so it never counts as organic volume.
+  const price = report.price_cc;
+  if (price > 0 && agents.has(report.provider)) {
+    applyPostings('canary', ref, [{ account: TREASURY, amount_cc: -price },
+                                  { account: report.provider, amount_cc: price }]);
+  }
+  console.log(`[hub] CANARY ${ref}: ${panelDids.length} panel, ` +
+    `${wrong.length} passed known-bad work` +
+    (slashed.length ? `, slashed ${slashed.join(' ')}` : ', none above the evidence bar') +
+    `, treasury paid provider ${price} CC`);
+  sendLine(sock, { type: 'canary_scored', contract_id: ref,
+                   wrong: wrong.length, slashed: slashed.length });
+}
+
 function handleForced(msg, sock) {
   const { receipt, provider_sig, evidence } = msg;
   const ref = receipt.contract_id;
@@ -437,6 +528,7 @@ const server = net.createServer((sock) => {
       }
       case 'receipt': handleReceipt(msg, sock); break;
       case 'forced_settlement': handleForced(msg, sock); break;
+      case 'canary_result': handleCanaryResult(msg, sock); break;
       case 'export': {
         sendLine(sock, {
           type: 'ledger_export',
@@ -449,6 +541,7 @@ const server = net.createServer((sock) => {
           chains: Object.fromEntries(chains),
           checkpoints,
           stakes: Object.fromEntries(stakes),
+          canary_stats: Object.fromEntries(canaryStats),
           hub_pub: hubId.pub,
           raw_log: rawLog.join('\n'),
         });
@@ -476,5 +569,9 @@ server.listen(PORT, BIND, () => {
     const b = discovery.startBeacon(hubId, PORT, { bind: BIND });
     console.log(`[hub] discovery beacon on udp/${b.port} → ${b.targets.join(', ')}, ` +
       `hub did ${discovery.didOf(hubId.pub)}`);
+  }
+  if (CANARY_DID) {
+    console.log(`[hub] canary issuer authorised: ${CANARY_DID} ` +
+      '(may spend Treasury on decoy tasks)');
   }
 });

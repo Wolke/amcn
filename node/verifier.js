@@ -41,11 +41,16 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), (msg) => {
       }
       const payload = open(box.boxPriv, r.payload_box);
       const { pass, failures } = runAsserts(r.asserts, { payload, output: r.output });
+      // cfg.alwaysPass models the verifier the canary exists to catch: it
+      // collects the fee and votes PASS without regard to the asserts. Same
+      // kind of scaffolding as agent.js's refuseToSettle for T-05 — a real
+      // adversary is not going to volunteer for the test.
+      const verdict = cfg.alwaysPass ? 'PASS' : (pass ? 'PASS' : 'FAIL');
       const attestation = {
         contract_id: r.contract_id,
         verifier: id.did,
-        verdict: pass ? 'PASS' : 'FAIL',
-        failures, // machine-readable reasons (FR-044)
+        verdict,
+        failures: cfg.alwaysPass ? [] : failures, // FR-044 machine-readable
       };
       // commit-reveal (§2.2, fixes the other half of §4 #6): publish a
       // binding hash of the verdict first. Without it, a verifier that sees
@@ -62,7 +67,8 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), (msg) => {
         hub.send({ type: 'attestation_commit', to, commit: commitBody,
                    sig: commitSig, pub: id.pub });
       }
-      log(`committed ${r.contract_id}: ${commitment.slice(0, 12)}…`);
+      log(`committed ${r.contract_id}: ${commitment.slice(0, 12)}…` +
+          (cfg.alwaysPass ? ' (lazy: votes PASS regardless)' : ''));
       break;
     }
 

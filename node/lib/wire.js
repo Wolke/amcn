@@ -13,6 +13,29 @@ function genIdentity() {
   return { did, pub, privateKey };
 }
 
+// A reproducible identity from a seed. Needed because an authorisation like
+// HUB_CANARY_DID has to be configured on the hub *before* the authorised
+// process starts, which is impossible while every start draws a fresh
+// keypair. Also the first step toward §4 #17: identities that survive a
+// restart instead of leaving abandoned balances behind.
+//
+// The DER prefix is the fixed PKCS#8 header for an Ed25519 private key, so
+// the 32-byte seed is the whole secret.
+const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+
+function identityFromSeed(seed) {
+  const raw = crypto.createHash('sha256').update(String(seed)).digest();
+  const privateKey = crypto.createPrivateKey({
+    key: Buffer.concat([ED25519_PKCS8_PREFIX, raw]),
+    format: 'der', type: 'pkcs8',
+  });
+  const pub = crypto.createPublicKey(privateKey)
+    .export({ type: 'spki', format: 'der' }).toString('base64');
+  const did = 'did:demo:' +
+    crypto.createHash('sha256').update(pub).digest('hex').slice(0, 16);
+  return { did, pub, privateKey };
+}
+
 // deterministic JSON: sorted keys, so signatures are stable
 function canon(obj) {
   if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
@@ -148,7 +171,7 @@ function connect(port, onMsg, host = '127.0.0.1') {
 }
 
 module.exports = {
-  genIdentity, canon, sign, verify, sha256, hmac,
+  genIdentity, identityFromSeed, canon, sign, verify, sha256, hmac,
   attachLineReader, sendLine, connect, connectLazy, net,
   PROTOCOL_VERSION,
 };

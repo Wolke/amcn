@@ -42,6 +42,9 @@ cd node && node demo.js
 # W8 無人閉環 demo（約 20 秒，12 項斷言：無時間表、無 Console 呼叫）
 cd node && node demo-autonomous.js
 
+# W9 金絲雀稽核 demo（約 30 秒，6 項斷言：偷懶 verifier 被沒收押注）
+cd node && node demo-canary.js
+
 # 兩支 demo 都可用 DEMO_PORT_OFFSET=100 與跑中的試點並存
 
 # 還債政策參數掃描（折價 × band 定義 × 情境，約 10 分鐘）
