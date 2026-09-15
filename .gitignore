@@ -1,7 +1,11 @@
 __pycache__/
 *.pyc
 .DS_Store
-sim/out/
+# Simulation artifacts. Covers sim/out/ and sim/sim/out/ — the latter is where
+# a run from the wrong cwd landed, and it got committed there in 26b0f03 while
+# a single-level sim/out/ pattern missed it, so a later run silently rewrote
+# committed results. Documented output lives in docs/evaluation/, not here.
+sim/**/out/
 
 # Per-machine pilot configs (node/INSTALL.md has you cp from *.example.json).
 # They carry machine-specific IPs/ports and, once you point at a real model,
