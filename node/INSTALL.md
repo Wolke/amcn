@@ -218,6 +218,7 @@ node agent.js configs\provider.json
 | 驗收 FAIL | 用了真實 LLM 卻配 `sha256_eq`（見第 5 節） |
 | 埠被占用 | 換 `HUB_PORT`／`consolePort`，兩邊設定要一致 |
 | PowerShell 說 `panel.cmd` 不是命令 | PowerShell 不把當前目錄放進 PATH。用 `.\panel.cmd ...`，或直接 `node panel.js <hub IP>`（與 shell 無關）|
+| 想診斷跨機發現（§4 #18） | 在 Hub 那台 `node discovery-probe.js send`，在發現失敗的那台 `node discovery-probe.js listen`。listen 端沒有任何 `跨機 ✓` 就是網路在丟廣播；有封包但簽章失敗才是 beacon 程式的問題 |
 | `no hub beacon heard` | Hub 沒設 `HUB_BIND=0.0.0.0`（綁 loopback 時只會往 127.0.0.1 廣告）；或兩台不在同一廣播網段（跨 VLAN／訪客網路／Wi-Fi 隔離會擋 UDP 廣播）→ 改回手填 IP |
 | `no beacon matching pinned hub` | `hubPin` 與 Hub 現在的身分不符。Hub 重啟會換身分，照它新印出的 `hub did` 更新 |
 
