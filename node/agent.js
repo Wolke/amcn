@@ -621,6 +621,17 @@ function postTask(post) {
         const contractId = `c-${task.task_id}`;
         const pool = post.acceptance === 'judge-quorum'
           ? [...(verifierDir.verifiers || [])] : [];
+        // Awarding a quorum contract against too small a pool produces a
+        // contract that can never settle: the panel is short, attestations
+        // never reach two, and the hub refuses. Twelve tasks stalled exactly
+        // this way on the pilot when no verifier was online, with nothing in
+        // the log to say why. Refuse up front and name the reason.
+        if (post.acceptance === 'judge-quorum' && pool.length < panelLib.PANEL_SIZE) {
+          log(`NOT awarding ${task.task_id}: judge-quorum needs ` +
+              `${panelLib.PANEL_SIZE} verifiers in the pool, ${pool.length} online`);
+          pendingBids.delete(task.task_id);
+          return;
+        }
         // §4 #6: the panel is not named here. The pool is pinned and the seed
         // is a checkpoint that does not exist yet, so grinding the contract id
         // would mean predicting a root that later settlements determine.

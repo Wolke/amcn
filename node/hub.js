@@ -145,6 +145,17 @@ function validateSchedule(receipt, sock, ref, attestations) {
     }
     panelDids = panel.deriveDids(receipt.verifier_pool, ref, seedEntry.cp.root);
   }
+  // A judge-quorum settlement with an empty pool used to skip the quorum
+  // check entirely, so a receipt could claim quorum acceptance while nobody
+  // had verified anything — the ledger would record it as a quorum
+  // settlement. Acceptance must not degrade silently just because the pool
+  // was empty when the contract was written.
+  if (receipt.acceptance_method === 'judge-quorum' &&
+      panelDids.length < panel.PANEL_SIZE) {
+    fail(sock, `judge-quorum needs a pool of at least ${panel.PANEL_SIZE}, ` +
+      `got ${panelDids.length}`, ref);
+    return false;
+  }
   // §4 #26: only verifiers whose reveal opened a prior commitment get paid.
   // A panel member that stayed silent earns nothing.
   let payees = panelDids;
