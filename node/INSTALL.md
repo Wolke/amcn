@@ -142,14 +142,27 @@ cd ai-exchage/node
 node panel.js 192.168.1.10        # ← 換成機器 1 的 IP（步驟 1a）
 ```
 
-Windows 用 `panel.cmd`（Command Prompt，或編輯後雙擊）：
+Windows 上**最可靠的一行**（cmd 與 PowerShell 都一樣）：
 
 ```
 cd ai-exchage\node
+node panel.js 192.168.1.10
+```
+
+也有 `panel.cmd` 包裝（會檢查 node 是否在 PATH、失敗時 `pause`，適合雙擊）。注意**呼叫方式依 shell 而異**：
+
+```
+REM Command Prompt / cmd.exe
 panel.cmd 192.168.1.10
 ```
 
-刻意用 `.cmd` 而不是 `.ps1`：PowerShell 預設拒絕執行未簽署的腳本，批次檔沒有這個限制。它只是呼叫 `panel.js`，邏輯都在那裡。
+```powershell
+# PowerShell 必須加 .\  ——它不把當前目錄放進 PATH，
+# 裸寫 panel.cmd 會回報「找不到命令」
+.\panel.cmd 192.168.1.10
+```
+
+刻意用 `.cmd` 而不是 `.ps1`：PowerShell 預設拒絕執行未簽署的腳本，批次檔沒有這個限制。它只是呼叫 `panel.js`，邏輯都在那裡——所以上面那行 `node panel.js` 永遠是等價且無歧義的退路。
 
 `panel.js` 會先探測 Hub 是否可達（不可達就給出可操作的錯誤，而不是讓三個 Verifier 安靜地重試），啟動指定數量的 Verifier，等全部註冊完成後回報，`Ctrl-C` 一次停掉整個 panel（不留孤兒 process）。任一個 Verifier 意外退出時會停掉整個 panel——半個 panel 看起來健康是更糟的狀態。
 
@@ -204,6 +217,7 @@ node agent.js configs\provider.json
 | quorum 沒反應 | 3 個 Verifier 沒起來（Hub log 應有三筆 `registered ... (verifier)`） |
 | 驗收 FAIL | 用了真實 LLM 卻配 `sha256_eq`（見第 5 節） |
 | 埠被占用 | 換 `HUB_PORT`／`consolePort`，兩邊設定要一致 |
+| PowerShell 說 `panel.cmd` 不是命令 | PowerShell 不把當前目錄放進 PATH。用 `.\panel.cmd ...`，或直接 `node panel.js <hub IP>`（與 shell 無關）|
 | `no hub beacon heard` | Hub 沒設 `HUB_BIND=0.0.0.0`（綁 loopback 時只會往 127.0.0.1 廣告）；或兩台不在同一廣播網段（跨 VLAN／訪客網路／Wi-Fi 隔離會擋 UDP 廣播）→ 改回手填 IP |
 | `no beacon matching pinned hub` | `hubPin` 與 Hub 現在的身分不符。Hub 重啟會換身分，照它新印出的 `hub did` 更新 |
 
