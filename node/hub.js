@@ -303,6 +303,19 @@ setInterval(makeCheckpoint, CHECKPOINT_MS).unref();
 
 // --- server ---------------------------------------------------------------
 const server = net.createServer((sock) => {
+  // Departures matter for the verifier pool: a panel is drawn from the pool
+  // pinned at contract time, so a verifier that has gone away keeps being
+  // selected, produces no attestation, and silently blocks settlement once
+  // the quorum cannot be met. Mark offline rather than delete — the stats
+  // feed the credit line, and dropping them would reset an agent's standing
+  // on reconnect while its balance persisted.
+  sock.on('close', () => {
+    for (const [did, a] of agents) {
+      if (a.sock !== sock || a.online === false) continue;
+      a.online = false;
+      console.log(`[hub] ${did} disconnected (${a.role})`);
+    }
+  });
   attachLineReader(sock, (msg) => {
     switch (msg.type) {
       case 'register': {
@@ -311,9 +324,12 @@ const server = net.createServer((sock) => {
         if (!verify(msg.pub, body, msg.sig)) {
           return fail(sock, 'bad register signature', msg.did);
         }
+        const prior = agents.get(msg.did);
         agents.set(msg.did, {
-          pub: msg.pub, boxPub: msg.box_pub, sock,
-          stats: eeff.newStats(), role: msg.role || 'agent',
+          pub: msg.pub, boxPub: msg.box_pub, sock, online: true,
+          // Keep the history on reconnect: stats drive the credit line.
+          stats: prior ? prior.stats : eeff.newStats(),
+          role: msg.role || 'agent',
         });
         balances.set(msg.did, bal(msg.did));
         sendLine(sock, { type: 'registered', did: msg.did,
@@ -336,7 +352,8 @@ const server = net.createServer((sock) => {
         const latest = checkpoints.at(-1);
         sendLine(sock, {
           type: 'verifiers',
-          verifiers: [...agents].filter(([, a]) => a.role === 'verifier')
+          verifiers: [...agents]
+            .filter(([, a]) => a.role === 'verifier' && a.online !== false)
             .map(([did, a]) => ({ did, pub: a.pub, box_pub: a.boxPub })),
           lock: { checkpoint_seq: latest ? latest.cp.seq : -1,
                   root: latest ? latest.cp.root : sha256('genesis') },
