@@ -11,6 +11,7 @@ const { connect, verify, sha256, canon, net } = require('./lib/wire');
 const discovery = require('./lib/discovery');
 const strategy = require('./lib/strategy');
 const panelLib = require('./lib/panel');
+const eeff = require('./lib/eeff');
 
 // Every port is derived from one offset so the demo can run alongside a live
 // pilot stack (which holds 47180 and the 47201 console) without colliding:
@@ -237,6 +238,32 @@ async function main() {
     [...attesters].every((v) => derived.has(v)) && attesters.size >= 2,
     fEv && `合約時已知 #${fEv.contract.verifier_lock.checkpoint_seq} < 種子 ` +
       `#${fEv.contract.panel_seed_cp}, ${attesters?.size} 位 attester 全在推導出的 panel 內`);
+
+  // §4 #5: the verification fee used to vanish from the flagship journal
+  // entry. Every judge-quorum settlement must pay the derived panel, split
+  // equally, out of the provider's gross — and a dsl-local settlement must pay
+  // no verifiers at all.
+  const verifierPaid = (r) => r.receipt.postings
+    .filter((x) => r.receipt.verifier_pool.includes(x.account));
+  const quorumReceipts = receipts.filter((r) => r.receipt.acceptance_method === 'judge-quorum');
+  const localReceipts = receipts.filter((r) => r.receipt.acceptance_method !== 'judge-quorum');
+  const feeOk = quorumReceipts.length >= 2 && quorumReceipts.every((r) => {
+    const price = -r.receipt.postings.find((x) => x.account === r.receipt.requester).amount_cc;
+    const paid = verifierPaid(r);
+    const total = paid.reduce((t, x) => t + x.amount_cc, 0);
+    const seed = checkpoints[r.receipt.panel_seed_cp];
+    const derived = seed && panelLib.deriveDids(
+      r.receipt.verifier_pool, r.receipt.contract_id, seed.cp.root);
+    return paid.length === 3 && derived &&
+      paid.every((x) => derived.includes(x.account)) &&
+      Math.abs(total - price * eeff.VERIFIER_RATE) < 1e-3;
+  }) && localReceipts.every((r) => verifierPaid(r).length === 0);
+  check(`§4 #5 驗證費顯式入帳：judge-quorum 每筆付給推導出的 panel（${eeff.VERIFIER_RATE * 100}%，均分），dsl-local 不付`,
+    feeOk,
+    `${quorumReceipts.length} 筆 quorum 各付 3 位, ${localReceipts.length} 筆 dsl-local 付 0 位, ` +
+    `verifier 期末餘額 ${Object.entries(balances)
+      .filter(([a]) => quorumReceipts[0] && quorumReceipts[0].receipt.verifier_pool.includes(a))
+      .map(([, v]) => v.toFixed(2)).join('/')}`);
 
   const chainErr = verifyChains(chains, checkpoints, hub_pub);
   check('NFR-006 hash chain＋checkpoint：全鏈離線重驗通過',

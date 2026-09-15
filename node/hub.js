@@ -46,10 +46,20 @@ function fail(sock, why, ref) {
   sendLine(sock, { type: 'error', why, ref });
   console.log(`[hub] REJECT ${ref || ''}: ${why}`);
 }
-function feeTerms(requesterDid, price) {
+function feeTerms(requesterDid, price, panelSize = 0) {
   const fee = +(price * eeff.FEE_RATE).toFixed(4);
   const risk = +(price * eeff.riskRate(agents.get(requesterDid).stats)).toFixed(4);
-  return { fee, risk };
+  // Equal split, and the remainder goes to the first verifier so the postings
+  // still sum to zero at 4 decimals.
+  const verifierTotal = panelSize
+    ? +(price * eeff.VERIFIER_RATE).toFixed(4) : 0;
+  const each = panelSize ? +(verifierTotal / panelSize).toFixed(4) : 0;
+  const shares = [];
+  for (let i = 0; i < panelSize; i++) shares.push(each);
+  if (panelSize) {
+    shares[0] = +(shares[0] + (verifierTotal - each * panelSize)).toFixed(4);
+  }
+  return { fee, risk, verifierTotal, verifierShares: shares };
 }
 
 // --- hash chain + checkpoints ------------------------------------------
@@ -96,11 +106,38 @@ function validateSchedule(receipt, sock, ref) {
   const sum = receipt.postings.reduce((s, p) => s + p.amount_cc, 0);
   if (Math.abs(sum) > 1e-9) { fail(sock, `postings sum ${sum} != 0`, ref); return false; }
   const price = -receipt.postings.find((p) => p.account === receipt.requester).amount_cc;
-  const { fee, risk } = feeTerms(receipt.requester, price);
+  // §4 #5: a judge-quorum settlement must pay the panel, and the hub derives
+  // that panel itself from the receipt's pinned pool and future seed — the
+  // requester cannot invent payees. dsl-local acceptance pays no verifiers.
+  let panelDids = [];
+  if (receipt.acceptance_method === 'judge-quorum') {
+    const seedEntry = checkpoints[receipt.panel_seed_cp];
+    if (!seedEntry) {
+      fail(sock, `seed checkpoint #${receipt.panel_seed_cp} not minted yet`, ref);
+      return false;
+    }
+    if (panel.poolHash(receipt.verifier_pool) !== receipt.verifier_pool_hash) {
+      fail(sock, 'verifier pool does not match its pinned hash', ref);
+      return false;
+    }
+    panelDids = panel.deriveDids(receipt.verifier_pool, ref, seedEntry.cp.root);
+  }
+  const { fee, risk, verifierTotal, verifierShares } =
+    feeTerms(receipt.requester, price, panelDids.length);
   const expect = {
-    [receipt.provider]: +(price - fee - risk).toFixed(4),
+    [receipt.provider]: +(price - fee - risk - verifierTotal).toFixed(4),
     [TREASURY]: fee, [INSURANCE]: risk,
   };
+  panelDids.forEach((did, i) => { expect[did] = verifierShares[i]; });
+  const namedVerifiers = receipt.postings
+    .filter((p) => { const a = agents.get(p.account); return a && a.role === 'verifier'; })
+    .map((p) => p.account);
+  if (namedVerifiers.length !== panelDids.length ||
+      namedVerifiers.some((d) => !panelDids.includes(d))) {
+    fail(sock, `verifier postings ${namedVerifiers.length} != derived panel ` +
+      `${panelDids.length}`, ref);
+    return false;
+  }
   for (const [acct, amt] of Object.entries(expect)) {
     const p = receipt.postings.find((x) => x.account === acct);
     if (!p || Math.abs(p.amount_cc - amt) > 1e-6) {
@@ -275,9 +312,12 @@ const server = net.createServer((sock) => {
         break;
       }
       case 'fee_quote': {
-        const { fee, risk } = feeTerms(msg.requester, msg.price);
+        const size = (msg.panel || []).length;
+        const { fee, risk, verifierShares } =
+          feeTerms(msg.requester, msg.price, size);
         sendLine(sock, { type: 'fee_terms', contract_id: msg.contract_id,
-                         requester: msg.requester, price: msg.price, fee, risk });
+                         requester: msg.requester, price: msg.price, fee, risk,
+                         panel: msg.panel || [], verifier_shares: verifierShares });
         break;
       }
       case 'bid': case 'contract': case 'contract_ack': case 'delivery':

@@ -105,7 +105,7 @@
 | 2 | B②/C② | Treasury 創世即負、熔斷自觸發；CC/USD 錨定差 10 倍 | §2.2「Treasury 啟動」列；全案統一 1 CC = US$0.05，三張攻擊成本表重算（W2 交付） |
 | 3 | A① | 非自願扣帳在自簽鏈中無法落地、守恆不封閉 | §2.2「單方 posting 合法性」列（預簽政策 Grant） |
 | 4 | B⑦ | Judge quorum 在可砍清單卻是例外路徑唯一出口 | 移入「永不砍」；最小三人池 W9 交付 |
-| 5 | C⑤/A⑦ | 驗證費在旗艦分錄中憑空消失／三套數字並存 | 收據 schema 強制 Verifier posting 欄位；範例全部重排 |
+| 5 | C⑤/A⑦ | 驗證費在旗艦分錄中憑空消失／三套數字並存 | **已交付**（W9）：收據新增 `acceptance_method`／`verifier_pool`／`verifier_pool_hash`／`panel_seed_cp`，judge-quorum 每筆結算必須付給**由 Hub 自行推導**的 panel（成交價 4%、均分，從 provider 毛額扣除），dsl-local 不得有 verifier 分錄；`validateSchedule` 強制此規則，雙簽與強制結算路徑共用。`demo.js` 有對應斷言。**費率 4% 取 proposal-C 3–6% 中點，尚無模擬證據**——模擬器沒有 Verifier agent，見 #25 |
 
 ### P1（開工後兩週內修）
 
@@ -133,6 +133,8 @@
 | 16 | **P2** | Hub 的 `receipt`／`task`／`forced_settlement` handler 對缺必要欄位的 frame 會丟例外。目前由 #13 的 frame 層 try/catch 接住並記錄為 `[wire] dropped frame`，但缺逐欄位驗證，錯誤訊息對送出方也不具指引性 | 未修。建議與 W1 schema v1 的欄位驗證一併實作 |
 | 17 | **P2** | Hub 帳本與 Agent 身分皆不持久化：帳本在記憶體、`export` 有出口無 import 入口，`agent.js` 每次啟動 `genIdentity()` 產生新 DID。任一邊重啟即歸零，且被棄置的負餘額身分會在帳上留下永不償還的洞（試點實測留下一筆 −10 CC） | 未修，屬 W10「帳本匯出重建」範圍。§2.2 Ledger 列已承諾「全部狀態可由公開簽署事件重建」，出口已具備，缺 import |
 | 18 | **P1** | `demo.js` 的發現檢查（#14 交付）是**同機驗證**：agent 與 Hub 在同一台機器上，只是經由區網位址連線。試點實測機器 2 用 `hubHost: "discover"` **無法**連上，改手填 IP 才成功——綠燈的檢查給了假保證。相關 commit `af5836a` 的描述「Verified on the real LAN: an agent with no IP and no port discovered 192.168.50.30 and registered」為錯誤陳述 | 未修。待判定是網路環境（Wi-Fi client isolation／不同介面／訪客網路阻擋 UDP 廣播）或 beacon 實作缺陷。無論哪者，該檢查須更名為「同機發現」，跨機發現需要真正的兩機自動化驗證才可宣稱 |
+| 25 | **P1** | Verifier 費率 4%（#5 交付值）沒有模擬支持：`sim/amcn_sim` 完全沒有 Verifier agent，所以驗證市場的收支、押金與經手上限（#7）、抽查率（#8）都無法用 GATE-0 判準檢驗。這與 #20 的教訓相同——提案數字未經模擬即落地 | 未修。需在模擬器加入 Verifier 族群（收費、押注、金絲雀失敗懲罰），再用 `sweep` 決定費率；在那之前 4% 應視為佔位值 |
+| 26 | **P2** | Verifier 報酬按**推導出的 panel** 均分，而非按實際出具 attestation 者。2-of-3 quorum 成立時，缺席的第三位仍領到報酬 | 未修。要按 attester 付款需把 attestation 證據納入結算訊息並由 Hub 驗簽；這也是 slashing（偏離共識者沒收押注）的前提，與 commit-reveal 一併實作較自然 |
 | 24 | **P0** | 未來-checkpoint 抽選的 bootstrap 死鎖：週期 checkpoint 原本以 `if (chains.size)` 為條件，而 `chains` 只在第一筆結算後才有內容。全新網路若第一筆任務就要 quorum，種子 checkpoint 永不產生 → 無法驗收 → 沒有第一筆結算。`demo.js` 未踩到（第一筆是 `dsl-local`），只有 `demo-autonomous.js` 全 quorum 才暴露 | **已修**：無條件鑄造 checkpoint（空 heads 的 checkpoint 完全合法，root = hash of `{}`）|
 | 21 | **P0** | `agent.js` 的 `provide` 若沒有可解析的 adapter，得標後才在 `adapter.complete(null, ...)` 崩潰——而合約當時已雙簽，requester 只能等強制結算。同一個 await 在 async handler 內，**任何** adapter 錯誤（含真實端點回 500）都會變成 unhandled rejection 殺掉整個 agent | **已修**：無 adapter 則不武裝供給（不能執行者不得出價）；執行失敗改為記錄並標記合約 `failed`，不再毀掉進程 |
 | 22 | **P1** | `agent.js` 出價完全不檢查自己剩餘額度，可以賣出根本沒有的算力。模擬器 `collect_offers` 一直有 `remaining_quota < 1.0` 守門，node 端沒有——W8 的無人運行才暴露（額度模型存在但不約束供給側） | **已修**：出價前要求 `quota.remaining >= units`，得標時扣除；Console 新增 `sold_units` |

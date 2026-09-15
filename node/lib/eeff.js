@@ -11,6 +11,13 @@ const HARD_CAP_CC = 500;
 const FEE_RATE = 0.025;
 const RISK_THIN = 0.06;
 const RISK_BASE = 0.02;
+// Verifier compensation, as a share of the contract price, split equally
+// across the selected panel (§4 #5: 驗證費在旗艦分錄中憑空消失). Taken out of
+// the provider's gross, not added on top: the requester's posting must equal
+// the price it pre-authorised, or forced settlement's pre_auth check breaks.
+// 4% is the midpoint of proposal-C's 3–6% and is NOT simulation-backed — the
+// simulator has no verifier agents, so this rate has no GATE-0 evidence yet.
+const VERIFIER_RATE = 0.04;
 
 function newStats() {
   return {
@@ -60,6 +67,6 @@ function riskRate(myStats) {
 }
 
 module.exports = {
-  STARTER_CC, FEE_RATE, RISK_THIN, RISK_BASE,
+  STARTER_CC, FEE_RATE, RISK_THIN, RISK_BASE, VERIFIER_RATE,
   newStats, effectiveContribution, creditLine, riskRate,
 };

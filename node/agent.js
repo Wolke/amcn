@@ -91,7 +91,26 @@ function requestSettlement(contractId, role, provider, output) {
     : asRequester.get(contractId).contract.price_cc;
   const requester = role === 'forced'
     ? asProvider.get(contractId).contract.requester : id.did;
-  hub.send({ type: 'fee_quote', contract_id: contractId, requester, price });
+  // The panel earns a share of every judge-quorum settlement (§4 #5), so the
+  // quote needs its size. Derived from the contract's pinned pool and future
+  // seed — the same rule the hub re-runs when it validates the receipt.
+  const contract = role === 'forced'
+    ? asProvider.get(contractId).contract
+    : asRequester.get(contractId).contract;
+  let panel = [];
+  if (contract.acceptance.method === 'judge-quorum') {
+    const seedRoot = cpRoots.get(contract.panel_seed_cp);
+    if (seedRoot === undefined) {
+      log(`settlement for ${contractId} deferred: seed checkpoint ` +
+          `#${contract.panel_seed_cp} not seen yet`);
+      pendingPanel.set(contractId,
+        () => requestSettlement(contractId, role, provider, output));
+      return;
+    }
+    panel = panelLib.deriveDids(contract.verifier_pool, contractId, seedRoot);
+  }
+  pendingFees.get(contractId).contract = contract;
+  hub.send({ type: 'fee_quote', contract_id: contractId, requester, price, panel });
 }
 
 // hubHost: "discover" opts into the UDP beacon (lib/discovery.js) instead of
@@ -303,16 +322,28 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
       const pf = pendingFees.get(msg.contract_id);
       if (!pf) break;
       const { fee, risk, price } = msg;
+      const shares = msg.verifier_shares || [];
+      const verifierTotal = shares.reduce((t, x) => +(t + x).toFixed(4), 0);
+      const c = pf.contract;
       const receipt = {
         contract_id: msg.contract_id,
         requester: msg.requester,
         provider: pf.provider,
         delivery_hash: pf.delivery_hash,
+        // Carried so the hub can re-derive the panel from a signed artifact
+        // instead of trusting a payee list, and so the receipt is
+        // self-contained for offline audit.
+        acceptance_method: c.acceptance.method,
+        verifier_pool: c.verifier_pool || [],
+        verifier_pool_hash: c.verifier_pool_hash || null,
+        panel_seed_cp: c.panel_seed_cp,
         postings: [
           { account: msg.requester, amount_cc: -price },
-          { account: pf.provider, amount_cc: +(price - fee - risk).toFixed(4) },
+          { account: pf.provider,
+            amount_cc: +(price - fee - risk - verifierTotal).toFixed(4) },
           { account: 'protocol:treasury', amount_cc: fee },
           { account: 'protocol:insurance', amount_cc: risk },
+          ...(msg.panel || []).map((did, i) => ({ account: did, amount_cc: shares[i] })),
         ],
       };
       if (pf.role === 'requester') {
