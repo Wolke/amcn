@@ -39,6 +39,7 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `lib/strategy.js` | FR-055 目標餘額區間＋還債排程器：`[low, high]` 預設 `[-0.3×CL, +100]`，跌破 low 則供給折價、暫停非必要消費；§20-10 平均還債時間 |
 | `lib/discovery.js` | §2.1「協議內發現與輪替」的區網部分：Hub 簽署 UDP 信標，Agent 以 `hubHost: "discover"` 自動尋找並可用 `hubPin` 釘住身分（跨機尚未驗證，見 §4 #18）|
 | `lib/demand.js` | W8 無人觸發源：自有額度／需求模型，額度耗盡（UC-01 步驟 1）自動轉為任務；含 Owner 預算上限與週期相位錯開 |
+| `panel.js` / `panel.cmd` | 專用 Verifier panel 主機（INSTALL §6）：探測 Hub、啟動 N 個 Verifier、全數註冊後回報、Ctrl-C 一次停完。跨平台，Windows 免改 PowerShell 執行原則 |
 | `demo-autonomous.js` | W8 驗收：§27 閉環全程零人工（12 項斷言）。無 `posts` 時間表、無 Console 呼叫 |
 | `mcp-server.js` | §23.1 需求側入口：MCP server（JSON-RPC over stdio，協議 2025-06-18），三個 tool `amcn_balance` / `amcn_publish_task` / `amcn_request_inference`。不持有任何金鑰，只經 127.0.0.1 的 Owner Console 操作本機 Agent |
 

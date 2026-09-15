@@ -135,15 +135,36 @@ curl -s http://127.0.0.1:47202/status | python3 -m json.tool   # 機器 2 的餘
 
 這是第三台機器最有價值的用途，比再開一個交易 Agent 重要得多：**讓 quorum 第一次真正獨立**。Verifier 不需要 API key、不需要任何模型、不參與信用——它只需要 Node.js ≥ 20 和連得到 Hub。
 
-在機器 3 上：
+在機器 3 上——**一個指令，不用改任何設定檔**（Hub 的 IP 就是參數）：
 
 ```bash
 cd ai-exchage/node
+node panel.js 192.168.1.10        # ← 換成機器 1 的 IP（步驟 1a）
+```
+
+Windows 用 `panel.cmd`（Command Prompt，或編輯後雙擊）：
+
+```
+cd ai-exchage\node
+panel.cmd 192.168.1.10
+```
+
+刻意用 `.cmd` 而不是 `.ps1`：PowerShell 預設拒絕執行未簽署的腳本，批次檔沒有這個限制。它只是呼叫 `panel.js`，邏輯都在那裡。
+
+`panel.js` 會先探測 Hub 是否可達（不可達就給出可操作的錯誤，而不是讓三個 Verifier 安靜地重試），啟動指定數量的 Verifier，等全部註冊完成後回報，`Ctrl-C` 一次停掉整個 panel（不留孤兒 process）。任一個 Verifier 意外退出時會停掉整個 panel——半個 panel 看起來健康是更糟的狀態。
+
+改 panel 大小或埠：
+
+```bash
+node panel.js 192.168.1.10 47180 5     # IP、Hub 埠、panel 大小
+```
+
+想手動逐一啟動（或需要不同名稱）也可以：
+
+```bash
 for i in 1 2 3; do cp configs/verifier-$i.example.json configs/verifier-$i.json; done
-# 把三個檔的 hubHost 都改成機器 1 的 IP（步驟 1a）
+# 把三個檔的 hubHost 都改成機器 1 的 IP
 node verifier.js configs/verifier-1.json &
-node verifier.js configs/verifier-2.json &
-node verifier.js configs/verifier-3.json &
 ```
 
 然後**把機器 1 的三個 Verifier 停掉**（否則 pool 會有 6 個，panel 仍可能抽到同機的）。機器 1 的 Hub log 應該顯示三筆來自機器 3 的 `registered ... (verifier)`。
@@ -154,7 +175,7 @@ node verifier.js configs/verifier-3.json &
 
 程式碼本身跨平台（`lib/keystore.js` 只在 macOS 走 Keychain，其他平台直接用環境變數；模擬器是純 Python stdlib）。兩個差異：
 
-**PowerShell 不支援 bash 的單引號 JSON**。這也是為什麼 `verifier.js` 與 `agent.js` 都接受設定檔路徑——用檔案就完全避開引號問題：
+**PowerShell 不支援 bash 的單引號 JSON**。Verifier 用 `panel.cmd` 就完全避開這件事；若要自己起單個 Verifier，`verifier.js` 與 `agent.js` 都接受設定檔路徑：
 
 ```powershell
 cd ai-exchage\node
