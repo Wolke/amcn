@@ -239,6 +239,24 @@ async function main() {
     fEv && `合約時已知 #${fEv.contract.verifier_lock.checkpoint_seq} < 種子 ` +
       `#${fEv.contract.panel_seed_cp}, ${attesters?.size} 位 attester 全在推導出的 panel 內`);
 
+  // §2.2 commit-reveal: every counted verdict must open a commitment its
+  // verifier signed before seeing the others. Checkable offline from the
+  // evidence bundle, and a tampered nonce must break the binding — otherwise
+  // the "commitment" is decoration.
+  const bundle = fEv && fEv.attestations;
+  const bindingOk = !!bundle && bundle.length >= 2 && bundle.every((e) =>
+    typeof e.nonce === 'string' &&
+    sha256(canon(e.attestation) + e.nonce) === e.commitment &&
+    verify(pubkeys[e.attestation.verifier],
+      { contract_id: e.attestation.contract_id,
+        verifier: e.attestation.verifier, commitment: e.commitment },
+      e.commit_sig));
+  const tamperBreaks = !!bundle && bundle.every((e) =>
+    sha256(canon(e.attestation) + e.nonce + 'x') !== e.commitment);
+  check('§2.2 commit-reveal：每筆計入的裁決都開啟了事前簽署的承諾，改動 nonce 即綁定失效',
+    bindingOk && tamperBreaks,
+    bundle && `${bundle.length} 份 attestation 的 commitment 與 commit_sig 全數相符`);
+
   // §4 #5: the verification fee used to vanish from the flagship journal
   // entry. Every judge-quorum settlement must pay the derived panel, split
   // equally, out of the provider's gross — and a dsl-local settlement must pay

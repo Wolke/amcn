@@ -20,10 +20,12 @@ const OFFSET = Number(process.env.DEMO_PORT_OFFSET || 0);
 const PORT = 47180 + OFFSET;
 const CONSOLE_BASE = 47211 + OFFSET;
 // A full repayment cycle has to fit inside the window or the closed-loop
-// check is a coin flip: at 14s it passed 2 runs in 3 once the verifier fee
-// (§4 #5) slowed earning by 4%. Lengthening the observation is the fix;
-// loosening the assertion would just hide the thing being demonstrated.
-const RUN_MS = Number(process.env.DEMO_RUN_MS || 22000);
+// check is a coin flip. Two things were tried and rejected: loosening the
+// assertion, which hides the thing being demonstrated, and making one agent
+// demand-heavy so it reliably dips — that just turned it into a chronic
+// debtor that dipped every run and returned in none, the mirror of the sink
+// this file already guards against. The window is the honest lever.
+const RUN_MS = Number(process.env.DEMO_RUN_MS || 30000);
 
 const results = [];
 const check = (name, ok, detail) => {

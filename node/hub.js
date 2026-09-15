@@ -96,7 +96,30 @@ function makeCheckpoint() {
 }
 
 // --- settlement core ----------------------------------------------------
-function validateSchedule(receipt, sock, ref) {
+// Which panel members actually produced an accountable PASS. A verdict
+// counts only if the reveal opens a commitment the verifier signed before
+// seeing anyone else's — that binding is what makes the three checks
+// independent rather than one check copied twice (§2.2 commit-reveal).
+function validAttesters(receipt, attestations, panelDids) {
+  const ok = new Set();
+  for (const e of attestations || []) {
+    const a = e && e.attestation;
+    if (!a || a.contract_id !== receipt.contract_id || a.verdict !== 'PASS') continue;
+    const v = agents.get(a.verifier);
+    if (!v || v.role !== 'verifier' || !panelDids.includes(a.verifier)) continue;
+    if (!verify(v.pub, a, e.sig)) continue;
+    // commitment must bind this exact verdict, and be signed by this verifier
+    if (typeof e.nonce !== 'string' || typeof e.commitment !== 'string') continue;
+    if (sha256(canon(a) + e.nonce) !== e.commitment) continue;
+    const commitBody = { contract_id: a.contract_id, verifier: a.verifier,
+                         commitment: e.commitment };
+    if (!verify(v.pub, commitBody, e.commit_sig)) continue;
+    ok.add(a.verifier);
+  }
+  return ok;
+}
+
+function validateSchedule(receipt, sock, ref, attestations) {
   // contract_id is the settlement idempotency key: one contract, one
   // settlement. Both the dual and forced paths come through here.
   if (settledIds.has(ref)) {
@@ -122,20 +145,32 @@ function validateSchedule(receipt, sock, ref) {
     }
     panelDids = panel.deriveDids(receipt.verifier_pool, ref, seedEntry.cp.root);
   }
+  // §4 #26: only verifiers whose reveal opened a prior commitment get paid.
+  // A panel member that stayed silent earns nothing.
+  let payees = panelDids;
+  if (panelDids.length) {
+    const attesters = validAttesters(receipt, attestations, panelDids);
+    if (attesters.size < 2) {
+      fail(sock, `quorum not met: ${attesters.size} accountable PASS ` +
+        `attestations (need 2)`, ref);
+      return false;
+    }
+    payees = panelDids.filter((d) => attesters.has(d)); // panel order
+  }
   const { fee, risk, verifierTotal, verifierShares } =
-    feeTerms(receipt.requester, price, panelDids.length);
+    feeTerms(receipt.requester, price, payees.length);
   const expect = {
     [receipt.provider]: +(price - fee - risk - verifierTotal).toFixed(4),
     [TREASURY]: fee, [INSURANCE]: risk,
   };
-  panelDids.forEach((did, i) => { expect[did] = verifierShares[i]; });
+  payees.forEach((did, i) => { expect[did] = verifierShares[i]; });
   const namedVerifiers = receipt.postings
     .filter((p) => { const a = agents.get(p.account); return a && a.role === 'verifier'; })
     .map((p) => p.account);
-  if (namedVerifiers.length !== panelDids.length ||
-      namedVerifiers.some((d) => !panelDids.includes(d))) {
-    fail(sock, `verifier postings ${namedVerifiers.length} != derived panel ` +
-      `${panelDids.length}`, ref);
+  if (namedVerifiers.length !== payees.length ||
+      namedVerifiers.some((d) => !payees.includes(d))) {
+    fail(sock, `verifier postings ${namedVerifiers.length} != accountable ` +
+      `attesters ${payees.length}`, ref);
     return false;
   }
   for (const [acct, amt] of Object.entries(expect)) {
@@ -193,7 +228,7 @@ function handleReceipt(msg, sock) {
       !verify(prov.pub, receipt, sigs.provider)) {
     return fail(sock, 'bad signature: dual-signed receipt required', ref);
   }
-  if (!validateSchedule(receipt, sock, ref)) return;
+  if (!validateSchedule(receipt, sock, ref, msg.attestations)) return;
   applySettlement('dual', receipt, sigs);
 }
 
@@ -247,7 +282,7 @@ function handleForced(msg, sock) {
       !== contract.price_cc) {
     return fail(sock, 'forced: receipt price != contract price', ref);
   }
-  if (!validateSchedule(receipt, sock, ref)) return;
+  if (!validateSchedule(receipt, sock, ref, attestations)) return;
   console.log(`[hub] FORCED settlement ${ref}: requester refused, ` +
     `pre_auth + ${passers.size}-of-${expected.size} quorum stands in ` +
     `(panel seeded from checkpoint #${contract.panel_seed_cp})`);
@@ -321,7 +356,8 @@ const server = net.createServer((sock) => {
         break;
       }
       case 'bid': case 'contract': case 'contract_ack': case 'delivery':
-      case 'receipt_half': case 'verify_request': case 'attestation': {
+      case 'receipt_half': case 'verify_request': case 'attestation':
+      case 'attestation_commit': case 'reveal_request': {
         const to = agents.get(msg.to);
         if (to) sendLine(to.sock, msg);
         break;

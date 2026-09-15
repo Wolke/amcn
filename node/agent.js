@@ -14,7 +14,8 @@
 //            acceptance: 'dsl-local'|'judge-quorum', asserts:[...]}] }
 'use strict';
 const http = require('node:http');
-const { genIdentity, sign, verify, sha256, connect, connectLazy } = require('./lib/wire');
+const { genIdentity, sign, verify, sha256, canon, connect, connectLazy } =
+  require('./lib/wire');
 const { genBoxKeys, seal, open } = require('./lib/e2e');
 const { runAsserts, assertsHash } = require('./lib/dsl');
 const keystore = require('./lib/keystore');
@@ -119,6 +120,27 @@ function requestSettlement(contractId, role, provider, output) {
 // Send the verify request to each selected verifier. The payload is sealed
 // per verifier, so the panel can check the work without the hub or anyone
 // else seeing it (NFR-005).
+// Ask the panel to open their commitments. Fires when everyone has
+// committed, or on the grace timer with whatever quorum exists.
+function requestReveal(contractId) {
+  const ctx = asRequester.get(contractId);
+  if (!ctx || ctx.revealed || !ctx.panel) return;
+  if (!ctx.commits || ctx.commits.size < 2) {
+    log(`cannot reveal ${contractId}: only ${ctx.commits ? ctx.commits.size : 0} commitments`);
+    return;
+  }
+  ctx.revealed = true;
+  clearTimeout(ctx.revealTimer);
+  const body = { contract_id: contractId, reveal: true };
+  const sig = sign(id.privateKey, body);
+  for (const v of ctx.panel) {
+    if (!ctx.commits.has(v.did)) continue;
+    hub.send({ type: 'reveal_request', to: v.did, contract_id: contractId,
+               requester: id.did, provider: ctx.contract.provider, sig, pub: id.pub });
+  }
+  log(`reveal requested on ${contractId} (${ctx.commits.size} commitments)`);
+}
+
 function fanOut(delivery, ctx, chosen) {
   for (const v of chosen) {
     const request = {
@@ -266,23 +288,69 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
             return;
           }
           ctx.panel = chosen;
+          ctx.commits = new Map();
+          ctx.delivery = d;
           log(`delivery on ${d.contract_id} → panel selected from checkpoint ` +
               `#${ctx.contract.panel_seed_cp}: ${chosen.length} verifiers`);
           fanOut(d, ctx, chosen);
+          // A verifier that never commits must not stall the contract, so
+          // reveal on a quorum after a grace period.
+          ctx.revealTimer = setTimeout(() => requestReveal(d.contract_id), 1500);
         };
         dispatch();
       }
       break;
     }
 
+    case 'attestation_commit': {
+      const cid = msg.commit.contract_id;
+      if (!verify(msg.pub, msg.commit, msg.sig)) break;
+      for (const ctx of [asRequester.get(cid), asProvider.get(cid)]) {
+        if (!ctx) continue;
+        ctx.commits = ctx.commits || new Map();
+        ctx.commits.set(msg.commit.verifier,
+          { commitment: msg.commit.commitment, commit_sig: msg.sig, pub: msg.pub });
+      }
+      const reqC = asRequester.get(cid);
+      // Only the requester drives the reveal; the provider just records
+      // commitments so it can build a forced-settlement bundle.
+      if (reqC && reqC.panel && reqC.commits.size >= reqC.panel.length) {
+        requestReveal(cid);
+      }
+      break;
+    }
+
     case 'attestation': {
       const a = msg.attestation;
+      // A reveal only counts if it opens the commitment this verifier made
+      // before seeing anyone else's verdict.
+      {
+        const cid = a && a.contract_id;
+        const ctx0 = asRequester.get(cid) || asProvider.get(cid);
+        const held = ctx0 && ctx0.commits && ctx0.commits.get(a.verifier);
+        if (held) {
+          if (msg.nonce === undefined ||
+              sha256(canon(a) + msg.nonce) !== held.commitment) {
+            log(`REJECT reveal from ${a.verifier} on ${cid}: ` +
+                'does not open its commitment');
+            break;
+          }
+          msg.commitment = held.commitment;
+          msg.commit_sig = held.commit_sig;
+        } else if (ctx0 && ctx0.contract &&
+                   ctx0.contract.acceptance.method === 'judge-quorum') {
+          log(`REJECT reveal from ${a.verifier} on ${cid}: no prior commitment`);
+          break;
+        }
+      }
       const reqCtx = asRequester.get(a.contract_id);
       const provCtx = asProvider.get(a.contract_id);
       if (reqCtx) { // requester side: settle on 2-of-3 PASS (unless malicious)
         const v = reqCtx.panel.find((x) => x.did === a.verifier);
         if (!v || !verify(v.pub, a, msg.sig)) break;
-        reqCtx.attest.push({ attestation: a, sig: msg.sig, pub: msg.pub });
+        reqCtx.attest.push({ attestation: a, sig: msg.sig, pub: msg.pub,
+                             nonce: msg.nonce, commitment: msg.commitment,
+                             commit_sig: msg.commit_sig });
         const passes = reqCtx.attest.filter((x) => x.attestation.verdict === 'PASS').length;
         if (passes >= 2 && !reqCtx.done) {
           reqCtx.done = true;
@@ -304,7 +372,9 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
         if (!panelLib.deriveDids(provCtx.contract.verifier_pool,
               a.contract_id, seedRoot).includes(a.verifier)) break;
         if (!verify(msg.pub, a, msg.sig)) break;
-        provCtx.attest.push({ attestation: a, sig: msg.sig, pub: msg.pub });
+        provCtx.attest.push({ attestation: a, sig: msg.sig, pub: msg.pub,
+                              nonce: msg.nonce, commitment: msg.commitment,
+                              commit_sig: msg.commit_sig });
         const passes = provCtx.attest.filter((x) => x.attestation.verdict === 'PASS').length;
         if (passes >= 2 && !provCtx.timer && !provCtx.settled) {
           provCtx.timer = setTimeout(() => {
@@ -370,8 +440,12 @@ const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
       const total = r.postings.reduce((s, p) => s + p.amount_cc, 0);
       if (!verify(msg.pub, r, msg.sig) || !mine || mine.amount_cc <= 0 ||
           Math.abs(total) > 1e-9) break;
+      const pc = asProvider.get(r.contract_id);
       hub.send({ type: 'receipt', receipt: r,
-                 sigs: { requester: msg.sig, provider: sign(id.privateKey, r) } });
+                 sigs: { requester: msg.sig, provider: sign(id.privateKey, r) },
+                 // §4 #26: the hub pays the verifiers that actually revealed a
+                 // verdict, so it needs the bundle, not just the receipt.
+                 attestations: pc ? pc.attest : [] });
       log(`countersigned ${r.contract_id} → submitted`);
       break;
     }
