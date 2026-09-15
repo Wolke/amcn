@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .DS_Store
 sim/out/
+
+# Per-machine pilot configs (node/INSTALL.md has you cp from *.example.json).
+# They carry machine-specific IPs/ports and, once you point at a real model,
+# provider endpoints and key-service names.
+node/configs/*.json
+!node/configs/*.example.json

@@ -48,7 +48,9 @@ cp configs/provider.example.json configs/provider.json
 AMCN_PROVIDER_KEY='sk-test-anything' node agent.js configs/provider.json
 ```
 
-看到 `registered, dynamic credit line 50.0 CC` 和 `now providing at 1 CC/unit` 即成功。
+看到 `registered, dynamic credit line 46.3 CC` 和 `now providing at 1 CC/unit` 即成功。
+
+（46.3 不是錯誤：starter 是 50 CC，但全新帳號沒有成交紀錄，`lib/eeff.js` 的 `creditLine` 會乘上 quality 係數 `0.25 + 0.75 × 0.9 = 0.925`——那個 0.9 是零歷史時的 completion-rate prior，所以 `50 × 0.925 = 46.25`。跑出第一批成交後這個數字會上升。）
 
 ## 2. 機器 2：Requester
 
@@ -59,7 +61,7 @@ cp configs/requester.example.json configs/requester.json
 node agent.js configs/requester.json
 ```
 
-看到 `registered, dynamic credit line 50.0 CC` 表示已跨機連上 Hub。
+看到 `registered, dynamic credit line 46.3 CC` 表示已跨機連上 Hub（同樣的 0.925 新戶係數，見步驟 1d）。
 
 ## 3. 發第一筆任務（在機器 2）
 
