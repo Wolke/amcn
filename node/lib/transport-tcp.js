@@ -26,10 +26,18 @@ function refuseHttp(sock) {
     `(${sock.remoteAddress})`);
 }
 
-function wrap(sock, remote, { sniff = false } = {}) {
+// hooks let a wrapper (lib/transport-chaos.js) intervene at the byte level,
+// which is where a network fault actually happens. Above the channel is the
+// wrong place: the channel's own liveness pings go straight through `write`,
+// so a fault injected above it leaves the heartbeat working and the partition
+// undetectable — measured, after building it the wrong way round first.
+const pass = (hook, text, deliver, remote) =>
+  (hook ? hook(text, deliver, remote) : deliver(text));
+
+function wrap(sock, remote, { sniff = false, hooks = {} } = {}) {
   const chan = createChannel({
     remote,
-    write: (s) => sock.write(s),
+    write: (s) => pass(hooks.onWrite, s, (out) => sock.write(out), remote),
     close: () => sock.destroy(),
     isClosed: () => sock.destroyed,
   });
@@ -50,15 +58,16 @@ function wrap(sock, remote, { sniff = false } = {}) {
         return refuseHttp(sock);
       }
     }
-    chan.feed(chunk.toString('utf8'));
+    pass(hooks.onData, chunk.toString('utf8'), (out) => chan.feed(out), remote);
   });
   return chan;
 }
 
-function listen({ port, host = '127.0.0.1', onChannel, onError, onListening }) {
+function listen({ port, host = '127.0.0.1', onChannel, onError, onListening,
+                 hooks }) {
   const server = net.createServer((sock) => {
     const chan = wrap(sock, `${sock.remoteAddress}:${sock.remotePort}`,
-      { sniff: true });
+      { sniff: true, hooks });
     onChannel(chan);
   });
   if (onError) server.on('error', onError);
@@ -66,8 +75,8 @@ function listen({ port, host = '127.0.0.1', onChannel, onError, onListening }) {
   return { close: (cb) => server.close(cb), port, host, name };
 }
 
-function dial({ port, host = '127.0.0.1' }) {
-  return wrap(net.connect(port, host), `${host}:${port}`);
+function dial({ port, host = '127.0.0.1', hooks }) {
+  return wrap(net.connect(port, host), `${host}:${port}`, { hooks });
 }
 
 // Fail with a useful message rather than N clients retrying quietly.

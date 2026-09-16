@@ -58,6 +58,7 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `lib/transport.js` | §2.1 要求集中化元件配齊「至少一個開源替代實作」的那一項：`ITransport` 介面（`listen`／`dial`／`probe`）＋實作登記表＋`AMCN_TRANSPORT` 選擇 |
 | `lib/channel.js` | 兩種傳輸共用的 frame 語義：JSON-lines 切分、信封版本閘門（§4 #33）、handler 例外隔離（§4 #13／#34）。傳輸層只提供 write／close，不得改寫語義——這是「兩傳輸同一本帳」能成立的原因 |
 | `lib/transport-tcp.js` | 實作 1：TCP JSON-lines（至今所有試點跑的行為，原樣搬過來） |
+| `lib/transport-chaos.js` | 實作 3：故障注入（`AMCN_TRANSPORT=chaos`）。包裝 tcp／http，由執行期可改的控制檔驅動：`blackhole`（寫入成功但消失、連線永不關閉）、`reset`、`latency`／`jitter`、`loss`、`freeze`（只斷入向＝對手卡死）、單向中斷。注入點在**位元組層**而非 channel 之上——否則 channel 自己的活性 ping 會繞過故障（第一版就是這樣錯的）。`AMCN_CHAOS_SEED` 讓丟包樣式可重播 |
 | `lib/transport-http.js` | 實作 2：HTTP——長連 chunked NDJSON 回應載 server→client，POST 載 client→server。刻意不選另一種 socket 方言：那會共用 TCP 的故障模型，換了等於沒換。此實作線上無連線狀態、送達以請求為單位，POST 必須自行保序（單 socket keep-alive）|
 | `pilot-doctor.js` | 跨平台試點診斷（§4 #43）：`node pilot-doctor.js <hub IP>` 依序驗網段、設定檔、TCP、**AMCN 協議層**、UDP 信標，並指出第一個 FAIL。只用 node，Windows 可直接跑 |
 | `lib/log.js` | 長時間執行的時間戳（§4 #42）：hub／agent／verifier／canary／panel 的每一行加 UTC ISO-8601。包裝 console 而非逐一改呼叫端，因為斷線時最關鍵的行來自 `lib/channel.js`／`transport-*.js` |

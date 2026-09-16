@@ -30,6 +30,9 @@
 const IMPLS = {
   tcp: './transport-tcp',
   http: './transport-http',
+  // Wraps one of the above and injects faults (§ fault-injection-plan).
+  // Never a default: a scenario opts in with AMCN_TRANSPORT=chaos.
+  chaos: './transport-chaos',
 };
 
 function get(name) {

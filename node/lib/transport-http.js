@@ -28,7 +28,11 @@ const MISMATCH = 'this endpoint speaks the AMCN http transport, ' +
   'but the peer used the tcp transport — run every node with the same ' +
   'AMCN_TRANSPORT';
 
-function listen({ port, host = '127.0.0.1', onChannel, onError, onListening }) {
+const pass = (hook, text, deliver, remote) =>
+  (hook ? hook(text, deliver, remote) : deliver(text));
+
+function listen({ port, host = '127.0.0.1', onChannel, onError, onListening,
+                 hooks = {} }) {
   const open = new Map(); // cid -> channel
 
   const server = http.createServer((req, res) => {
@@ -51,9 +55,10 @@ function listen({ port, host = '127.0.0.1', onChannel, onError, onListening }) {
         connection: 'keep-alive',
       });
       res.flushHeaders();
+      const remote = `${req.socket.remoteAddress} (http ${cid.slice(0, 8)})`;
       const chan = createChannel({
-        remote: `${req.socket.remoteAddress} (http ${cid.slice(0, 8)})`,
-        write: (s) => res.write(s),
+        remote,
+        write: (s) => pass(hooks.onWrite, s, (out) => res.write(out), remote),
         close: () => res.end(),
         isClosed: () => res.writableEnded || res.destroyed,
       });
@@ -93,7 +98,7 @@ function listen({ port, host = '127.0.0.1', onChannel, onError, onListening }) {
       req.on('end', () => {
         if (oversize) return;
         res.writeHead(204).end();
-        chan.feed(body);
+        pass(hooks.onData, body, (out) => chan.feed(out), chan.remote);
       });
       return undefined;
     }
@@ -124,7 +129,7 @@ function listen({ port, host = '127.0.0.1', onChannel, onError, onListening }) {
   };
 }
 
-function dial({ port, host = '127.0.0.1' }) {
+function dial({ port, host = '127.0.0.1', hooks = {} }) {
   const cid = crypto.randomBytes(16).toString('hex');
   // keepAlive + one socket: the POSTs of a channel must arrive in the order
   // they were sent. Concurrent requests on separate sockets would let
@@ -135,9 +140,11 @@ function dial({ port, host = '127.0.0.1' }) {
   let streaming = false, closed = false;
   let outbox = '', sending = false;
 
+  const remote = `${host}:${port} (http)`;
   const chan = createChannel({
-    remote: `${host}:${port} (http)`,
-    write: (s) => { outbox += s; pump(); },
+    remote,
+    write: (s) => pass(hooks.onWrite, s,
+      (out) => { outbox += out; pump(); }, remote),
     close: () => {
       closed = true;
       streamReq.destroy();
@@ -197,7 +204,7 @@ function dial({ port, host = '127.0.0.1' }) {
     }
     streaming = true;
     res.setEncoding('utf8');
-    res.on('data', (t) => chan.feed(t));
+    res.on('data', (t) => pass(hooks.onData, t, (out) => chan.feed(out), remote));
     res.on('close', () => chan.emitClose());
     pump();
   });
