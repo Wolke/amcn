@@ -4,6 +4,8 @@
 
 有第三台機器時，Verifier panel 應該搬到它上面（第 6 節）——三個 Verifier 與交易雙方同機時，2-of-3 quorum 的獨立性只存在於協議層（§4 #31）。
 
+**三台都到位時，照 `docs/evaluation/three-machine-pilot.md` 走**：那份 runbook 有完整的角色分配、長時間試點用的設定檔（`configs/pilot-m{1,2}.example.json`，含 seed 與放慢 33 倍的政策參數）、驗證 #31 真的關閉的三項證據，以及 W10 拔線演練程序。本文件是單次跨機閉環的最短路徑，那份是要跑數小時的配置。
+
 ## 0. 前置需求（每台都要）
 
 - **Node.js ≥ 20**（零第三方套件，不需要 npm install）
