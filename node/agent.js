@@ -161,6 +161,80 @@ function requestReveal(contractId, why = 'quorum') {
   log(`reveal requested on ${contractId} (${ctx.commits.size} commitments, ${why})`);
 }
 
+// The award itself is a handshake and needs the same treatment as
+// registration (#49): resend the contract until the provider acknowledges it.
+// Without this, a single lost `contract` frame means the provider never
+// learns it won and the requester waits for a delivery that cannot come.
+function armSeedTimeout(contractId, seq) {
+  const ctx = asRequester.get(contractId);
+  if (!ctx) return;
+  clearTimeout(ctx.seedTimer);
+  ctx.seedTimer = setTimeout(() => {
+    if (ctx.done || !pendingPanel.has(contractId)) return;
+    ctx.seedAttempts = (ctx.seedAttempts || 0) + 1;
+    if (ctx.seedAttempts > SEED_RETRIES) {
+      pendingPanel.delete(contractId);
+      ctx.done = true;
+      ctx.abandoned = true;
+      console_.abandoned = (console_.abandoned || 0) + 1;
+      log(`ABANDONING ${contractId}: seed checkpoint #${seq} never arrived`);
+      return;
+    }
+    log(`seed checkpoint #${seq} for ${contractId} not seen — asking the hub ` +
+        `(${ctx.seedAttempts}/${SEED_RETRIES})`);
+    hub.send({ type: 'checkpoint_request', seq });
+    armSeedTimeout(contractId, seq);
+  }, SEED_TIMEOUT_MS);
+}
+
+function armAwardTimeout(contractId, contract, pre_auth, provider) {
+  const ctx = asRequester.get(contractId);
+  if (!ctx) return;
+  clearTimeout(ctx.awardTimer);
+  ctx.awardTimer = setTimeout(() => {
+    if (ctx.done || ctx.contract_sigs.provider) return;
+    ctx.awardAttempts = (ctx.awardAttempts || 0) + 1;
+    if (ctx.awardAttempts > AWARD_RETRIES) {
+      ctx.done = true;
+      ctx.abandoned = true;
+      console_.abandoned = (console_.abandoned || 0) + 1;
+      log(`ABANDONING ${contractId}: provider never acknowledged the award`);
+      return;
+    }
+    log(`no contract_ack for ${contractId} — resending the award ` +
+        `(${ctx.awardAttempts}/${AWARD_RETRIES})`);
+    hub.send({ type: 'contract', to: provider, contract,
+               sig: sign(id.privateKey, contract), pub: id.pub,
+               pre_auth, pre_auth_sig: sign(id.privateKey, pre_auth) });
+    armAwardTimeout(contractId, contract, pre_auth, provider);
+  }, AWARD_TIMEOUT_MS);
+}
+
+// AWARDED→DELIVERED had no timeout, so a delivery lost in transit left the
+// contract open forever with the work already done. Ask for a resend before
+// giving up: under loss a retry is usually all that is needed.
+function armDeliveryTimeout(contractId, provider) {
+  const ctx = asRequester.get(contractId);
+  if (!ctx) return;
+  clearTimeout(ctx.deliverTimer);
+  ctx.deliverTimer = setTimeout(() => {
+    if (ctx.done || ctx.output) return;
+    ctx.deliverAttempts = (ctx.deliverAttempts || 0) + 1;
+    if (ctx.deliverAttempts <= DELIVER_RETRIES) {
+      log(`no delivery for ${contractId} after ${DELIVER_TIMEOUT_MS}ms — ` +
+          `asking the provider to resend (${ctx.deliverAttempts}/${DELIVER_RETRIES})`);
+      hub.send({ type: 'delivery_request', to: provider, contract_id: contractId });
+      armDeliveryTimeout(contractId, provider);
+      return;
+    }
+    ctx.done = true;
+    ctx.abandoned = true;
+    console_.abandoned = (console_.abandoned || 0) + 1;
+    log(`ABANDONING ${contractId}: no delivery after ` +
+        `${DELIVER_RETRIES + 1} attempts`);
+  }, DELIVER_TIMEOUT_MS);
+}
+
 function armVerifyTimeout(contractId, ctx) {
   clearTimeout(ctx.verifyTimer);
   ctx.verifyTimer = setTimeout(() => {
@@ -221,6 +295,9 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
   onMessage: async (msg) => {
     switch (msg.type) {
       case 'registered':
+        // The hub cannot tell a healthy client from one that only
+        // talks unless the client proves it heard the reply (#49).
+        hub.send({ type: 'register_ack', did: id.did });  // proof we can hear (#49)
         console_.creditLine = msg.credit_line;
         // Adopt the hub's view rather than assuming a fresh start: a seeded
         // identity that restarts still owes what it owed (§4 #17).
@@ -244,6 +321,12 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
 
       case 'checkpoint': {
         cpRoots.set(msg.cp.seq, msg.cp.root);
+        // The hub stores checkpoints sparsely (#41): a root requested for
+        // seq N may arrive as the entry at or before N, so record it under
+        // the seq that was asked for as well.
+        if (typeof msg.for_seq === 'number' && msg.cp.seq <= msg.for_seq) {
+          cpRoots.set(msg.for_seq, msg.cp.root);
+        }
         for (const [cid, release] of [...pendingPanel]) {
           const ctx = asRequester.get(cid);
           if (ctx && cpRoots.has(ctx.contract.panel_seed_cp)) {
@@ -295,6 +378,22 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
       case 'contract': { // I'm awarded: countersign, unseal, execute
         const c = msg.contract;
         if (!verify(msg.pub, c, msg.sig)) break;
+        // A retried award must be acknowledged, never executed twice: the
+        // requester resends the contract until it sees an ack, because one
+        // lost frame otherwise leaves it waiting for a delivery from a
+        // provider that never heard it was awarded.
+        const already = asProvider.get(c.contract_id);
+        if (already) {
+          hub.send({ type: 'contract_ack', to: c.requester,
+                     contract_id: c.contract_id,
+                     sig: already.contract_sigs.provider, pub: id.pub });
+          if (already.delivery) {
+            hub.send({ type: 'delivery', to: c.requester,
+                       delivery: already.delivery, sig: already.deliverySig,
+                       pub: id.pub });
+          }
+          break;
+        }
         const mySig = sign(id.privateKey, c);
         hub.send({ type: 'contract_ack', to: c.requester,
                    contract_id: c.contract_id, sig: mySig });
@@ -344,8 +443,23 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
         }, VERIFY_TIMEOUT_MS * (VERIFY_RETRIES + 2));
         asProvider.set(c.contract_id, provEntry);
         const delivery = { contract_id: c.contract_id, output, provider: id.did };
+        // Kept so a lost delivery can be resent on request. Under 5% packet
+        // loss the requester had no timeout for AWARDED→DELIVERED at all:
+        // contracts sat open for 144s while the work was already done, and
+        // the state machine requires every transition to have a timeout.
+        provEntry.delivery = delivery;
+        provEntry.deliverySig = sign(id.privateKey, delivery);
         hub.send({ type: 'delivery', to: c.requester, delivery,
-                   sig: sign(id.privateKey, delivery), pub: id.pub });
+                   sig: provEntry.deliverySig, pub: id.pub });
+        break;
+      }
+
+      case 'delivery_request': { // requester never saw my delivery
+        const p = asProvider.get(msg.contract_id);
+        if (!p || !p.delivery) break;
+        hub.send({ type: 'delivery', to: p.contract.requester,
+                   delivery: p.delivery, sig: p.deliverySig, pub: id.pub });
+        log(`resent delivery for ${msg.contract_id} on request`);
         break;
       }
 
@@ -353,6 +467,7 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
         const ctx = asRequester.get(msg.contract_id);
         if (ctx && verify(ctx.providerPub, ctx.contract, msg.sig)) {
           ctx.contract_sigs.provider = msg.sig;
+          clearTimeout(ctx.awardTimer);
         }
         break;
       }
@@ -361,6 +476,8 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
         const d = msg.delivery;
         const ctx = asRequester.get(d.contract_id);
         if (!ctx || !verify(msg.pub, d, msg.sig)) break;
+        clearTimeout(ctx.deliverTimer);
+        if (ctx.output) break;            // a resend of what we already have
         ctx.output = d.output;
         if (ctx.contract.acceptance.method === 'dsl-local') {
           const { pass, failures } = runAsserts(ctx.asserts,
@@ -375,6 +492,10 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
               pendingPanel.set(d.contract_id, dispatch);
               log(`delivery on ${d.contract_id} → waiting for seed ` +
                   `checkpoint #${ctx.contract.panel_seed_cp} before selecting a panel`);
+              // Checkpoint broadcasts are fire-and-forget too, so a lost one
+              // used to mean waiting forever: no panel, no verify timer, and
+              // a contract that never closed. Ask for the root instead.
+              armSeedTimeout(d.contract_id, ctx.contract.panel_seed_cp);
               return;
             }
             ctx.panel = chosen;
@@ -739,6 +860,12 @@ const FORCE_AFTER_MS = T.forceAfterMs || 1200;
 // abandon loudly instead of holding the contract open forever.
 const VERIFY_TIMEOUT_MS = T.verifyTimeoutMs || 15000;
 const VERIFY_RETRIES = T.verifyRetries == null ? 2 : T.verifyRetries;
+const DELIVER_TIMEOUT_MS = T.deliverTimeoutMs || 12000;
+const DELIVER_RETRIES = T.deliverRetries == null ? 2 : T.deliverRetries;
+const AWARD_TIMEOUT_MS = T.awardTimeoutMs || 6000;
+const AWARD_RETRIES = T.awardRetries == null ? 2 : T.awardRetries;
+const SEED_TIMEOUT_MS = T.seedTimeoutMs || 8000;
+const SEED_RETRIES = T.seedRetries == null ? 3 : T.seedRetries;
 
 const idTag = id.did.slice(-8);
 let postSeq = 0;
@@ -802,6 +929,8 @@ function postTask(post) {
           // can never settle (#46) and nothing measured their age.
           at: Date.now(),
         });
+        armDeliveryTimeout(contractId, win.provider);
+        armAwardTimeout(contractId, contract, pre_auth, win.provider);
         log(`selected ${win.provider} @ ${win.price_cc} CC (${bids.length} bids)` +
             (pool.length
               ? `, pool of ${pool.length} pinned, panel seeded from future ` +

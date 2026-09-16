@@ -1,0 +1,22 @@
+{
+  "name": "panel-freeze",
+  "what": "panel 只斷入向（收不到、但送得出）——對手行程卡死的形狀。TCP 活著、對方仍在送 ping，所以 keepalive 與「以收到流量判斷活性」都救不了",
+  "portOffset": 960,
+  "seed": 13,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 150,
+  "sampleS": 10,
+  "maxOpenS": 90,
+  "profile": { "mode": "latency", "latencyMs": 80, "jitterMs": 40 },
+  "timeline": [
+    { "atS": 40, "target": "panel", "fault": { "mode": "freeze", "direction": "in" } },
+    { "atS": 100, "target": "panel", "fault": "profile" }
+  ],
+  "expect": [
+    { "kind": "invariantsHold" },
+    { "kind": "settlesBefore", "atS": 40 },
+    { "kind": "poolEmptiesWithin", "afterS": 40, "withinS": 45 },
+    { "kind": "settlementResumesWithin", "afterS": 100, "withinS": 45 }
+  ]
+}

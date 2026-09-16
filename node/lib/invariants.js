@@ -55,15 +55,42 @@ function chains(ex) {
   return bad;
 }
 
-// Every dual-signed receipt carries two valid signatures.
+// Every settlement's authorisation chain verifies offline — including the
+// forced path, which is the one nothing checked before.
+//
+// A forced receipt has no requester signature over it: the requester refused
+// to sign, and what stands in its place is the pre_authorization it signed
+// earlier, stored as `pre_auth:<sig>`. demo.js's signature assertion filters
+// to `kind === 'dual'`, so the forced path's chain was never verified from
+// the export by any test — which surfaced here because a 5% loss scenario
+// produced the first *naturally occurring* forced settlement (the demo only
+// ever staged one with a scripted refusal).
 function receiptSignatures(ex) {
   const bad = [];
   for (const r of ex.receipts) {
-    for (const [role, sig] of Object.entries(r.sigs || {})) {
-      const pub = ex.pubkeys[r.receipt[role]];
-      if (!pub || !verify(pub, r.receipt, sig)) {
-        bad.push(`${r.receipt.contract_id}: bad ${role} signature`);
+    const rc = r.receipt;
+    const sigs = r.sigs || {};
+    const provPub = ex.pubkeys[rc.provider];
+    if (!provPub || !verify(provPub, rc, sigs.provider)) {
+      bad.push(`${rc.contract_id}: bad provider signature`);
+    }
+    const reqPub = ex.pubkeys[rc.requester];
+    const reqSig = String(sigs.requester || '');
+    if (r.kind === 'forced') {
+      const pa = r.evidence && r.evidence.pre_auth;
+      const paSig = reqSig.startsWith('pre_auth:')
+        ? reqSig.slice('pre_auth:'.length) : null;
+      if (!pa || !paSig || !reqPub || !verify(reqPub, pa, paSig)) {
+        bad.push(`${rc.contract_id}: forced without a valid pre_authorization`);
+      } else if (pa.contract_id !== rc.contract_id ||
+                 pa.provider !== rc.provider || pa.requester !== rc.requester ||
+                 pa.condition !== 'quorum-accepted') {
+        // A valid signature over the wrong authorisation is the interesting
+        // attack, not a malformed one.
+        bad.push(`${rc.contract_id}: pre_authorization does not bind this contract`);
       }
+    } else if (!reqPub || !verify(reqPub, rc, reqSig)) {
+      bad.push(`${rc.contract_id}: bad requester signature`);
     }
   }
   return bad;

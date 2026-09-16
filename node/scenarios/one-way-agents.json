@@ -1,0 +1,22 @@
+{
+  "name": "one-way-agents",
+  "what": "只斷 agent 的出向：它們聽得見 Hub（包含 ping），但說的話沒人收到。非對稱路由與單向防火牆的形狀，人工幾乎無法重現",
+  "portOffset": 980,
+  "seed": 17,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 150,
+  "sampleS": 10,
+  "maxOpenS": 90,
+  "profile": { "mode": "latency", "latencyMs": 80, "jitterMs": 40 },
+  "timeline": [
+    { "atS": 40, "target": "agents", "fault": { "mode": "blackhole", "direction": "out" } },
+    { "atS": 100, "target": "agents", "fault": "profile" }
+  ],
+  "expect": [
+    { "kind": "invariantsHold" },
+    { "kind": "settlesBefore", "atS": 40 },
+    { "kind": "noSettlementDuring", "fromS": 50, "toS": 100 },
+    { "kind": "settlementResumesWithin", "afterS": 100, "withinS": 45 }
+  ]
+}

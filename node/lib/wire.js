@@ -83,7 +83,11 @@ const hmac = (key, s) =>
 // A mismatch used to be a crash: a pre-W9 provider read c.verifiers.length on
 // a W9 contract that no longer had the field and died mid-contract, taking
 // the requester with it. Now it is a logged rejection.
-const PROTOCOL_VERSION = 1;
+// v2: registration became a three-way handshake (register → registered →
+// register_ack). A v1 client would register, never acknowledge, and sit
+// permanently not-online — a silent failure, which is precisely what the
+// version gate exists to convert into a loud one.
+const PROTOCOL_VERSION = 2;
 
 module.exports = {
   genIdentity, identityFromSeed, canon, sign, verify, sha256, hmac,

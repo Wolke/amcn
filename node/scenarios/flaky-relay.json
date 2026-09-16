@@ -1,0 +1,26 @@
+{
+  "name": "flaky-relay",
+  "what": "中繼丟訊息 2%：模擬 Hub 重啟或對端重連時 in-flight frame 消失（#40 依設計會丟）。以 frame 為單位丟棄——位元組層丟棄會截斷 JSON，那是 TCP 不可能發生的事",
+  "portOffset": 1000,
+  "seed": 23,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 180,
+  "sampleS": 15,
+  "maxOpenS": 120,
+  "profile": {
+    "mode": "loss",
+    "lossPct": 2,
+    "latencyMs": 80,
+    "jitterMs": 40
+  },
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 90
+    }
+  ]
+}

@@ -610,7 +610,14 @@ transport.listen({
           }
           const prior = agents.get(msg.did);
           agents.set(msg.did, {
-            pub: msg.pub, boxPub: msg.box_pub, chan, online: true,
+            // online stays false until the peer confirms it received our
+            // reply. A client that can send but not hear re-registers every
+            // idle timeout forever, and marking it online on `register` made
+            // each retry look healthy: a verifier that could not receive one
+            // verify_request stayed in the pool for the whole outage, and
+            // every contract awarded against it was doomed. Sending proves
+            // nothing; hearing does.
+            pub: msg.pub, boxPub: msg.box_pub, chan, online: false,
             // Keep the history on reconnect: stats drive the credit line.
             stats: prior ? prior.stats
               : (importedStats.get(msg.did) || eeff.newStats()),
@@ -629,7 +636,15 @@ transport.listen({
                            stake_cc: stakes.get(msg.did) || 0,
                            settlements: receipts.filter((r) =>
                              r.receipt.postings.some((p) => p.account === msg.did)).length });
-          console.log(`[hub] registered ${msg.did} (${msg.role || 'agent'}, CL ${clOf(msg.did).toFixed(1)})`);
+          break;
+        }
+        case 'register_ack': {
+          const a = agents.get(msg.did);
+          if (!a || a.chan !== chan) break;  // only the channel that registered
+          if (a.online) break;
+          a.online = true;
+          console.log(`[hub] registered ${msg.did} (${a.role}, ` +
+            `CL ${clOf(msg.did).toFixed(1)})`);
           break;
         }
         case 'task': {
@@ -652,7 +667,9 @@ transport.listen({
           chan.send({
             type: 'verifiers',
             verifiers: [...agents]
-              .filter(([, a]) => a.role === 'verifier' && a.online !== false)
+              // === true, not !== false: a verifier that has not confirmed it
+            // can hear us is not eligible (#49's sibling).
+            .filter(([, a]) => a.role === 'verifier' && a.online === true)
               .map(([did, a]) => ({ did, pub: a.pub, box_pub: a.boxPub })),
             lock: { checkpoint_seq: latest ? latest.cp.seq : -1,
                     root: latest ? latest.cp.root : sha256('genesis') },
@@ -672,6 +689,7 @@ transport.listen({
           break;
         }
         case 'bid': case 'contract': case 'contract_ack': case 'delivery':
+        case 'delivery_request':
         case 'receipt_half': case 'verify_request': case 'attestation':
         case 'attestation_commit': case 'reveal_request': {
           const to = agents.get(msg.to);
@@ -681,6 +699,16 @@ transport.listen({
         case 'receipt': handleReceipt(msg, chan); break;
         case 'forced_settlement': handleForced(msg, chan); break;
         case 'canary_result': handleCanaryResult(msg, chan); break;
+        case 'checkpoint_request': {
+          // A lost checkpoint broadcast used to strand a contract: the
+          // requester needs the seed root to derive its panel and had no way
+          // to ask for it.
+          const e = typeof msg.seq === 'number' && msg.seq < cpSeq
+            ? panel.checkpointAt(checkpoints, msg.seq) : null;
+          if (e) chan.send({ type: 'checkpoint', cp: e.cp, sig: e.sig,
+                             for_seq: msg.seq });
+          break;
+        }
         case 'export': {
           chan.send({ type: 'ledger_export', ...buildExport() });
           break;

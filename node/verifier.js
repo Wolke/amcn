@@ -49,6 +49,9 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
   onMessage: (msg) => {
     switch (msg.type) {
       case 'registered':
+        // The hub cannot tell a healthy client from one that only
+        // talks unless the client proves it heard the reply (#49).
+        hub.send({ type: 'register_ack', did: id.did });  // proof we can hear (#49)
         log('registered as verifier');
         break;
       case 'verify_request': {

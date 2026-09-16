@@ -44,16 +44,26 @@ const TRANSPORT_ERROR = 'transport_error';
 // hearing from an agent closes the channel, which marks it offline (#35); a
 // client that stops hearing from the hub closes too, which starts
 // reconnecting (#40). One implementation, both directions, both transports.
+// Liveness has to prove the link works in *both* directions, which the
+// first version did not. Under `freeze` (inbound dropped, outbound intact)
+// the frozen peer kept sending pings, so the hub's "I received traffic"
+// test stayed satisfied and it advertised verifiers that could not hear a
+// word — every contract awarded in that window was doomed and later
+// abandoned, with the provider unpaid. So a ping now demands a pong: if my
+// pings go unanswered, the peer cannot hear me, whatever I am hearing from
+// it.
 const HEARTBEAT_MS = Number(process.env.AMCN_HEARTBEAT_MS || 5000);
 const IDLE_TIMEOUT_MS = Number(process.env.AMCN_IDLE_TIMEOUT_MS || 20000);
 const PING = 'ping';
+const PONG = 'pong';
 
 function createChannel({ remote, write, close, isClosed, label = 'wire',
                         heartbeat = true }) {
   const onMsg = [], onRaw = [], onClose = [];
   let buf = '';
   let localClosed = false, closeEmitted = false;
-  let lastRecvAt = Date.now(), lastSendAt = 0;
+  let lastRecvAt = Date.now(), lastPingAt = 0;
+  let awaitingPongSince = null;   // set when a ping goes out unanswered
   let beat = null;
 
   const chan = {
@@ -62,7 +72,6 @@ function createChannel({ remote, write, close, isClosed, label = 'wire',
 
     send(obj) {
       if (chan.destroyed) return false;
-      lastSendAt = Date.now();
       write(frame(obj));
       return true;
     },
@@ -110,28 +119,43 @@ function createChannel({ remote, write, close, isClosed, label = 'wire',
         // Blank lines are the http transport's keepalive, and harmless noise
         // on any transport.
         if (!line.trim()) continue;
-        // Pings carry no protocol content and would multiply the hub's audit
-        // log, which is included in every export (#41).
-        if (line.includes(`"type":"${PING}"`)) {
+        // Parse before anything else, because liveness frames have to be
+        // answered and the audit log has to skip them — doing the skip first
+        // (as an earlier version did) meant pings were never answered and
+        // pongs never cleared the flag, so every channel declared its peer
+        // dead after 20 seconds with no fault present at all.
+        let msg;
+        try { msg = JSON.parse(line); } catch { msg = null; }
+
+        if (msg && msg.type === PING) {
           lastRecvAt = Date.now();
+          // Answering is what makes the check bidirectional.
+          if (!chan.destroyed) write(frame({ type: PONG, n: msg.n }));
           continue;
         }
+        if (msg && msg.type === PONG) {
+          lastRecvAt = Date.now();
+          awaitingPongSince = null;
+          continue;
+        }
+
+        // Every other line, parseable or not: the hub's full-traffic audit
+        // log (the NFR-005 plaintext scan reads it). Liveness frames are
+        // excluded above — they carry no protocol content and would multiply
+        // the log, which rides along in every export (#41).
+        lastRecvAt = Date.now();
         for (const fn of onRaw) {
           try { fn(line); } catch { /* audit log must not break the reader */ }
         }
-        let msg;
-        try { msg = JSON.parse(line); } catch { continue; }
-        lastRecvAt = Date.now();
-        // Liveness only; never reaches a handler, and deliberately not
-        // recorded as protocol traffic below either.
-        if (msg && msg.type === PING) continue;
-        if (msg && msg.type === TRANSPORT_ERROR) {
+        if (msg === null) continue;
+
+        if (msg.type === TRANSPORT_ERROR) {
           console.error(`[transport] ${chan.remote} refused us: ${msg.why}`);
           continue;
         }
         // Refuse before a handler can misread a shape it does not know. An
         // absent v means a node older than versioning itself.
-        if (msg && msg.v !== PROTOCOL_VERSION) {
+        if (msg.v !== PROTOCOL_VERSION) {
           console.error(`[${label}] rejected ${msg.type || 'frame'}: protocol v` +
             `${msg.v === undefined ? '(none)' : msg.v} — this node speaks v` +
             `${PROTOCOL_VERSION}. Upgrade every machine, not one of them.`);
@@ -167,18 +191,30 @@ function createChannel({ remote, write, close, isClosed, label = 'wire',
     beat = setInterval(() => {
       if (chan.destroyed) { clearInterval(beat); return; }
       const now = Date.now();
-      if (now - lastRecvAt > IDLE_TIMEOUT_MS) {
-        console.error(`[${label}] no traffic from ${chan.remote} for ` +
-          `${Math.round((now - lastRecvAt) / 1000)}s — treating it as gone`);
+      const silent = now - lastRecvAt > IDLE_TIMEOUT_MS;
+      const unanswered = awaitingPongSince !== null &&
+        now - awaitingPongSince > IDLE_TIMEOUT_MS;
+      if (silent || unanswered) {
+        console.error(`[${label}] ${silent
+          ? `no traffic from ${chan.remote} for ${Math.round((now - lastRecvAt) / 1000)}s`
+          : `${chan.remote} stopped answering pings for ` +
+            `${Math.round((now - awaitingPongSince) / 1000)}s (it cannot hear us)`
+        } — treating it as gone`);
         chan.close();
         // The transport's close event may never arrive on a blackholed
         // socket, so the close has to be announced from here.
         chan.emitClose();
         return;
       }
-      if (now - lastSendAt >= HEARTBEAT_MS) {
-        lastSendAt = now;
-        write(frame({ type: PING }));
+      // Sent on a schedule, not only when the channel is idle. Gating it on
+      // "have I sent anything recently" made the hub never ping at all — it
+      // broadcasts a checkpoint every 1200ms — and outbound app traffic
+      // proves nothing about whether the peer can hear it. One small frame
+      // every HEARTBEAT_MS per channel buys the only guarantee that matters.
+      if (now - lastPingAt >= HEARTBEAT_MS) {
+        lastPingAt = now;
+        if (awaitingPongSince === null) awaitingPongSince = now;
+        write(frame({ type: PING, n: now }));
       }
     }, Math.max(500, Math.floor(HEARTBEAT_MS / 2)));
     beat.unref();

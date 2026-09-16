@@ -102,8 +102,22 @@ function gate(dir) {
         return undefined;                       // vanishes; nothing is closed
       case 'freeze':
         return dir === 'in' ? undefined : deliver(text);
-      case 'loss':
-        return rnd() * 100 < (fault.lossPct || 0) ? undefined : deliver(text);
+      case 'loss': {
+        // Frame-aligned, not byte-aligned. Dropping a byte chunk can cut a
+        // JSON line in half, which corrupts the stream — something TCP makes
+        // impossible, so the first version was testing a fault that cannot
+        // happen. What this models is a *relay* losing whole messages: a hub
+        // restart mid-flow, or a peer reconnecting while frames were in
+        // flight (which #40 drops by design). Per-hop reliability still comes
+        // from TCP.
+        const keep = text.split('\n')
+          .filter((line, i, all) => {
+            if (!line) return i === all.length - 1;   // keep a trailing partial
+            return !(rnd() * 100 < (fault.lossPct || 0));
+          });
+        const out = keep.join('\n');
+        return out ? deliver(out) : undefined;
+      }
       case 'latency':
         setTimeout(() => deliver(text), delayFor());
         return undefined;
