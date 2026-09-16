@@ -51,6 +51,9 @@ cd node && node demo-rebuild.js
 # W10 第二個 ITransport（約 35 秒，7 項斷言：tcp 與 http 產生同一本帳）
 cd node && node demo-transport.js
 
+# W10 拔線預演（約 40 秒，8 項斷言：殺掉 Hub 後全網自行重連、帳延續）
+cd node && node demo-reconnect.js
+
 # 每支 demo 都可用 DEMO_PORT_OFFSET=100 與跑中的試點並存；
 # AMCN_TRANSPORT=http 可把整個 stack 換到第二個傳輸實作（預設 tcp）
 

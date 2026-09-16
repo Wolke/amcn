@@ -17,6 +17,7 @@
 const { verify, sha256, canon, PROTOCOL_VERSION,
         genIdentity, identityFromSeed, sign } = require('./lib/wire');
 const transport = require('./lib/transport').fromEnv();
+require('./lib/log').install();
 const eeff = require('./lib/eeff');
 const discovery = require('./lib/discovery');
 const panel = require('./lib/panel');

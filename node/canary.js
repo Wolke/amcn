@@ -26,6 +26,7 @@
 const { genIdentity, identityFromSeed, sign, verify, sha256,
         canon } = require('./lib/wire');
 const transport = require('./lib/transport').fromEnv();
+require('./lib/log').install();
 const { genBoxKeys, seal } = require('./lib/e2e');
 const { assertsHash } = require('./lib/dsl');
 const discovery = require('./lib/discovery');
@@ -60,109 +61,123 @@ const cpRoots = new Map();
 let verifierDir = { verifiers: [], lock: null };
 let seq = 0;
 
-const hub = transport.dialLazy(discovery.resolveHubTarget(cfg, log), (msg) => {
-  switch (msg.type) {
-    case 'registered':
-      log(`registered as canary issuer, hub credit line ${msg.credit_line.toFixed(1)} CC`);
-      log('若 Hub 未設 HUB_CANARY_DID 為上面這個 DID，報告會被拒絕');
-      break;
+const regBody = { did: id.did, pub: id.pub, box_pub: box.boxPub };
 
-    case 'verifiers': verifierDir = msg; break;
-    case 'checkpoint': cpRoots.set(msg.cp.seq, msg.cp.root); break;
+const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
+  // Everything needed to be usable on this connection, because sends while
+  // disconnected are dropped rather than queued. The directory request used
+  // to sit at module scope and rely on the pre-connect queue; it also has to
+  // be re-asked after a reconnect, since the pool and the checkpoint lock
+  // both move while a client is away.
+  onOpen: () => {
+    hub.send({ type: 'register', ...regBody, sig: sign(id.privateKey, regBody) });
+    hub.send({ type: 'list_verifiers' });
+  },
+  label: name,
+  onMessage: (msg) => {
+    switch (msg.type) {
+      case 'registered':
+        log(`registered as canary issuer, hub credit line ${msg.credit_line.toFixed(1)} CC`);
+        log('若 Hub 未設 HUB_CANARY_DID 為上面這個 DID，報告會被拒絕');
+        break;
 
-    case 'bid': {
-      const ctx = open.get(`c-${msg.bid.task_id}`);
-      if (!ctx || ctx.awarded) break;
-      if (!verify(msg.pub, msg.bid, msg.sig)) break;
-      if (msg.bid.price_cc > ctx.maxPriceCC) break;
-      ctx.awarded = true;
-      ctx.provider = msg.bid.provider;
-      ctx.price_cc = msg.bid.price_cc;
-      const contract = {
-        contract_id: ctx.contract_id,
-        requester: id.did, provider: msg.bid.provider, price_cc: msg.bid.price_cc,
-        payload_box: seal(msg.bid.box_pub, ctx.payload),
-        acceptance: { method: 'judge-quorum', asserts_hash: assertsHash(IMPOSSIBLE_ASSERTS) },
-        asserts: IMPOSSIBLE_ASSERTS,
-        verifier_pool: ctx.pool.map((v) => v.did),
-        verifier_pool_hash: panelLib.poolHash(ctx.pool.map((v) => v.did)),
-        panel_seed_cp: ctx.seedCp,
-        verifier_lock: ctx.lock,
-      };
-      // A canary settles out of Treasury on the hub's side, so no
-      // pre_authorization is offered: there is nothing for the provider to
-      // force-settle against this issuer.
-      hub.send({ type: 'contract', to: msg.bid.provider, contract,
-                 sig: sign(id.privateKey, contract), pub: id.pub });
-      log(`decoy ${ctx.contract_id} awarded to ${msg.bid.provider.slice(0, 18)} ` +
-          `@ ${msg.bid.price_cc} CC`);
-      break;
-    }
+      case 'verifiers': verifierDir = msg; break;
+      case 'checkpoint': cpRoots.set(msg.cp.seq, msg.cp.root); break;
 
-    case 'delivery': {
-      const ctx = open.get(msg.delivery.contract_id);
-      if (!ctx || ctx.fanned) break;
-      const seedRoot = cpRoots.get(ctx.seedCp);
-      if (seedRoot === undefined) break;   // wait for the seed checkpoint
-      ctx.fanned = true;
-      ctx.seedRoot = seedRoot;
-      const dids = new Set(panelLib.deriveDids(
-        ctx.pool.map((v) => v.did), ctx.contract_id, seedRoot));
-      ctx.panel = ctx.pool.filter((v) => dids.has(v.did));
-      ctx.commits = new Map();
-      for (const v of ctx.panel) {
-        const request = {
-          contract_id: ctx.contract_id, requester: id.did, provider: ctx.provider,
-          output: msg.delivery.output, asserts: IMPOSSIBLE_ASSERTS,
-          asserts_hash: assertsHash(IMPOSSIBLE_ASSERTS),
+      case 'bid': {
+        const ctx = open.get(`c-${msg.bid.task_id}`);
+        if (!ctx || ctx.awarded) break;
+        if (!verify(msg.pub, msg.bid, msg.sig)) break;
+        if (msg.bid.price_cc > ctx.maxPriceCC) break;
+        ctx.awarded = true;
+        ctx.provider = msg.bid.provider;
+        ctx.price_cc = msg.bid.price_cc;
+        const contract = {
+          contract_id: ctx.contract_id,
+          requester: id.did, provider: msg.bid.provider, price_cc: msg.bid.price_cc,
+          payload_box: seal(msg.bid.box_pub, ctx.payload),
+          acceptance: { method: 'judge-quorum', asserts_hash: assertsHash(IMPOSSIBLE_ASSERTS) },
+          asserts: IMPOSSIBLE_ASSERTS,
+          verifier_pool: ctx.pool.map((v) => v.did),
+          verifier_pool_hash: panelLib.poolHash(ctx.pool.map((v) => v.did)),
           panel_seed_cp: ctx.seedCp,
-          payload_box: seal(v.box_pub, ctx.payload),
+          verifier_lock: ctx.lock,
         };
-        hub.send({ type: 'verify_request', to: v.did, request,
-                   sig: sign(id.privateKey, request), pub: id.pub });
-      }
-      log(`decoy ${ctx.contract_id} delivered → panel of ${ctx.panel.length} ` +
-          `(correct verdict is FAIL)`);
-      setTimeout(() => reveal(ctx.contract_id), cfg.revealGraceMs || 3000);
-      break;
-    }
-
-    case 'attestation_commit': {
-      const ctx = open.get(msg.commit.contract_id);
-      if (!ctx || !ctx.commits) break;
-      if (!verify(msg.pub, msg.commit, msg.sig)) break;
-      ctx.commits.set(msg.commit.verifier,
-        { commitment: msg.commit.commitment, commit_sig: msg.sig });
-      if (ctx.panel && ctx.commits.size >= ctx.panel.length) reveal(ctx.contract_id);
-      break;
-    }
-
-    case 'attestation': {
-      const a = msg.attestation;
-      const ctx = open.get(a && a.contract_id);
-      if (!ctx || !ctx.commits) break;
-      const held = ctx.commits.get(a.verifier);
-      if (!held) break;
-      if (typeof msg.nonce !== 'string' ||
-          sha256(canon(a) + msg.nonce) !== held.commitment) {
-        log(`REJECT reveal from ${a.verifier.slice(0, 18)}: does not open its commitment`);
+        // A canary settles out of Treasury on the hub's side, so no
+        // pre_authorization is offered: there is nothing for the provider to
+        // force-settle against this issuer.
+        hub.send({ type: 'contract', to: msg.bid.provider, contract,
+                   sig: sign(id.privateKey, contract), pub: id.pub });
+        log(`decoy ${ctx.contract_id} awarded to ${msg.bid.provider.slice(0, 18)} ` +
+            `@ ${msg.bid.price_cc} CC`);
         break;
       }
-      ctx.attest = ctx.attest || [];
-      if (ctx.attest.some((x) => x.attestation.verifier === a.verifier)) break;
-      ctx.attest.push({ attestation: a, sig: msg.sig, nonce: msg.nonce,
-                        commitment: held.commitment, commit_sig: held.commit_sig });
-      if (ctx.attest.length >= ctx.panel.length) report(ctx.contract_id);
-      break;
+
+      case 'delivery': {
+        const ctx = open.get(msg.delivery.contract_id);
+        if (!ctx || ctx.fanned) break;
+        const seedRoot = cpRoots.get(ctx.seedCp);
+        if (seedRoot === undefined) break;   // wait for the seed checkpoint
+        ctx.fanned = true;
+        ctx.seedRoot = seedRoot;
+        const dids = new Set(panelLib.deriveDids(
+          ctx.pool.map((v) => v.did), ctx.contract_id, seedRoot));
+        ctx.panel = ctx.pool.filter((v) => dids.has(v.did));
+        ctx.commits = new Map();
+        for (const v of ctx.panel) {
+          const request = {
+            contract_id: ctx.contract_id, requester: id.did, provider: ctx.provider,
+            output: msg.delivery.output, asserts: IMPOSSIBLE_ASSERTS,
+            asserts_hash: assertsHash(IMPOSSIBLE_ASSERTS),
+            panel_seed_cp: ctx.seedCp,
+            payload_box: seal(v.box_pub, ctx.payload),
+          };
+          hub.send({ type: 'verify_request', to: v.did, request,
+                     sig: sign(id.privateKey, request), pub: id.pub });
+        }
+        log(`decoy ${ctx.contract_id} delivered → panel of ${ctx.panel.length} ` +
+            `(correct verdict is FAIL)`);
+        setTimeout(() => reveal(ctx.contract_id), cfg.revealGraceMs || 3000);
+        break;
+      }
+
+      case 'attestation_commit': {
+        const ctx = open.get(msg.commit.contract_id);
+        if (!ctx || !ctx.commits) break;
+        if (!verify(msg.pub, msg.commit, msg.sig)) break;
+        ctx.commits.set(msg.commit.verifier,
+          { commitment: msg.commit.commitment, commit_sig: msg.sig });
+        if (ctx.panel && ctx.commits.size >= ctx.panel.length) reveal(ctx.contract_id);
+        break;
+      }
+
+      case 'attestation': {
+        const a = msg.attestation;
+        const ctx = open.get(a && a.contract_id);
+        if (!ctx || !ctx.commits) break;
+        const held = ctx.commits.get(a.verifier);
+        if (!held) break;
+        if (typeof msg.nonce !== 'string' ||
+            sha256(canon(a) + msg.nonce) !== held.commitment) {
+          log(`REJECT reveal from ${a.verifier.slice(0, 18)}: does not open its commitment`);
+          break;
+        }
+        ctx.attest = ctx.attest || [];
+        if (ctx.attest.some((x) => x.attestation.verifier === a.verifier)) break;
+        ctx.attest.push({ attestation: a, sig: msg.sig, nonce: msg.nonce,
+                          commitment: held.commitment, commit_sig: held.commit_sig });
+        if (ctx.attest.length >= ctx.panel.length) report(ctx.contract_id);
+        break;
+      }
+
+      case 'canary_scored':
+        log(`hub scored ${msg.contract_id}: ${msg.wrong} 位投 PASS（應為 FAIL）` +
+            `，${msg.slashed} 位達到證據門檻被沒收押注`);
+        break;
+
+      case 'error': log(`hub error: ${msg.why} (${msg.ref})`); break;
     }
-
-    case 'canary_scored':
-      log(`hub scored ${msg.contract_id}: ${msg.wrong} 位投 PASS（應為 FAIL）` +
-          `，${msg.slashed} 位達到證據門檻被沒收押注`);
-      break;
-
-    case 'error': log(`hub error: ${msg.why} (${msg.ref})`); break;
-  }
+  },
 });
 
 function reveal(contractId) {
@@ -224,11 +239,9 @@ function post() {
   log(`posted decoy ${taskId} (${UNITS}u, max ${MAX_PRICE_CC} CC)`);
 }
 
-const regBody = { did: id.did, pub: id.pub, box_pub: box.boxPub };
-hub.send({ type: 'register', ...regBody, sig: sign(id.privateKey, regBody) });
+
 console.log(`DID ${name} ${id.did}`);
 console.log(`→ 在 Hub 設 HUB_CANARY_DID=${id.did} 後重啟 Hub，否則報告會被拒絕`);
 
-hub.send({ type: 'list_verifiers' });
 setTimeout(() => setInterval(post, EVERY_MS).unref(), 2000);
 setTimeout(post, 2500);

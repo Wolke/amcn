@@ -17,6 +17,7 @@ const http = require('node:http');
 const { genIdentity, identityFromSeed, sign, verify, sha256, canon, connect,
         PROTOCOL_VERSION } = require('./lib/wire');
 const transport = require('./lib/transport').fromEnv();
+require('./lib/log').install();
 const { genBoxKeys, seal, open } = require('./lib/e2e');
 const { runAsserts, assertsHash } = require('./lib/dsl');
 const keystore = require('./lib/keystore');
@@ -175,342 +176,354 @@ function fanOut(delivery, ctx, chosen) {
   }
 }
 
-const hub = transport.dialLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
-  switch (msg.type) {
-    case 'registered':
-      console_.creditLine = msg.credit_line;
-      // Adopt the hub's view rather than assuming a fresh start: a seeded
-      // identity that restarts still owes what it owed (§4 #17).
-      if (typeof msg.balance_cc === 'number') {
-        console_.balance = msg.balance_cc;
-        console_.resumedFrom = { balance_cc: msg.balance_cc,
-                                 settlements: msg.settlements || 0 };
-      }
-      log(`registered, dynamic credit line ${msg.credit_line.toFixed(1)} CC` +
-          (msg.balance_cc ? `, resuming at ${msg.balance_cc.toFixed(2)} CC ` +
-            `after ${msg.settlements || 0} prior settlements` : ''));
-      refreshMode('registered');
-      break;
+const regBody = { did: id.did, pub: id.pub, box_pub: box.boxPub };
 
-    case 'credit_update':
-      console_.creditLine = msg.credit_line;
-      refreshMode('credit line moved');
-      break;
-
-    case 'verifiers': verifierDir = msg; break;
-
-    case 'checkpoint': {
-      cpRoots.set(msg.cp.seq, msg.cp.root);
-      for (const [cid, release] of [...pendingPanel]) {
-        const ctx = asRequester.get(cid);
-        if (ctx && cpRoots.has(ctx.contract.panel_seed_cp)) {
-          pendingPanel.delete(cid);
-          release();
+const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
+  // Re-sent on every connection: the hub cannot route to a DID whose
+  // channel it does not know, and re-registering resumes the balance and
+  // stats this identity already had (#35) rather than starting over.
+  onOpen: () => {
+    hub.send({ type: 'register', ...regBody, sig: sign(id.privateKey, regBody) });
+    // The pool and the checkpoint lock moved while we were away.
+    hub.send({ type: 'list_verifiers' });
+  },
+  label: cfg.name || 'agent',
+  onMessage: async (msg) => {
+    switch (msg.type) {
+      case 'registered':
+        console_.creditLine = msg.credit_line;
+        // Adopt the hub's view rather than assuming a fresh start: a seeded
+        // identity that restarts still owes what it owed (§4 #17).
+        if (typeof msg.balance_cc === 'number') {
+          console_.balance = msg.balance_cc;
+          console_.resumedFrom = { balance_cc: msg.balance_cc,
+                                   settlements: msg.settlements || 0 };
         }
-      }
-      break;
-    }
+        log(`registered, dynamic credit line ${msg.credit_line.toFixed(1)} CC` +
+            (msg.balance_cc ? `, resuming at ${msg.balance_cc.toFixed(2)} CC ` +
+              `after ${msg.settlements || 0} prior settlements` : ''));
+        refreshMode('registered');
+        break;
 
-    case 'task': {
-      if (!providing) break;
-      // Quota is the thing being sold. Bidding without checking it offers
-      // capacity the agent does not have — the simulator's collect_offers has
-      // always gated on remaining_quota and this side never did.
-      if (console_.quota && console_.quota.remaining < msg.task.units) {
+      case 'credit_update':
+        console_.creditLine = msg.credit_line;
+        refreshMode('credit line moved');
+        break;
+
+      case 'verifiers': verifierDir = msg; break;
+
+      case 'checkpoint': {
+        cpRoots.set(msg.cp.seq, msg.cp.root);
+        for (const [cid, release] of [...pendingPanel]) {
+          const ctx = asRequester.get(cid);
+          if (ctx && cpRoots.has(ctx.contract.panel_seed_cp)) {
+            pendingPanel.delete(cid);
+            release();
+          }
+        }
         break;
       }
-      const unitPrice = strategy.priceFor(cfg.provide.pricePerUnit, mode);
-      const bid = {
-        task_id: msg.task.task_id, provider: id.did,
-        price_cc: +(msg.task.units * unitPrice).toFixed(4),
-        box_pub: box.boxPub,
-      };
-      bidUnits.set(bid.task_id, msg.task.units);
-      hub.send({ type: 'bid', to: msg.task.requester, bid,
-                 sig: sign(id.privateKey, bid), pub: id.pub });
-      log(`bid ${bid.price_cc} CC on ${msg.task.task_id}` +
-        (mode === 'repay' ? ` (repayment discount, ${unitPrice}/unit)` : ''));
-      break;
-    }
 
-    case 'bid': {
-      const p = pendingBids.get(msg.bid.task_id);
-      if (!p || !verify(msg.pub, msg.bid, msg.sig)) break;
-      if (msg.bid.price_cc <= p.task.max_price_cc) {
-        p.bids.push({ ...msg.bid, pub: msg.pub });
+      case 'task': {
+        if (!providing) break;
+        // Quota is the thing being sold. Bidding without checking it offers
+        // capacity the agent does not have — the simulator's collect_offers has
+        // always gated on remaining_quota and this side never did.
+        if (console_.quota && console_.quota.remaining < msg.task.units) {
+          break;
+        }
+        const unitPrice = strategy.priceFor(cfg.provide.pricePerUnit, mode);
+        const bid = {
+          task_id: msg.task.task_id, provider: id.did,
+          price_cc: +(msg.task.units * unitPrice).toFixed(4),
+          box_pub: box.boxPub,
+        };
+        bidUnits.set(bid.task_id, msg.task.units);
+        hub.send({ type: 'bid', to: msg.task.requester, bid,
+                   sig: sign(id.privateKey, bid), pub: id.pub });
+        log(`bid ${bid.price_cc} CC on ${msg.task.task_id}` +
+          (mode === 'repay' ? ` (repayment discount, ${unitPrice}/unit)` : ''));
+        break;
       }
-      break;
-    }
 
-    case 'contract': { // I'm awarded: countersign, unseal, execute
-      const c = msg.contract;
-      if (!verify(msg.pub, c, msg.sig)) break;
-      const mySig = sign(id.privateKey, c);
-      hub.send({ type: 'contract_ack', to: c.requester,
-                 contract_id: c.contract_id, sig: mySig });
-      const payload = open(box.boxPriv, c.payload_box);
-      const soldUnits = bidUnits.get(c.contract_id.replace(/^c-/, '')) || 0;
-      if (console_.quota && soldUnits) {
-        console_.quota.remaining =
-          +(console_.quota.remaining - soldUnits).toFixed(3);
-        console_.quota.soldUnits =
-          +((console_.quota.soldUnits || 0) + soldUnits).toFixed(3);
+      case 'bid': {
+        const p = pendingBids.get(msg.bid.task_id);
+        if (!p || !verify(msg.pub, msg.bid, msg.sig)) break;
+        if (msg.bid.price_cc <= p.task.max_price_cc) {
+          p.bids.push({ ...msg.bid, pub: msg.pub });
+        }
+        break;
       }
-      log(`awarded ${c.contract_id} @ ${c.price_cc} CC (contract dual-signed, ` +
-          `pool ${(c.verifier_pool || []).length}, panel seeded from ` +
-          `checkpoint #${c.panel_seed_cp}) — executing locally` +
-          (soldUnits ? `, ${soldUnits}u quota spent` : ''));
-      let output;
-      try {
-        output = await adapter.complete(adapterCfg, payload);
-      } catch (err) {
-        // This handler is async, so a throw here escapes as an unhandled
-        // rejection and kills the process mid-contract — a real provider
-        // endpoint returning 500 was enough to do it.
-        log(`execution FAILED on ${c.contract_id}: ${err.message} — ` +
-            'no delivery will be sent; the requester may force-settle');
+
+      case 'contract': { // I'm awarded: countersign, unseal, execute
+        const c = msg.contract;
+        if (!verify(msg.pub, c, msg.sig)) break;
+        const mySig = sign(id.privateKey, c);
+        hub.send({ type: 'contract_ack', to: c.requester,
+                   contract_id: c.contract_id, sig: mySig });
+        const payload = open(box.boxPriv, c.payload_box);
+        const soldUnits = bidUnits.get(c.contract_id.replace(/^c-/, '')) || 0;
+        if (console_.quota && soldUnits) {
+          console_.quota.remaining =
+            +(console_.quota.remaining - soldUnits).toFixed(3);
+          console_.quota.soldUnits =
+            +((console_.quota.soldUnits || 0) + soldUnits).toFixed(3);
+        }
+        log(`awarded ${c.contract_id} @ ${c.price_cc} CC (contract dual-signed, ` +
+            `pool ${(c.verifier_pool || []).length}, panel seeded from ` +
+            `checkpoint #${c.panel_seed_cp}) — executing locally` +
+            (soldUnits ? `, ${soldUnits}u quota spent` : ''));
+        let output;
+        try {
+          output = await adapter.complete(adapterCfg, payload);
+        } catch (err) {
+          // This handler is async, so a throw here escapes as an unhandled
+          // rejection and kills the process mid-contract — a real provider
+          // endpoint returning 500 was enough to do it.
+          log(`execution FAILED on ${c.contract_id}: ${err.message} — ` +
+              'no delivery will be sent; the requester may force-settle');
+          asProvider.set(c.contract_id, {
+            contract: c, contract_sigs: { requester: msg.sig, provider: mySig },
+            pre_auth: msg.pre_auth, pre_auth_sig: msg.pre_auth_sig,
+            output: null, attest: [], settled: false, failed: err.message,
+          });
+          break;
+        }
         asProvider.set(c.contract_id, {
           contract: c, contract_sigs: { requester: msg.sig, provider: mySig },
           pre_auth: msg.pre_auth, pre_auth_sig: msg.pre_auth_sig,
-          output: null, attest: [], settled: false, failed: err.message,
+          output, attest: [], settled: false,
         });
+        const delivery = { contract_id: c.contract_id, output, provider: id.did };
+        hub.send({ type: 'delivery', to: c.requester, delivery,
+                   sig: sign(id.privateKey, delivery), pub: id.pub });
         break;
       }
-      asProvider.set(c.contract_id, {
-        contract: c, contract_sigs: { requester: msg.sig, provider: mySig },
-        pre_auth: msg.pre_auth, pre_auth_sig: msg.pre_auth_sig,
-        output, attest: [], settled: false,
-      });
-      const delivery = { contract_id: c.contract_id, output, provider: id.did };
-      hub.send({ type: 'delivery', to: c.requester, delivery,
-                 sig: sign(id.privateKey, delivery), pub: id.pub });
-      break;
-    }
 
-    case 'contract_ack': { // provider countersigned
-      const ctx = asRequester.get(msg.contract_id);
-      if (ctx && verify(ctx.providerPub, ctx.contract, msg.sig)) {
-        ctx.contract_sigs.provider = msg.sig;
-      }
-      break;
-    }
-
-    case 'delivery': { // I'm the requester
-      const d = msg.delivery;
-      const ctx = asRequester.get(d.contract_id);
-      if (!ctx || !verify(msg.pub, d, msg.sig)) break;
-      ctx.output = d.output;
-      if (ctx.contract.acceptance.method === 'dsl-local') {
-        const { pass, failures } = runAsserts(ctx.asserts,
-          { payload: ctx.payload, output: d.output });
-        if (!pass) { log(`REJECTED ${d.contract_id}: ${JSON.stringify(failures)}`); break; }
-        log(`verified ${d.contract_id} via local DSL → settling`);
-        requestSettlement(d.contract_id, 'requester', d.provider, d.output);
-      } else { // judge-quorum: fan out to the future-seeded panel
-        const dispatch = () => {
-          const chosen = panelFor(d.contract_id, ctx);
-          if (!chosen) { // still no seed; the checkpoint handler will retry
-            pendingPanel.set(d.contract_id, dispatch);
-            log(`delivery on ${d.contract_id} → waiting for seed ` +
-                `checkpoint #${ctx.contract.panel_seed_cp} before selecting a panel`);
-            return;
-          }
-          ctx.panel = chosen;
-          ctx.commits = new Map();
-          ctx.delivery = d;
-          log(`delivery on ${d.contract_id} → panel selected from checkpoint ` +
-              `#${ctx.contract.panel_seed_cp}: ${chosen.length} verifiers`);
-          fanOut(d, ctx, chosen);
-          // A verifier that never commits must not stall the contract, so
-          // reveal on a quorum after a grace period.
-          // Cross-machine commitments can take longer than a local round
-          // trip, so the window is configurable and the timer only marks the
-          // window closed — it never abandons the contract.
-          const graceMs = (cfg.policy && cfg.policy.revealGraceMs) || 3000;
-          ctx.revealTimer = setTimeout(() => {
-            ctx.graceElapsed = true;
-            requestReveal(d.contract_id, 'grace elapsed');
-          }, graceMs);
-        };
-        dispatch();
-      }
-      break;
-    }
-
-    case 'attestation_commit': {
-      const cid = msg.commit.contract_id;
-      if (!verify(msg.pub, msg.commit, msg.sig)) break;
-      for (const ctx of [asRequester.get(cid), asProvider.get(cid)]) {
-        if (!ctx) continue;
-        ctx.commits = ctx.commits || new Map();
-        ctx.commits.set(msg.commit.verifier,
-          { commitment: msg.commit.commitment, commit_sig: msg.sig, pub: msg.pub });
-      }
-      const reqC = asRequester.get(cid);
-      // Only the requester drives the reveal; the provider just records
-      // commitments so it can build a forced-settlement bundle.
-      if (reqC && reqC.panel) {
-        // Full panel: reveal at once. Past the grace window: reveal as soon
-        // as a quorum exists, so a panel that never completes still settles.
-        if (reqC.commits.size >= reqC.panel.length) {
-          requestReveal(cid, 'full panel');
-        } else if (reqC.graceElapsed && reqC.commits.size >= 2) {
-          requestReveal(cid, 'quorum after grace');
+      case 'contract_ack': { // provider countersigned
+        const ctx = asRequester.get(msg.contract_id);
+        if (ctx && verify(ctx.providerPub, ctx.contract, msg.sig)) {
+          ctx.contract_sigs.provider = msg.sig;
         }
+        break;
       }
-      break;
-    }
 
-    case 'attestation': {
-      const a = msg.attestation;
-      // A reveal only counts if it opens the commitment this verifier made
-      // before seeing anyone else's verdict.
-      {
-        const cid = a && a.contract_id;
-        const ctx0 = asRequester.get(cid) || asProvider.get(cid);
-        const held = ctx0 && ctx0.commits && ctx0.commits.get(a.verifier);
-        if (held) {
-          if (msg.nonce === undefined ||
-              sha256(canon(a) + msg.nonce) !== held.commitment) {
-            log(`REJECT reveal from ${a.verifier} on ${cid}: ` +
-                'does not open its commitment');
+      case 'delivery': { // I'm the requester
+        const d = msg.delivery;
+        const ctx = asRequester.get(d.contract_id);
+        if (!ctx || !verify(msg.pub, d, msg.sig)) break;
+        ctx.output = d.output;
+        if (ctx.contract.acceptance.method === 'dsl-local') {
+          const { pass, failures } = runAsserts(ctx.asserts,
+            { payload: ctx.payload, output: d.output });
+          if (!pass) { log(`REJECTED ${d.contract_id}: ${JSON.stringify(failures)}`); break; }
+          log(`verified ${d.contract_id} via local DSL → settling`);
+          requestSettlement(d.contract_id, 'requester', d.provider, d.output);
+        } else { // judge-quorum: fan out to the future-seeded panel
+          const dispatch = () => {
+            const chosen = panelFor(d.contract_id, ctx);
+            if (!chosen) { // still no seed; the checkpoint handler will retry
+              pendingPanel.set(d.contract_id, dispatch);
+              log(`delivery on ${d.contract_id} → waiting for seed ` +
+                  `checkpoint #${ctx.contract.panel_seed_cp} before selecting a panel`);
+              return;
+            }
+            ctx.panel = chosen;
+            ctx.commits = new Map();
+            ctx.delivery = d;
+            log(`delivery on ${d.contract_id} → panel selected from checkpoint ` +
+                `#${ctx.contract.panel_seed_cp}: ${chosen.length} verifiers`);
+            fanOut(d, ctx, chosen);
+            // A verifier that never commits must not stall the contract, so
+            // reveal on a quorum after a grace period.
+            // Cross-machine commitments can take longer than a local round
+            // trip, so the window is configurable and the timer only marks the
+            // window closed — it never abandons the contract.
+            const graceMs = (cfg.policy && cfg.policy.revealGraceMs) || 3000;
+            ctx.revealTimer = setTimeout(() => {
+              ctx.graceElapsed = true;
+              requestReveal(d.contract_id, 'grace elapsed');
+            }, graceMs);
+          };
+          dispatch();
+        }
+        break;
+      }
+
+      case 'attestation_commit': {
+        const cid = msg.commit.contract_id;
+        if (!verify(msg.pub, msg.commit, msg.sig)) break;
+        for (const ctx of [asRequester.get(cid), asProvider.get(cid)]) {
+          if (!ctx) continue;
+          ctx.commits = ctx.commits || new Map();
+          ctx.commits.set(msg.commit.verifier,
+            { commitment: msg.commit.commitment, commit_sig: msg.sig, pub: msg.pub });
+        }
+        const reqC = asRequester.get(cid);
+        // Only the requester drives the reveal; the provider just records
+        // commitments so it can build a forced-settlement bundle.
+        if (reqC && reqC.panel) {
+          // Full panel: reveal at once. Past the grace window: reveal as soon
+          // as a quorum exists, so a panel that never completes still settles.
+          if (reqC.commits.size >= reqC.panel.length) {
+            requestReveal(cid, 'full panel');
+          } else if (reqC.graceElapsed && reqC.commits.size >= 2) {
+            requestReveal(cid, 'quorum after grace');
+          }
+        }
+        break;
+      }
+
+      case 'attestation': {
+        const a = msg.attestation;
+        // A reveal only counts if it opens the commitment this verifier made
+        // before seeing anyone else's verdict.
+        {
+          const cid = a && a.contract_id;
+          const ctx0 = asRequester.get(cid) || asProvider.get(cid);
+          const held = ctx0 && ctx0.commits && ctx0.commits.get(a.verifier);
+          if (held) {
+            if (msg.nonce === undefined ||
+                sha256(canon(a) + msg.nonce) !== held.commitment) {
+              log(`REJECT reveal from ${a.verifier} on ${cid}: ` +
+                  'does not open its commitment');
+              break;
+            }
+            msg.commitment = held.commitment;
+            msg.commit_sig = held.commit_sig;
+          } else if (ctx0 && ctx0.contract &&
+                     ctx0.contract.acceptance.method === 'judge-quorum') {
+            log(`REJECT reveal from ${a.verifier} on ${cid}: no prior commitment`);
             break;
           }
-          msg.commitment = held.commitment;
-          msg.commit_sig = held.commit_sig;
-        } else if (ctx0 && ctx0.contract &&
-                   ctx0.contract.acceptance.method === 'judge-quorum') {
-          log(`REJECT reveal from ${a.verifier} on ${cid}: no prior commitment`);
-          break;
         }
-      }
-      const reqCtx = asRequester.get(a.contract_id);
-      const provCtx = asProvider.get(a.contract_id);
-      if (reqCtx) { // requester side: settle on 2-of-3 PASS (unless malicious)
-        const v = reqCtx.panel.find((x) => x.did === a.verifier);
-        if (!v || !verify(v.pub, a, msg.sig)) break;
-        reqCtx.attest.push({ attestation: a, sig: msg.sig, pub: msg.pub,
-                             nonce: msg.nonce, commitment: msg.commitment,
-                             commit_sig: msg.commit_sig });
-        const passes = reqCtx.attest.filter((x) => x.attestation.verdict === 'PASS').length;
-        if (passes >= 2 && !reqCtx.done) {
-          reqCtx.done = true;
-          if (cfg.refuseToSettle) {
-            log(`quorum PASS on ${a.contract_id} — REFUSING to settle (malicious demo)`);
-          } else {
-            log(`quorum PASS on ${a.contract_id} → settling`);
-            requestSettlement(a.contract_id, 'requester',
-              reqCtx.contract.provider, reqCtx.output);
+        const reqCtx = asRequester.get(a.contract_id);
+        const provCtx = asProvider.get(a.contract_id);
+        if (reqCtx) { // requester side: settle on 2-of-3 PASS (unless malicious)
+          const v = reqCtx.panel.find((x) => x.did === a.verifier);
+          if (!v || !verify(v.pub, a, msg.sig)) break;
+          reqCtx.attest.push({ attestation: a, sig: msg.sig, pub: msg.pub,
+                               nonce: msg.nonce, commitment: msg.commitment,
+                               commit_sig: msg.commit_sig });
+          const passes = reqCtx.attest.filter((x) => x.attestation.verdict === 'PASS').length;
+          if (passes >= 2 && !reqCtx.done) {
+            reqCtx.done = true;
+            if (cfg.refuseToSettle) {
+              log(`quorum PASS on ${a.contract_id} — REFUSING to settle (malicious demo)`);
+            } else {
+              log(`quorum PASS on ${a.contract_id} → settling`);
+              requestSettlement(a.contract_id, 'requester',
+                reqCtx.contract.provider, reqCtx.output);
+            }
           }
         }
-      }
-      if (provCtx) { // provider side: arm forced settlement (T-05)
-        // The panel is no longer on the contract, so check membership against
-        // the same future-seeded derivation the hub will re-run. Without the
-        // seed root yet, hold the attestation: the hub would reject it anyway.
-        const seedRoot = cpRoots.get(provCtx.contract.panel_seed_cp);
-        if (seedRoot === undefined) break;
-        if (!panelLib.deriveDids(provCtx.contract.verifier_pool,
-              a.contract_id, seedRoot).includes(a.verifier)) break;
-        if (!verify(msg.pub, a, msg.sig)) break;
-        provCtx.attest.push({ attestation: a, sig: msg.sig, pub: msg.pub,
-                              nonce: msg.nonce, commitment: msg.commitment,
-                              commit_sig: msg.commit_sig });
-        const passes = provCtx.attest.filter((x) => x.attestation.verdict === 'PASS').length;
-        if (passes >= 2 && !provCtx.timer && !provCtx.settled) {
-          provCtx.timer = setTimeout(() => {
-            if (provCtx.settled) return;
-            log(`no settlement for ${a.contract_id} after quorum PASS → ` +
-                `FORCING with pre_auth + attestations`);
-            requestSettlement(a.contract_id, 'forced', id.did, provCtx.output);
-          }, 1200);
+        if (provCtx) { // provider side: arm forced settlement (T-05)
+          // The panel is no longer on the contract, so check membership against
+          // the same future-seeded derivation the hub will re-run. Without the
+          // seed root yet, hold the attestation: the hub would reject it anyway.
+          const seedRoot = cpRoots.get(provCtx.contract.panel_seed_cp);
+          if (seedRoot === undefined) break;
+          if (!panelLib.deriveDids(provCtx.contract.verifier_pool,
+                a.contract_id, seedRoot).includes(a.verifier)) break;
+          if (!verify(msg.pub, a, msg.sig)) break;
+          provCtx.attest.push({ attestation: a, sig: msg.sig, pub: msg.pub,
+                                nonce: msg.nonce, commitment: msg.commitment,
+                                commit_sig: msg.commit_sig });
+          const passes = provCtx.attest.filter((x) => x.attestation.verdict === 'PASS').length;
+          if (passes >= 2 && !provCtx.timer && !provCtx.settled) {
+            provCtx.timer = setTimeout(() => {
+              if (provCtx.settled) return;
+              log(`no settlement for ${a.contract_id} after quorum PASS → ` +
+                  `FORCING with pre_auth + attestations`);
+              requestSettlement(a.contract_id, 'forced', id.did, provCtx.output);
+            }, 1200);
+          }
         }
+        break;
       }
-      break;
-    }
 
-    case 'fee_terms': {
-      const pf = pendingFees.get(msg.contract_id);
-      if (!pf) break;
-      const { fee, risk, price } = msg;
-      const shares = msg.verifier_shares || [];
-      const verifierTotal = shares.reduce((t, x) => +(t + x).toFixed(4), 0);
-      const c = pf.contract;
-      const receipt = {
-        contract_id: msg.contract_id,
-        requester: msg.requester,
-        provider: pf.provider,
-        delivery_hash: pf.delivery_hash,
-        // Carried so the hub can re-derive the panel from a signed artifact
-        // instead of trusting a payee list, and so the receipt is
-        // self-contained for offline audit.
-        acceptance_method: c.acceptance.method,
-        verifier_pool: c.verifier_pool || [],
-        verifier_pool_hash: c.verifier_pool_hash || null,
-        panel_seed_cp: c.panel_seed_cp,
-        postings: [
-          { account: msg.requester, amount_cc: -price },
-          { account: pf.provider,
-            amount_cc: +(price - fee - risk - verifierTotal).toFixed(4) },
-          { account: 'protocol:treasury', amount_cc: fee },
-          { account: 'protocol:insurance', amount_cc: risk },
-          ...(msg.panel || []).map((did, i) => ({ account: did, amount_cc: shares[i] })),
-        ],
-      };
-      if (pf.role === 'requester') {
-        hub.send({ type: 'receipt_half', to: pf.provider, receipt,
-                   sig: sign(id.privateKey, receipt), pub: id.pub });
-      } else { // forced: evidence package instead of requester signature
-        const e = asProvider.get(msg.contract_id);
-        hub.send({
-          type: 'forced_settlement', receipt,
-          provider_sig: sign(id.privateKey, receipt),
-          evidence: {
-            contract: e.contract, contract_sigs: e.contract_sigs,
-            pre_auth: e.pre_auth, pre_auth_sig: e.pre_auth_sig,
-            attestations: e.attest,
-          },
-        });
+      case 'fee_terms': {
+        const pf = pendingFees.get(msg.contract_id);
+        if (!pf) break;
+        const { fee, risk, price } = msg;
+        const shares = msg.verifier_shares || [];
+        const verifierTotal = shares.reduce((t, x) => +(t + x).toFixed(4), 0);
+        const c = pf.contract;
+        const receipt = {
+          contract_id: msg.contract_id,
+          requester: msg.requester,
+          provider: pf.provider,
+          delivery_hash: pf.delivery_hash,
+          // Carried so the hub can re-derive the panel from a signed artifact
+          // instead of trusting a payee list, and so the receipt is
+          // self-contained for offline audit.
+          acceptance_method: c.acceptance.method,
+          verifier_pool: c.verifier_pool || [],
+          verifier_pool_hash: c.verifier_pool_hash || null,
+          panel_seed_cp: c.panel_seed_cp,
+          postings: [
+            { account: msg.requester, amount_cc: -price },
+            { account: pf.provider,
+              amount_cc: +(price - fee - risk - verifierTotal).toFixed(4) },
+            { account: 'protocol:treasury', amount_cc: fee },
+            { account: 'protocol:insurance', amount_cc: risk },
+            ...(msg.panel || []).map((did, i) => ({ account: did, amount_cc: shares[i] })),
+          ],
+        };
+        if (pf.role === 'requester') {
+          hub.send({ type: 'receipt_half', to: pf.provider, receipt,
+                     sig: sign(id.privateKey, receipt), pub: id.pub });
+        } else { // forced: evidence package instead of requester signature
+          const e = asProvider.get(msg.contract_id);
+          hub.send({
+            type: 'forced_settlement', receipt,
+            provider_sig: sign(id.privateKey, receipt),
+            evidence: {
+              contract: e.contract, contract_sigs: e.contract_sigs,
+              pre_auth: e.pre_auth, pre_auth_sig: e.pre_auth_sig,
+              attestations: e.attest,
+            },
+          });
+        }
+        break;
       }
-      break;
-    }
 
-    case 'receipt_half': { // provider countersigns a voluntary receipt
-      const r = msg.receipt;
-      const mine = r.postings.find((p) => p.account === id.did);
-      const total = r.postings.reduce((s, p) => s + p.amount_cc, 0);
-      if (!verify(msg.pub, r, msg.sig) || !mine || mine.amount_cc <= 0 ||
-          Math.abs(total) > 1e-9) break;
-      const pc = asProvider.get(r.contract_id);
-      hub.send({ type: 'receipt', receipt: r,
-                 sigs: { requester: msg.sig, provider: sign(id.privateKey, r) },
-                 // §4 #26: the hub pays the verifiers that actually revealed a
-                 // verdict, so it needs the bundle, not just the receipt.
-                 attestations: pc ? pc.attest : [] });
-      log(`countersigned ${r.contract_id} → submitted`);
-      break;
-    }
-
-    case 'settled': {
-      const me = msg.receipt.postings.find((p) => p.account === id.did);
-      const provCtx = asProvider.get(msg.receipt.contract_id);
-      if (provCtx) { provCtx.settled = true; clearTimeout(provCtx.timer); }
-      if (me) {
-        console_.balance = +(console_.balance + me.amount_cc).toFixed(4);
-        console_.settled.push({ contract_id: msg.receipt.contract_id,
-                                kind: msg.kind, delta_cc: me.amount_cc });
-        log(`settled(${msg.kind}) ${msg.receipt.contract_id}: my delta ${me.amount_cc.toFixed(2)} CC`);
-        refreshMode('settled');
+      case 'receipt_half': { // provider countersigns a voluntary receipt
+        const r = msg.receipt;
+        const mine = r.postings.find((p) => p.account === id.did);
+        const total = r.postings.reduce((s, p) => s + p.amount_cc, 0);
+        if (!verify(msg.pub, r, msg.sig) || !mine || mine.amount_cc <= 0 ||
+            Math.abs(total) > 1e-9) break;
+        const pc = asProvider.get(r.contract_id);
+        hub.send({ type: 'receipt', receipt: r,
+                   sigs: { requester: msg.sig, provider: sign(id.privateKey, r) },
+                   // §4 #26: the hub pays the verifiers that actually revealed a
+                   // verdict, so it needs the bundle, not just the receipt.
+                   attestations: pc ? pc.attest : [] });
+        log(`countersigned ${r.contract_id} → submitted`);
+        break;
       }
-      break;
-    }
 
-    case 'error': log(`hub error: ${msg.why} (${msg.ref})`); break;
-  }
+      case 'settled': {
+        const me = msg.receipt.postings.find((p) => p.account === id.did);
+        const provCtx = asProvider.get(msg.receipt.contract_id);
+        if (provCtx) { provCtx.settled = true; clearTimeout(provCtx.timer); }
+        if (me) {
+          console_.balance = +(console_.balance + me.amount_cc).toFixed(4);
+          console_.settled.push({ contract_id: msg.receipt.contract_id,
+                                  kind: msg.kind, delta_cc: me.amount_cc });
+          log(`settled(${msg.kind}) ${msg.receipt.contract_id}: my delta ${me.amount_cc.toFixed(2)} CC`);
+          refreshMode('settled');
+        }
+        break;
+      }
+
+      case 'error': log(`hub error: ${msg.why} (${msg.ref})`); break;
+    }
+  },
 });
 
-const regBody = { did: id.did, pub: id.pub, box_pub: box.boxPub };
-hub.send({ type: 'register', ...regBody, sig: sign(id.privateKey, regBody) });
+
 console.log(`DID ${cfg.name} ${id.did} (protocol v${PROTOCOL_VERSION})`);
 
 // minimal Owner Console (§9.9 / FR-081): GET /status for state,

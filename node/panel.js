@@ -21,6 +21,7 @@
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const transport = require('./lib/transport').fromEnv();
+require('./lib/log').install();
 
 const [hostArg, portArg, sizeArg] = process.argv.slice(2);
 const HOST = hostArg || '127.0.0.1';

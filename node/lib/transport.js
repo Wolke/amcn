@@ -13,6 +13,7 @@
 //   listen({ port, host, onChannel, onError, onListening }) -> { close(), port }
 //   dial({ port, host }) -> Channel
 //   probe({ port, host, timeoutMs }) -> Promise<boolean>
+//   dialLazy(resolveTarget, { onMessage, onOpen, label }) -> reconnecting handle
 //
 // A Channel (lib/channel.js, shared by both) provides:
 //
@@ -46,8 +47,7 @@ function get(name) {
     listen: impl.listen,
     dial: impl.dial,
     probe: impl.probe,
-    dialLazy: (targetPromise, onMessage) =>
-      dialLazy(impl, targetPromise, onMessage),
+    dialLazy: (resolveTarget, opts) => dialLazy(impl, resolveTarget, opts),
   };
 }
 
@@ -60,26 +60,140 @@ function fromEnv(env = process.env) {
 
 const names = () => Object.keys(IMPLS);
 
-// Exposed through get()'s facade as transport.dialLazy(promise, onMessage).
-// The hub address may be unknown at module load (UDP discovery). Hand back a
-// handle immediately and queue sends until the channel exists, so callers can
+// Exposed through get()'s facade as transport.dialLazy(resolveTarget, opts).
+//
+// The hub address may be unknown at module load (UDP discovery), so callers
 // keep `const hub = dialLazy(...)` at module scope instead of restructuring
-// everything into an async bootstrap.
-function dialLazy(transport, targetPromise, onMessage) {
-  const queued = [];
-  let live = null;
-  targetPromise.then(({ host, port }) => {
-    live = transport.dial({ host, port });
-    if (onMessage) live.onMessage(onMessage);
-    while (queued.length) live.send(queued.shift());
-  });
+// into an async bootstrap.
+//
+// It also owns reconnection (§4 #40). Before this, resolveHubTarget ran once
+// at startup and the channel was never revisited: when the hub went away,
+// send() returned false, every caller ignored the return value, and the
+// process went silently mute -- no reconnect, no re-discovery, not one log
+// line, while the owner console still showed the last known balance. Two
+// consequences worth naming, because they are why this is P0 rather than an
+// inconvenience:
+//
+//   The rotation delivered in #14 did not work while running. Moving the hub
+//   only took effect if every process restarted, which is the thing rotation
+//   exists to avoid. So the target is re-resolved on every attempt -- with
+//   hubHost "discover" that means listening for the beacon again, and a
+//   moved hub is followed without touching a config file.
+//
+//   A dropped panel ended the network. Observed on the three-machine pilot:
+//   the machine-3 panel disconnected (three ECONNRESETs), the hub correctly
+//   marked the verifiers offline (#35), and nothing ever came back.
+//
+// Outbound frames while disconnected are dropped, not queued. Queuing was
+// tempting, but no protocol object carries an expiry (a gap registered
+// separately), so replaying a backlog of stale bids and attestations after a
+// long outage would be worse than losing them -- and unbounded buffering in
+// a process meant to run for hours is its own defect. Drops are counted and
+// reported on reconnect, which is the part that was actually missing: they
+// used to be invisible.
+const RETRY_BASE_MS = 500;
+const RETRY_MAX_MS = 15000;
+
+function dialLazy(transport, resolveTarget, opts = {}) {
+  const { onMessage, onOpen, label = 'wire' } = opts;
+  let live = null;          // current channel, or null while disconnected
+  let stopped = false;      // deliberate close(); do not reconnect
+  let attempt = 0;          // consecutive failed/lost connections
+  let dropped = 0;          // outbound frames lost while disconnected
+  let downSince = null;     // when the current outage began
+
+  // Exponential with jitter, capped. Jitter matters with a panel: three
+  // verifiers that lost the same hub would otherwise retry in lockstep
+  // forever.
+  const nextDelay = () => {
+    const base = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(attempt, 6));
+    return Math.round(base * (0.8 + Math.random() * 0.4));
+  };
+
+  // Quiet enough to leave running overnight, loud enough to diagnose: the
+  // first three attempts, then roughly once a minute at the capped delay.
+  const shouldLog = () => attempt <= 3 || attempt % 4 === 0;
+
+  async function attach() {
+    if (stopped) return;
+    attempt += 1;
+    let target;
+    try {
+      target = await resolveTarget();
+    } catch (err) {
+      if (shouldLog()) {
+        console.error(`[${label}] cannot resolve a hub address: ${err.message}` +
+          ` — retrying in ${nextDelay()}ms (attempt ${attempt})`);
+      }
+      return schedule();
+    }
+    if (stopped) return;
+    const chan = transport.dial(target);
+    const where = `${target.host}:${target.port}`;
+    let opened = false;
+
+    chan.onMessage((msg, c) => {
+      // The first frame back is proof the far end is really speaking AMCN;
+      // a TCP connect alone is not (a transport mismatch connects fine).
+      if (!opened) {
+        opened = true;
+        const downMs = downSince ? Date.now() - downSince : 0;
+        if (attempt > 1 || downSince) {
+          console.log(`[${label}] reconnected to ${where} after ` +
+            `${attempt} attempt(s), ${(downMs / 1000).toFixed(1)}s offline` +
+            (dropped ? `, ${dropped} outbound frame(s) dropped while down` : ''));
+        }
+        attempt = 0;
+        dropped = 0;
+        downSince = null;
+      }
+      if (onMessage) return onMessage(msg, c);
+      return undefined;
+    });
+
+    chan.onClose(() => {
+      if (live === chan) live = null;
+      if (stopped) return;
+      if (downSince === null) downSince = Date.now();
+      const delay = nextDelay();
+      console.error(`[${label}] disconnected from ${where} — ` +
+        `reconnecting in ${delay}ms`);
+      // Deliberately NOT unref'd. A verifier has no other handle keeping its
+      // event loop alive — its socket was the only one — so an unref'd retry
+      // timer let the process exit silently the moment the hub died. Which is
+      // the pilot's failure wearing a new hat: the panel disappears and the
+      // pool stays empty. Waiting to reconnect is the reason to stay alive.
+      setTimeout(attach, delay);
+    });
+
+    live = chan;
+    // Re-sent on every connection, not just the first: the hub keys agents
+    // by DID, so a new channel is unknown to it until the identity registers
+    // again. Re-registration keeps the existing stats and balance (#35), so
+    // a reconnect resumes standing rather than resetting it.
+    if (onOpen) onOpen(chan);
+  }
+
+  function schedule() {
+    if (stopped) return;
+    if (downSince === null) downSince = Date.now();
+    setTimeout(attach, nextDelay());
+  }
+
+  attach();
+
   return {
-    send: (obj) => { if (live) return live.send(obj); queued.push(obj); return true; },
+    send: (obj) => {
+      if (live && !live.destroyed) return live.send(obj);
+      dropped += 1;
+      return false;
+    },
     // §4 #19: callers use this to say "armed but not connected" instead of
     // claiming a connection a timer knows nothing about.
     get connected() { return !!live && !live.destroyed; },
     get chan() { return live; },
-    close: () => { if (live) live.close(); },
+    get droppedWhileDown() { return dropped; },
+    close: () => { stopped = true; if (live) live.close(); },
   };
 }
 
