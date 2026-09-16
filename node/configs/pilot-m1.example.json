@@ -1,5 +1,5 @@
 {
-  "_comment": "機器 1（Hub 同機）的交易 Agent。長時間試點用：與 demo 不同，它同時買也同時賣——單向需求會養出只收不付的吸收端，其他人則撞上信用上限，閉環就停了（FR-056）。cp 成 pilot-m1.json 後只需要改 seed。",
+  "_comment": "機器 1（Hub 同機）的交易 Agent。長時間試點用：與 demo 不同，它同時買也同時賣——單向需求會養出只收不付的吸收端，其他人則撞上信用上限，閉環就停了（FR-056）。cp 成 pilot-m1.json 後改 seed 即可——hubHost 是 127.0.0.1，因為這台就是 Hub 所在。",
   "name": "m1",
   "seed": "amcn-pilot-m1-CHANGE-ME",
   "hubHost": "127.0.0.1",

@@ -1,5 +1,5 @@
 {
-  "_comment": "機器 2 的交易 Agent（hubHost 換成機器 1 的 IP）。長時間試點用：與 demo 不同，它同時買也同時賣——單向需求會養出只收不付的吸收端，其他人則撞上信用上限，閉環就停了（FR-056）。cp 成 pilot-m2.json 後只需要改 seed。",
+  "_comment": "機器 2 的交易 Agent。長時間試點用：與 demo 不同，它同時買也同時賣——單向需求會養出只收不付的吸收端，其他人則撞上信用上限，閉環就停了（FR-056）。cp 成 pilot-m2.json 後**必須**把 hubHost 改成機器 1 的實際 IP（`ipconfig getifaddr en0` 在機器 1 上查）——下面那個 192.168.1.10 是佔位值，不是你的網段。也可以填 "discover" 改用 Hub 的 UDP 簽署信標自動尋找，但廣播會被訪客網路／VLAN／Wi-Fi client isolation 擋，手填 IP 不受影響。另外建議改 seed。",
   "name": "m2",
   "seed": "amcn-pilot-m2-CHANGE-ME",
   "hubHost": "192.168.1.10",
