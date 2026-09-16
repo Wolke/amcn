@@ -35,6 +35,34 @@ date                           # 三台時鐘差 < 60 秒（beacon 簽章的容�
 - macOS 第一次啟動 Hub 會問「允許接受連入網路連線？」→ 允許。Windows 上若用 `hubHost: "discover"`，允許入向 UDP 47179。
 - 每台都要有 `node/` 目錄（`scp -r`、AirDrop、私人 repo clone 皆可）。
 
+### 2b. Windows 機器（任一角色都可能是）
+
+本文件其餘指令寫成 macOS 形式，但試點的任一台都可能是 Windows（INSTALL §6）。**跨平台的做法是一切經由 `node`**，不要依賴 shell 工具：
+
+| 要做的事 | macOS / Linux | Windows（cmd 與 PowerShell 皆可）|
+|---|---|---|
+| 查自己的 IP | `ipconfig getifaddr en0` | `ipconfig`（看「IPv4 位址」）|
+| 看設定檔指向哪、順便驗 JSON | `grep hubHost configs/x.json` | `node -e "const c=require('./configs/x.json');console.log(c.hubHost,c.hubPort)"` |
+| 測 Hub 是否可達 | `nc -vz <ip> 47180` | `node ledger-dump.js out\probe.json <ip> 47180`（同一條傳輸路徑，比 port 掃描更有意義）|
+| 測 TCP 埠 | 同上 | `powershell -Command "Test-NetConnection <ip> -Port 47180"` |
+| 查 Console | `curl -s 127.0.0.1:47201/status` | `powershell -Command "irm http://127.0.0.1:47201/status \| ConvertTo-Json -Depth 5"` |
+
+環境變數的設法是**最容易踩的一格**——bash 的 `VAR=x node ...` 前置寫法在 PowerShell 會被當成指令名稱：
+
+```powershell
+# PowerShell
+$env:AMCN_PROVIDER_KEY='sk-test-anything'
+node agent.js configs\pilot-m2.json
+```
+
+```
+REM Command Prompt
+set AMCN_PROVIDER_KEY=sk-test-anything
+node agent.js configs\pilot-m2.json
+```
+
+同一類問題已經在 §4 #32 記錄過一次（Verifier 需要 shell 引號的 JSON，而 bash 的單引號形式在 PowerShell 不成立），當時的修法就是讓 `agent.js`／`verifier.js` 都接受**設定檔路徑**。所以 Windows 上永遠用檔案傳設定，不要用 `AGENT_CONFIG` 環境變數塞 JSON。
+
 ---
 
 ## 3. 階段 A：跑起來（約 15 分鐘）
