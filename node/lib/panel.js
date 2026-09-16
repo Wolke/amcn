@@ -34,9 +34,30 @@ const deriveDids = (pool, contractId, seedRoot, size = PANEL_SIZE) =>
   derive(pool, contractId, seedRoot, size)
     .map((v) => (typeof v === 'string' ? v : v.did));
 
+// The checkpoint stream is stored sparsely (§4 #41): an idle network minted
+// ~3,000 identical-root checkpoints an hour and every auto-dump rewrote all
+// of them, so only root *changes* (plus a slow heartbeat) are kept. Minting
+// stays unconditional — #24 — because a pinned future seed only arrives if
+// the sequence keeps advancing. The root in force at a given seq is therefore
+// the last stored entry at or before it, and everyone resolving a
+// `panel_seed_cp` must use this rule rather than indexing the array.
+function checkpointAt(checkpoints, seq) {
+  let found = null;
+  for (const entry of checkpoints) {
+    if (!entry || !entry.cp || entry.cp.seq > seq) break;
+    found = entry;
+  }
+  return found;
+}
+const rootAt = (checkpoints, seq) => {
+  const e = checkpointAt(checkpoints, seq);
+  return e ? e.cp.root : null;
+};
+
 // The pool itself is pinned at contract time so neither party can add a
 // friendly verifier afterwards; only the selection is deferred.
 const poolHash = (pool) => sha256(
   [...pool].map((v) => (typeof v === 'string' ? v : v.did)).sort().join('|'));
 
-module.exports = { PANEL_SIZE, derive, deriveDids, poolHash };
+module.exports = { PANEL_SIZE, derive, deriveDids, poolHash,
+                   checkpointAt, rootAt };

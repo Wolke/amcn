@@ -255,7 +255,8 @@ async function main() {
   // was signed, and the attesting panel must be exactly what that root
   // selects — otherwise the requester could have fanned out to a panel of its
   // choosing, or ground the contract id against a root it already knew.
-  const seedCp = fEv && checkpoints[fEv.contract.panel_seed_cp];
+  // Sparse checkpoints (§4 #41): resolve through the shared rule, not by index.
+  const seedCp = fEv && panelLib.checkpointAt(checkpoints, fEv.contract.panel_seed_cp);
   const derived = seedCp && new Set(panelLib.deriveDids(
     fEv.contract.verifier_pool, fEv.contract.contract_id, seedCp.cp.root));
   const attesters = fEv && new Set(fEv.attestations.map((a) => a.attestation.verifier));
@@ -296,7 +297,7 @@ async function main() {
     const price = -r.receipt.postings.find((x) => x.account === r.receipt.requester).amount_cc;
     const paid = verifierPaid(r);
     const total = paid.reduce((t, x) => t + x.amount_cc, 0);
-    const seed = checkpoints[r.receipt.panel_seed_cp];
+    const seed = panelLib.checkpointAt(checkpoints, r.receipt.panel_seed_cp);
     const derived = seed && panelLib.deriveDids(
       r.receipt.verifier_pool, r.receipt.contract_id, seed.cp.root);
     return paid.length === 3 && derived &&

@@ -52,6 +52,12 @@ const SLASH_FRAC = Number(process.env.HUB_SLASH_FRAC || 0.10);
 const SLASH_THRESHOLD = Number(process.env.HUB_SLASH_THRESHOLD || 0.25);
 const SLASH_MIN_SAMPLES = Number(process.env.HUB_SLASH_MIN_SAMPLES || 5);
 const SLASH_MIN_FAILURES = Number(process.env.HUB_SLASH_MIN_FAILURES || 3);
+// §4 #41: how often an *unchanged* checkpoint is still kept, as a heartbeat
+// in the audit trail. Root changes are always kept; idle ticks between them
+// are not. Measured on the pilot: 1 hour idle produced 718 KB of dump made
+// almost entirely of 3,246 identical-root checkpoints, rewritten in full on
+// every auto-dump.
+const CHECKPOINT_KEEP_MS = Number(process.env.HUB_CHECKPOINT_KEEP_MS || 60000);
 
 // §4 #14: hubPin only meant anything for one hub lifetime, because a fresh
 // keypair every start changed the identity agents were told to pin. With
@@ -88,7 +94,12 @@ const agents = new Map();    // did -> {pub, boxPub, chan, stats, role}
 const balances = new Map();
 const receipts = [];         // {kind:'dual'|'forced', receipt, sigs, evidence?}
 const chains = new Map();    // account -> [{seq,prev_hash,receipt_idx,delta_cc,balance_after,hash}]
+// Sparse: root changes plus a CHECKPOINT_KEEP_MS heartbeat. cpSeq is the
+// authoritative sequence — it advances on every mint whether or not the entry
+// is stored, because `panel_seed_cp` pins a number in this sequence.
 const checkpoints = [];
+let cpSeq = 0;
+let cpKeptAt = 0;
 // Every posting set applied, in order. §2.2 promises 「全部狀態可由公開簽署
 // 事件重建」, and receipts alone cannot deliver that: stake escrow, slashing
 // and canary payouts also move CC, and slashing/canary are not derivable
@@ -139,15 +150,28 @@ function makeCheckpoint() {
   const heads = {};
   for (const [acct, chain] of chains) heads[acct] = chain.at(-1).hash;
   const cp = {
-    seq: checkpoints.length,
+    seq: cpSeq++,
     heads,
     root: sha256(canon(heads)),
     receipts_count: receipts.length,
   };
   const entry = { cp, sig: sign(hubId.privateKey, cp) };
-  checkpoints.push(entry);
+  // Store root changes always; store an unchanged one only as a heartbeat
+  // (§4 #41). Minting is still unconditional: #24 deadlocked a fresh network
+  // when checkpoints only appeared on settlement, and a pinned future seed
+  // needs the sequence to keep advancing even in a silent hour.
+  const prev = checkpoints.at(-1);
+  const moved = !prev || prev.cp.root !== cp.root ||
+    prev.cp.receipts_count !== cp.receipts_count;
+  const now = Date.now();
+  if (moved || now - cpKeptAt >= CHECKPOINT_KEEP_MS) {
+    checkpoints.push(entry);
+    cpKeptAt = now;
+  }
   // Panels are seeded from a checkpoint that does not exist yet (§4 #6), so
-  // every agent needs to learn roots as they are minted.
+  // every agent needs to learn roots as they are minted — broadcast on every
+  // tick, stored or not, or an agent waiting for seed #N never learns that
+  // #N has been reached.
   broadcast({ type: 'checkpoint', cp, sig: entry.sig });
   return cp;
 }
@@ -191,7 +215,8 @@ function validateSchedule(receipt, chan, ref, attestations) {
   // requester cannot invent payees. dsl-local acceptance pays no verifiers.
   let panelDids = [];
   if (receipt.acceptance_method === 'judge-quorum') {
-    const seedEntry = checkpoints[receipt.panel_seed_cp];
+    const seedEntry = receipt.panel_seed_cp < cpSeq
+      ? panel.checkpointAt(checkpoints, receipt.panel_seed_cp) : null;
     if (!seedEntry) {
       fail(chan, `seed checkpoint #${receipt.panel_seed_cp} not minted yet`, ref);
       return false;
@@ -414,7 +439,8 @@ function handleForced(msg, chan) {
   // 3. 2-of-3 PASS attestations from the panel the seed checkpoint selects.
   // Re-derived here, not read off the contract: otherwise a requester could
   // fan out to a panel of its choosing and have the attestations accepted.
-  const seedEntry = checkpoints[contract.panel_seed_cp];
+  const seedEntry = contract.panel_seed_cp < cpSeq
+    ? panel.checkpointAt(checkpoints, contract.panel_seed_cp) : null;
   if (!seedEntry) {
     return fail(chan, `forced: seed checkpoint #${contract.panel_seed_cp} not minted yet`, ref);
   }
@@ -462,6 +488,8 @@ function buildExport() {
         .map(([d]) => [d, clOf(d)])),
     chains: Object.fromEntries(chains),
     checkpoints,
+    // The sequence position, which the sparse array no longer implies.
+    checkpoint_seq: cpSeq,
     stakes: Object.fromEntries(stakes),
     canary_stats: Object.fromEntries(canaryStats),
     canary_scored: [...canarySeen],
@@ -528,6 +556,8 @@ if (process.env.HUB_IMPORT) {
   receipts.push(...r.receipts);
   events.push(...r.events);
   checkpoints.push(...r.checkpoints);
+  cpSeq = r.checkpointSeq;
+  cpKeptAt = Date.now();
   // Stats drive the credit line, and they were recomputed from the receipts
   // rather than copied, so an imported agent cannot inherit standing the
   // ledger does not justify. The agent entry is created on registration;
@@ -614,6 +644,10 @@ transport.listen({
           break;
         }
         case 'list_verifiers': {
+          // The lock reports where the sequence actually is, not where the
+          // last stored entry sits — with sparse storage those differ during
+          // an idle stretch, and an agent comparing lock < seed needs the
+          // real position.
           const latest = checkpoints.at(-1);
           chan.send({
             type: 'verifiers',
@@ -624,7 +658,7 @@ transport.listen({
                     root: latest ? latest.cp.root : sha256('genesis') },
             // The seq a contract written now must seed its panel from: one that
             // has not been minted, so its root cannot be ground against.
-            next_checkpoint_seq: checkpoints.length,
+            next_checkpoint_seq: cpSeq,
           });
           break;
         }

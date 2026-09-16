@@ -227,6 +227,13 @@ function rebuild(ex, opts = {}) {
     stats,
     creditLines,
     checkpoints: cps,
+    // Sparse storage (§4 #41) means the array length no longer implies the
+    // sequence position, so a rebuilt hub has to be told where to resume
+    // numbering. Older exports have no such field; fall back to the last
+    // stored seq, which was dense back then.
+    checkpointSeq: ex.checkpoint_seq != null
+      ? ex.checkpoint_seq
+      : (cps.length ? cps.at(-1).cp.seq + 1 : 0),
     receipts: ex.receipts,
     events: ex.events,
     settledIds: new Set([...byContract.keys()]),
