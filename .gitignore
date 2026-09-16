@@ -8,6 +8,8 @@ __pycache__/
 sim/**/out/
 # Ledger dumps and drill artifacts.
 node/out/
+# Pilot process logs (node/logs/hub.log and friends) — per-machine noise.
+node/logs/
 
 # Per-machine pilot configs (node/INSTALL.md has you cp from *.example.json).
 # They carry machine-specific IPs/ports and, once you point at a real model,

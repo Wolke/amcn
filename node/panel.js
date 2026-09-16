@@ -20,7 +20,7 @@
 'use strict';
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const net = require('node:net');
+const transport = require('./lib/transport').fromEnv();
 
 const [hostArg, portArg, sizeArg] = process.argv.slice(2);
 const HOST = hostArg || '127.0.0.1';
@@ -45,16 +45,10 @@ if (!Number.isInteger(SIZE) || SIZE < 1 || SIZE > 20) {
 }
 
 // Fail with a useful message rather than three verifiers retrying quietly.
-function probe(host, port, timeoutMs = 4000) {
-  return new Promise((resolve) => {
-    const sock = net.connect(port, host);
-    const done = (ok) => { sock.destroy(); resolve(ok); };
-    sock.setTimeout(timeoutMs);
-    sock.on('connect', () => done(true));
-    sock.on('timeout', () => done(false));
-    sock.on('error', () => done(false));
-  });
-}
+// Reachability is transport-specific (a live tcp socket vs. a 200 from
+// /amcn/health), so the check belongs to the implementation.
+const probe = (host, port, timeoutMs = 4000) =>
+  transport.probe({ host, port, timeoutMs });
 
 const children = [];
 let stopping = false;

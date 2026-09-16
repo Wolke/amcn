@@ -19,7 +19,7 @@
 const { spawn, spawnSync } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
-const { connect } = require('./lib/wire');
+const transport = require('./lib/transport').fromEnv();
 const rebuildLib = require('./lib/rebuild');
 
 const OFFSET = Number(process.env.DEMO_PORT_OFFSET || 0);
@@ -54,9 +54,10 @@ const cfg = (o, extra) => ({
 
 const exportFrom = (port) => new Promise((resolve, reject) => {
   const t = setTimeout(() => reject(new Error(`no export from ${port}`)), 8000);
-  const c = connect(port, (m) => {
+  const c = transport.dial({ port });
+  c.onMessage((m) => {
     if (m.type !== 'ledger_export') return;
-    clearTimeout(t); c.sock.destroy(); resolve(m);
+    clearTimeout(t); c.close(); resolve(m);
   });
   c.send({ type: 'export' });
 });

@@ -58,7 +58,7 @@
 | 層 | 採用 | 設計要點 | MVP 誠實現況 |
 |---|---|---|---|
 | **Identity** | A 案 | did:key（Ed25519）＋Root/Hot 分離＋UCAN 0.10 委派鏈（子任務縮小委派）＋三層撤銷（短效期／gossip 撤銷／高額線上查驗） | 第一天即去中心化，零基礎設施依賴 |
-| **Transport / 撮合** | B 案 | 出站 WSS 至 Coordination Hub，E2E 加密（Hub 只見 metadata）；`ITransport` 介面抽換，**W10 強制交付第二實作＋拔線演練（A 案演習納入）** | 中央化，可替換性是被測功能非承諾 |
+| **Transport / 撮合** | B 案 | 出站 WSS 至 Coordination Hub，E2E 加密（Hub 只見 metadata）；`ITransport` 介面抽換，**W10 強制交付第二實作＋拔線演練（A 案演習納入）** | 中央化。**第二實作已交付**（`lib/transport-{tcp,http}.js`，`demo-transport.js` 斷言兩傳輸產生同一本帳）；4 小時拔線演練仍未做，見 §4 #10 |
 | **Ledger 語義** | B 案骨架＋A/C 補強 | 複式帳、每組 posting Σ=0、雙簽 SettlementReceipt、per-account hash chain、每小時公開 Merkle checkpoint；Hub 是「第一個排序器」不是信任根。**負餘額支出採 C 案不對稱一致性**：使餘額更負的支出需經序列化確認（MVP 由 Hub 擔任、Phase 2 起 3–5 席可替換 Witness 聯邦 2/3 共簽），正餘額支出走雙簽＋樂觀對帳 | 排序中央化；語義（收據格式、守恆規則、checkpoint 驗證）第一天即最終版 |
 | **單方 posting 合法性**（修 A①/B⑤） | 新規則 | Hub/協議可執行的非雙簽 posting（demurrage、違約罰、announce 費、沖銷）**必須引用 Owner 預簽的標準政策 Grant**（加入網路時簽署的費率表 UCAN）；審計重放時無對應 Grant 的單方 posting 一律判無效。Hub 從「能單方改帳」變成「只能執行被預簽的規則」 | — |
 | **Credit Line** | C 案（修數字） | INV-C1：`credit_limit ≤ k_earn × E_eff + collateral + L_boot`，**L_boot 明文列為不變式的有界例外**（上限 25 CC、Treasury 補貼科目、tx_class=subsidy）；E_eff＝多樣性折減（單一對手 ≤20%）× T_flow 信任流加權；A 案的 WilsonLower95＋1−HHI 併入 E_eff 實作 | 全部參數先過 Phase 0 模擬 GATE-0 |
@@ -115,7 +115,7 @@
 | 7 | A⑤/C⑦ | Verifier 押金 vs 經手上限差 20 倍；金絲雀成本低估 40 倍 | 經手上限 ≤ 押金×3；金絲雀改分層抽樣並重編預算 |
 | 8 | B⑥ | 抽查率 0.13% 撐不起威懾宣稱 | 同上＋高風險對手方加權抽樣 |
 | 9 | C⑥ | 不對稱一致性與強制入帳互斥 | 強制入帳一律走序列化路徑（§2.2） |
-| 10 | B④ | 「Indexer 停止」驗收是循環論證 | **部分已修**：`demo-rebuild.js` 的驗收不是「Hub 能否重啟」，而是**另一個進程、另一個埠**能否僅憑簽署產物重建出相同餘額、鏈與信用額度，並偵測偽造品——實測 7 收據／28 事件／8 帳戶零不符，竄改檔被拒。**仍缺 4 小時真實拔線演練**與第二個 `ITransport` 實作 |
+| 10 | B④ | 「Indexer 停止」驗收是循環論證 | **部分已修**：`demo-rebuild.js` 的驗收不是「Hub 能否重啟」，而是**另一個進程、另一個埠**能否僅憑簽署產物重建出相同餘額、鏈與信用額度，並偵測偽造品——實測 7 收據／28 事件／8 帳戶零不符，竄改檔被拒。**第二個 `ITransport` 實作已交付**（W10）：`lib/transport.js` 定義介面（`listen`／`dial`／`probe`）、`transport-tcp.js` 是原行為、`transport-http.js` 是長連 chunked NDJSON＋POST。刻意不選另一種 socket 方言——那共用 TCP 的故障模型，換了等於沒換；HTTP 線上無連線狀態、送達以請求為單位、POST 需自行保序。關鍵斷言不是「兩種都連得上」而是**同一場閉環在兩種傳輸下產生同一本帳**：`demo-transport.js` 比對 fingerprint（收據／事件／餘額／額度／驗收方式），實測 `2ea62f9f…` 完全相同，且四支 demo（21／12／6／7 項）在兩種傳輸下全過。抽取過程本身暴露一件事：語義原本散在傳輸層裡——frame 切分、版本閘門（#33）、handler 隔離（#13／#34）全都寫在 `wire.js` 的 socket 讀取器內，若讓第二實作各自複製一份，兩份帳分岔只是時間問題；因此移到 `lib/channel.js` 由兩者共用，傳輸層只准提供 write／close。混用傳輸時雙方都會明確拒絕（tcp 端回 HTTP 400、http 端回一行 framed `transport_error`）——這是 #36「靜默卡住比崩潰難查」的教訓。**仍缺 4 小時真實拔線演練** |
 | 11 | A②③ | 雙花上限低估 5 倍、未見證折損對 equivocation 無效 | 整合架構負餘額支出走序列化，此攻擊面整類消失；正餘額路徑保留分叉偵測作稽核 |
 | 12 | B⑩ | Key 隔離的 IPC 方向寫反 | 採 A 案程序模型：Prompt 處理程序無 Key，經單向窄介面提交推理請求給持 Key 的 Adapter 程序 |
 
@@ -168,7 +168,7 @@
 | W7 | 還債排程器＋目標餘額區間策略；MCP server 需求側入口（3 tool） | B §8.4/§23.1 |
 | W8 | **完整借用＋自動還債 demo**（§27 閉環全程零人工） | §20 驗收 3/8 |
 | W9 | 驗證市場最小版：3 人 Judge quorum＋未來-checkpoint 抽選＋commit-reveal＋金絲雀（重算後預算）；爭議單次上訴 | C §7 修正版 | **原型現況**：未來-checkpoint 抽選、commit-reveal、Verifier 報酬入帳、押注託管、金絲雀＋門檻式懲罰皆已交付並有斷言。**爭議單次上訴延後至 Phase 2**：現行驗收是確定性 DSL，裁決可計算、爭議由重算解決，上訴沒有可仲裁的對象；判斷性驗收（LLM judge）依 SDD §19 在 Phase 2，屆時才有意義。|
-| W10 | **強制里程碑（不可砍）**：第二 ITransport 實作＋帳本匯出重建＋官方基礎設施拔線 4 小時演練 | B §13.3＋A §18 |
+| W10 | **強制里程碑（不可砍）**：第二 ITransport 實作＋帳本匯出重建＋官方基礎設施拔線 4 小時演練 | B §13.3＋A §18 | **原型現況**：帳本匯出重建已交付（`demo-rebuild.js`，7 項）；第二 ITransport 實作已交付（`demo-transport.js`，7 項——tcp 與 http 同一本帳）。**拔線 4 小時演練未做**，它需要真實時段與多台機器，不是程式碼能自證的部分 |
 | W11 | 紅隊：50 案例（含 P0/P1 登記簿全部攻擊重放）；洗量/Sybil 模擬對照真實 CL 曲線 | B §17＋C §10 |
 | W12 | 10–20 節點封閉試點；輸出 §20 十項驗收證據包與市場指標（成交率、供需深度、違約率、平均還債時間） | §20 驗收 5/6/9/10 |
 

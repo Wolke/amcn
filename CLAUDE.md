@@ -48,7 +48,11 @@ cd node && node demo-canary.js
 # W10 帳本重建演練（約 25 秒，7 項斷言：第二排序器從匯出重建、竄改被拒）
 cd node && node demo-rebuild.js
 
-# 兩支 demo 都可用 DEMO_PORT_OFFSET=100 與跑中的試點並存
+# W10 第二個 ITransport（約 35 秒，7 項斷言：tcp 與 http 產生同一本帳）
+cd node && node demo-transport.js
+
+# 每支 demo 都可用 DEMO_PORT_OFFSET=100 與跑中的試點並存；
+# AMCN_TRANSPORT=http 可把整個 stack 換到第二個傳輸實作（預設 tcp）
 
 # 還債政策參數掃描（折價 × band 定義 × 情境，約 10 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_repay

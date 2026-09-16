@@ -7,8 +7,8 @@
 'use strict';
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { connect, verify, sha256, canon, net, PROTOCOL_VERSION } =
-  require('./lib/wire');
+const { verify, sha256, canon, PROTOCOL_VERSION } = require('./lib/wire');
+const transport = require('./lib/transport').fromEnv();
 const discovery = require('./lib/discovery');
 const strategy = require('./lib/strategy');
 const panelLib = require('./lib/panel');
@@ -87,7 +87,8 @@ function verifyChains(chains, checkpoints, hubPub) {
 }
 
 async function main() {
-  console.log('== AMCN Phase 1 round 3: quorum + forced settlement + hash chain ==\n');
+  console.log('== AMCN Phase 1 round 3: quorum + forced settlement + hash chain ==');
+  console.log(`   transport: ${transport.name} (AMCN_TRANSPORT)\n`);
   const procs = [];
   procs.push(spawnProc('hub.js',
     { HUB_PORT: String(PORT), HUB_BEACON_PORT: String(BEACON_PORT) }));
@@ -133,7 +134,8 @@ async function main() {
   await new Promise((r) => setTimeout(r, 9000));
 
   const ex = await new Promise((resolve) => {
-    const c = connect(PORT, (m) => { if (m.type === 'ledger_export') resolve(m); });
+    const c = transport.dial({ port: PORT });
+    c.onMessage((m) => { if (m.type === 'ledger_export') resolve(m); });
     c.send({ type: 'export' });
   });
   const consoleA = await (await fetch(`http://127.0.0.1:${CONSOLE_A_PORT}/status`)).json();
@@ -153,16 +155,18 @@ async function main() {
   const first = ex.receipts[0];
   const replay = await new Promise((resolve) => {
     const t = setTimeout(() => resolve('no reply'), 2500);
-    const c = connect(PORT, (m) => {
+    const c = transport.dial({ port: PORT });
+    c.onMessage((m) => {
       if (m.type === 'error' && m.ref === first.receipt.contract_id) {
-        clearTimeout(t); c.sock.destroy(); resolve(m.why);
+        clearTimeout(t); c.close(); resolve(m.why);
       }
     });
     c.send({ type: 'receipt', receipt: first.receipt, sigs: first.sigs });
   });
   const afterReplay = await new Promise((resolve) => {
-    const c = connect(PORT, (m) => {
-      if (m.type === 'ledger_export') { c.sock.destroy(); resolve(m); }
+    const c = transport.dial({ port: PORT });
+    c.onMessage((m) => {
+      if (m.type === 'ledger_export') { c.close(); resolve(m); }
     });
     c.send({ type: 'export' });
   });
@@ -175,11 +179,14 @@ async function main() {
   // must still work. Mixed versions used to crash an agent mid-contract
   // rather than fail cleanly.
   const askExport = (version, ms) => new Promise((resolve) => {
-    const t = setTimeout(() => { c.sock.destroy(); resolve(false); }, ms);
-    const c = connect(PORT, (m) => {
-      if (m.type === 'ledger_export') { clearTimeout(t); c.sock.destroy(); resolve(true); }
+    const t = setTimeout(() => { c.close(); resolve(false); }, ms);
+    const c = transport.dial({ port: PORT });
+    c.onMessage((m) => {
+      if (m.type === 'ledger_export') { clearTimeout(t); c.close(); resolve(true); }
     });
-    c.sock.write(JSON.stringify({ v: version, type: 'export' }) + '\n');
+    // sendRaw, not send: send() stamps the current version, and this probe
+    // exists to put a wrong one on the wire.
+    c.sendRaw(JSON.stringify({ v: version, type: 'export' }));
   });
   const wrongVersionRefused = !(await askExport(99, 1500));
   const rightVersionWorks = await askExport(PROTOCOL_VERSION, 2500);
@@ -190,14 +197,15 @@ async function main() {
   // verifier down with it. Probed after the export above, so the junk lands in
   // raw_log only after the NFR-005 plaintext scan has captured its copy.
   await new Promise((resolve) => {
-    const c = connect(PORT, () => {});
-    JUNK_FRAMES.forEach((line) => c.sock.write(line + '\n'));
-    setTimeout(() => { c.sock.destroy(); resolve(); }, 200);
+    const c = transport.dial({ port: PORT });
+    JUNK_FRAMES.forEach((line) => c.sendRaw(line));
+    setTimeout(() => { c.close(); resolve(); }, 200);
   });
   const hubSurvived = await new Promise((resolve) => {
     const t = setTimeout(() => resolve(false), 3000);
-    const c = connect(PORT, (m) => {
-      if (m.type === 'ledger_export') { clearTimeout(t); c.sock.destroy(); resolve(true); }
+    const c = transport.dial({ port: PORT });
+    c.onMessage((m) => {
+      if (m.type === 'ledger_export') { clearTimeout(t); c.close(); resolve(true); }
     });
     c.send({ type: 'export' });
   });
@@ -426,6 +434,19 @@ async function main() {
 
   const failed = results.filter(([, ok]) => !ok).length;
   console.log(`\n結果：${results.length - failed}/${results.length} PASS`);
+  // A transport-independent summary of the ledger this run produced, so the
+  // same demo on the other ITransport implementation can be compared to it
+  // (demo-transport.js). Deliberately identity-free: DIDs are fresh every
+  // process, so account names and therefore chain hashes differ between
+  // runs of the same transport — what must not differ is the accounting.
+  console.log('ledger fingerprint: ' + sha256(canon({
+    receipts: receipts.length,
+    events: (ex.events || []).length,
+    checkpoints: checkpoints.length,
+    balances: Object.values(balances).map((v) => +v.toFixed(2)).sort((a, b) => a - b),
+    credit_lines: Object.values(credit_lines).map((v) => +v.toFixed(2)).sort((a, b) => a - b),
+    methods: receipts.map((r) => r.receipt.acceptance_method).sort(),
+  })));
   console.log('期末餘額：', Object.entries(balances)
     .filter(([, v]) => Math.abs(v) > 1e-9 || true)
     .map(([a, v]) => `${a.startsWith('did') ? a.slice(0, 18) : a}=${v.toFixed(2)}`)

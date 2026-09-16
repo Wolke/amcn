@@ -6,14 +6,20 @@
 
 ```bash
 cd node
-node demo.js              # 約 15 秒，16 項驗收（腳本驅動，回歸閘門）
+node demo.js              # 約 15 秒，21 項驗收（腳本驅動，回歸閘門）
 node demo-autonomous.js   # 約 20 秒，12 項驗收（W8：全程零人工）
 node demo-canary.js       # 約 30 秒，6 項驗收（W9：金絲雀沒收偷懶者押注）
 node demo-rebuild.js      # 約 25 秒，7 項驗收（W10：第二排序器重建帳本）
+node demo-transport.js    # 約 35 秒，7 項驗收（W10：第二個 ITransport，兩傳輸同一本帳）
 
-# 兩者可與跑中的試點並存：
+# 任一支都可與跑中的試點並存：
 DEMO_PORT_OFFSET=100 node demo.js
+
+# 傳輸層可替換（§2.1）。整個 stack 換一個實作，帳必須完全相同：
+AMCN_TRANSPORT=http node demo.js
 ```
+
+`AMCN_TRANSPORT` 選 `tcp`（預設）或 `http`。所有進程必須一致——混用時雙方都會明確拒絕並印出原因，不會靜默卡住。
 
 `demo.js` 用 `posts: [{atMs, ...}]` 時間表驅動，證明機制正確；`demo-autonomous.js` 沒有任何時間表與 Console 呼叫，每筆任務都來自 Agent 自行偵測額度耗盡（§20-8／§6.2）。
 
@@ -48,9 +54,16 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `demo-canary.js` | W9 金絲雀驗收（6 項）：偷懶 verifier 被沒收、誠實者未受罰、押注帳務一致、Σ=0 |
 | `panel.js` / `panel.cmd` | 專用 Verifier panel 主機（INSTALL §6）：探測 Hub、啟動 N 個 Verifier、全數註冊後回報、Ctrl-C 一次停完。跨平台，Windows 免改 PowerShell 執行原則 |
 | `demo-autonomous.js` | W8 驗收：§27 閉環全程零人工（12 項斷言）。無 `posts` 時間表、無 Console 呼叫 |
+| `lib/transport.js` | §2.1 要求集中化元件配齊「至少一個開源替代實作」的那一項：`ITransport` 介面（`listen`／`dial`／`probe`）＋實作登記表＋`AMCN_TRANSPORT` 選擇 |
+| `lib/channel.js` | 兩種傳輸共用的 frame 語義：JSON-lines 切分、信封版本閘門（§4 #33）、handler 例外隔離（§4 #13／#34）。傳輸層只提供 write／close，不得改寫語義——這是「兩傳輸同一本帳」能成立的原因 |
+| `lib/transport-tcp.js` | 實作 1：TCP JSON-lines（至今所有試點跑的行為，原樣搬過來） |
+| `lib/transport-http.js` | 實作 2：HTTP——長連 chunked NDJSON 回應載 server→client，POST 載 client→server。刻意不選另一種 socket 方言：那會共用 TCP 的故障模型，換了等於沒換。此實作線上無連線狀態、送達以請求為單位，POST 必須自行保序（單 socket keep-alive）|
+| `demo-transport.js` | W10 驗收（7 項）：同一場 `demo.js` 在兩種傳輸下 fingerprint 相同（收據／事件／餘額／額度／驗收方式全等）、混用傳輸雙方都明確拒絕 |
 | `mcp-server.js` | §23.1 需求側入口：MCP server（JSON-RPC over stdio，協議 2025-06-18），三個 tool `amcn_balance` / `amcn_publish_task` / `amcn_request_inference`。不持有任何金鑰，只經 127.0.0.1 的 Owner Console 操作本機 Agent |
 
-## Demo 自動斷言（11 項）
+## Demo 自動斷言（`demo.js` 現為 21 項，下表列出其中 11 項核心判準）
+
+W9／W10 加進來的斷言（commit-reveal、押注託管、未來 checkpoint 抽選、contract_id 冪等、版本閘門、畸形 frame 回歸閘門、傳輸可替換）沒有列在這張表裡——以 `node demo.js` 的實際輸出為準，這裡是給第一次讀的人看的地圖。
 
 | # | 檢查 | 方法 |
 |---|---|---|

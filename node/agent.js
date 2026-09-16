@@ -15,7 +15,8 @@
 'use strict';
 const http = require('node:http');
 const { genIdentity, identityFromSeed, sign, verify, sha256, canon, connect,
-        connectLazy, PROTOCOL_VERSION } = require('./lib/wire');
+        PROTOCOL_VERSION } = require('./lib/wire');
+const transport = require('./lib/transport').fromEnv();
 const { genBoxKeys, seal, open } = require('./lib/e2e');
 const { runAsserts, assertsHash } = require('./lib/dsl');
 const keystore = require('./lib/keystore');
@@ -174,7 +175,7 @@ function fanOut(delivery, ctx, chosen) {
   }
 }
 
-const hub = connectLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
+const hub = transport.dialLazy(discovery.resolveHubTarget(cfg, log), async (msg) => {
   switch (msg.type) {
     case 'registered':
       console_.creditLine = msg.credit_line;
@@ -617,7 +618,7 @@ if (cfg.provide && canExecute) {
     // Says "armed", not "providing": this fires on a timer and proves nothing
     // about the hub connection (§4 #19). Bids only happen once registered.
     log(`supply armed at ${cfg.provide.pricePerUnit} CC/unit, strategy ${mode}` +
-        (hub.sock ? '' : ' — WARNING: not connected to a hub yet'));
+        (hub.connected ? '' : ' — WARNING: not connected to a hub yet'));
   }, cfg.provide.afterMs);
 }
 

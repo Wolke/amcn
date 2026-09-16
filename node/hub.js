@@ -14,8 +14,9 @@
 // either two receipt signatures or contract+pre_auth+quorum evidence,
 // all verifiable offline from the export.
 'use strict';
-const { attachLineReader, sendLine, verify, sha256, canon, PROTOCOL_VERSION,
-        genIdentity, identityFromSeed, sign, net } = require('./lib/wire');
+const { verify, sha256, canon, PROTOCOL_VERSION,
+        genIdentity, identityFromSeed, sign } = require('./lib/wire');
+const transport = require('./lib/transport').fromEnv();
 const eeff = require('./lib/eeff');
 const discovery = require('./lib/discovery');
 const panel = require('./lib/panel');
@@ -82,7 +83,7 @@ function applyPostings(kind, ref, postings) {
   makeCheckpoint();
   return true;
 }
-const agents = new Map();    // did -> {pub, boxPub, sock, stats, role}
+const agents = new Map();    // did -> {pub, boxPub, chan, stats, role}
 const balances = new Map();
 const receipts = [];         // {kind:'dual'|'forced', receipt, sigs, evidence?}
 const chains = new Map();    // account -> [{seq,prev_hash,receipt_idx,delta_cc,balance_after,hash}]
@@ -104,10 +105,10 @@ const clOf = (did) =>
   agents.has(did) ? eeff.creditLine(did, agents.get(did).stats, statsOf) : 0;
 
 function broadcast(obj, exceptDid) {
-  for (const [did, a] of agents) if (did !== exceptDid) sendLine(a.sock, obj);
+  for (const [did, a] of agents) if (did !== exceptDid && a.chan) a.chan.send(obj);
 }
-function fail(sock, why, ref) {
-  sendLine(sock, { type: 'error', why, ref });
+function fail(chan, why, ref) {
+  chan.send({ type: 'error', why, ref });
   console.log(`[hub] REJECT ${ref || ''}: ${why}`);
 }
 function feeTerms(requesterDid, price, panelSize = 0) {
@@ -174,15 +175,15 @@ function validAttesters(receipt, attestations, panelDids) {
   return ok;
 }
 
-function validateSchedule(receipt, sock, ref, attestations) {
+function validateSchedule(receipt, chan, ref, attestations) {
   // contract_id is the settlement idempotency key: one contract, one
   // settlement. Both the dual and forced paths come through here.
   if (settledIds.has(ref)) {
-    fail(sock, 'duplicate contract_id: already settled', ref);
+    fail(chan, 'duplicate contract_id: already settled', ref);
     return false;
   }
   const sum = receipt.postings.reduce((s, p) => s + p.amount_cc, 0);
-  if (Math.abs(sum) > 1e-9) { fail(sock, `postings sum ${sum} != 0`, ref); return false; }
+  if (Math.abs(sum) > 1e-9) { fail(chan, `postings sum ${sum} != 0`, ref); return false; }
   const price = -receipt.postings.find((p) => p.account === receipt.requester).amount_cc;
   // §4 #5: a judge-quorum settlement must pay the panel, and the hub derives
   // that panel itself from the receipt's pinned pool and future seed — the
@@ -191,11 +192,11 @@ function validateSchedule(receipt, sock, ref, attestations) {
   if (receipt.acceptance_method === 'judge-quorum') {
     const seedEntry = checkpoints[receipt.panel_seed_cp];
     if (!seedEntry) {
-      fail(sock, `seed checkpoint #${receipt.panel_seed_cp} not minted yet`, ref);
+      fail(chan, `seed checkpoint #${receipt.panel_seed_cp} not minted yet`, ref);
       return false;
     }
     if (panel.poolHash(receipt.verifier_pool) !== receipt.verifier_pool_hash) {
-      fail(sock, 'verifier pool does not match its pinned hash', ref);
+      fail(chan, 'verifier pool does not match its pinned hash', ref);
       return false;
     }
     panelDids = panel.deriveDids(receipt.verifier_pool, ref, seedEntry.cp.root);
@@ -207,7 +208,7 @@ function validateSchedule(receipt, sock, ref, attestations) {
   // was empty when the contract was written.
   if (receipt.acceptance_method === 'judge-quorum' &&
       panelDids.length < panel.PANEL_SIZE) {
-    fail(sock, `judge-quorum needs a pool of at least ${panel.PANEL_SIZE}, ` +
+    fail(chan, `judge-quorum needs a pool of at least ${panel.PANEL_SIZE}, ` +
       `got ${panelDids.length}`, ref);
     return false;
   }
@@ -217,7 +218,7 @@ function validateSchedule(receipt, sock, ref, attestations) {
   if (panelDids.length) {
     const attesters = validAttesters(receipt, attestations, panelDids);
     if (attesters.size < 2) {
-      fail(sock, `quorum not met: ${attesters.size} accountable PASS ` +
+      fail(chan, `quorum not met: ${attesters.size} accountable PASS ` +
         `attestations (need 2)`, ref);
       return false;
     }
@@ -235,20 +236,20 @@ function validateSchedule(receipt, sock, ref, attestations) {
     .map((p) => p.account);
   if (namedVerifiers.length !== payees.length ||
       namedVerifiers.some((d) => !payees.includes(d))) {
-    fail(sock, `verifier postings ${namedVerifiers.length} != accountable ` +
+    fail(chan, `verifier postings ${namedVerifiers.length} != accountable ` +
       `attesters ${payees.length}`, ref);
     return false;
   }
   for (const [acct, amt] of Object.entries(expect)) {
     const p = receipt.postings.find((x) => x.account === acct);
     if (!p || Math.abs(p.amount_cc - amt) > 1e-6) {
-      fail(sock, `posting ${acct} != fee schedule (${amt})`, ref); return false;
+      fail(chan, `posting ${acct} != fee schedule (${amt})`, ref); return false;
     }
   }
   for (const p of receipt.postings) {
     if (agents.has(p.account) &&
         bal(p.account) + p.amount_cc < -clOf(p.account) - 1e-9) {
-      fail(sock, `${p.account} would exceed credit line ${clOf(p.account).toFixed(1)}`, ref);
+      fail(chan, `${p.account} would exceed credit line ${clOf(p.account).toFixed(1)}`, ref);
       return false;
     }
   }
@@ -298,44 +299,44 @@ function applySettlement(kind, receipt, sigs, evidence) {
   // registration.
   for (const did of [receipt.requester, receipt.provider]) {
     const a = agents.get(did);
-    if (a) sendLine(a.sock, { type: 'credit_update', did, credit_line: clOf(did) });
+    if (a) a.chan.send({ type: 'credit_update', did, credit_line: clOf(did) });
   }
 }
 
-function handleReceipt(msg, sock) {
+function handleReceipt(msg, chan) {
   const { receipt, sigs } = msg;
   const req = agents.get(receipt.requester), prov = agents.get(receipt.provider);
   const ref = receipt.contract_id;
-  if (!req || !prov) return fail(sock, 'unknown party', ref);
+  if (!req || !prov) return fail(chan, 'unknown party', ref);
   if (!verify(req.pub, receipt, sigs.requester) ||
       !verify(prov.pub, receipt, sigs.provider)) {
-    return fail(sock, 'bad signature: dual-signed receipt required', ref);
+    return fail(chan, 'bad signature: dual-signed receipt required', ref);
   }
-  if (!validateSchedule(receipt, sock, ref, msg.attestations)) return;
+  if (!validateSchedule(receipt, chan, ref, msg.attestations)) return;
   applySettlement('dual', receipt, sigs);
 }
 
 // A canary result: the issuer reports how the panel judged a decoy whose
 // correct verdict is knowable. Recorded per verifier, and a pattern of
 // passing known-bad work costs stake.
-function handleCanaryResult(msg, sock) {
+function handleCanaryResult(msg, chan) {
   const { report, sig, attestations } = msg;
   const ref = report && report.contract_id;
-  if (!CANARY_DID) return fail(sock, 'canary reports not enabled on this hub', ref);
+  if (!CANARY_DID) return fail(chan, 'canary reports not enabled on this hub', ref);
   const issuer = agents.get(report.issuer);
   if (!issuer || report.issuer !== CANARY_DID) {
-    return fail(sock, 'canary report from an unauthorised issuer', ref);
+    return fail(chan, 'canary report from an unauthorised issuer', ref);
   }
   if (!verify(issuer.pub, report, sig)) {
-    return fail(sock, 'bad canary report signature', ref);
+    return fail(chan, 'bad canary report signature', ref);
   }
-  if (canarySeen.has(ref)) return fail(sock, 'canary already scored', ref);
+  if (canarySeen.has(ref)) return fail(chan, 'canary already scored', ref);
   if (report.expected_verdict !== 'FAIL') {
-    return fail(sock, 'canary must expect FAIL (its asserts are unsatisfiable)', ref);
+    return fail(chan, 'canary must expect FAIL (its asserts are unsatisfiable)', ref);
   }
   const panelDids = panel.deriveDids(report.verifier_pool, ref, report.seed_root);
   if (panel.poolHash(report.verifier_pool) !== report.verifier_pool_hash) {
-    return fail(sock, 'canary pool does not match its pinned hash', ref);
+    return fail(chan, 'canary pool does not match its pinned hash', ref);
   }
   canarySeen.add(ref);
 
@@ -386,38 +387,38 @@ function handleCanaryResult(msg, sock) {
     `${wrong.length} passed known-bad work` +
     (slashed.length ? `, slashed ${slashed.join(' ')}` : ', none above the evidence bar') +
     `, treasury paid provider ${price} CC`);
-  sendLine(sock, { type: 'canary_scored', contract_id: ref,
+  chan.send({ type: 'canary_scored', contract_id: ref,
                    wrong: wrong.length, slashed: slashed.length });
 }
 
-function handleForced(msg, sock) {
+function handleForced(msg, chan) {
   const { receipt, provider_sig, evidence } = msg;
   const ref = receipt.contract_id;
   const req = agents.get(receipt.requester), prov = agents.get(receipt.provider);
-  if (!req || !prov) return fail(sock, 'unknown party', ref);
+  if (!req || !prov) return fail(chan, 'unknown party', ref);
   const { contract, contract_sigs, pre_auth, pre_auth_sig, attestations } = evidence;
   // 1. dual-signed contract binding both parties to price + verifier panel
   if (contract.contract_id !== ref || contract.requester !== receipt.requester ||
       contract.provider !== receipt.provider ||
       !verify(req.pub, contract, contract_sigs.requester) ||
       !verify(prov.pub, contract, contract_sigs.provider)) {
-    return fail(sock, 'forced: contract not dual-signed by both parties', ref);
+    return fail(chan, 'forced: contract not dual-signed by both parties', ref);
   }
   // 2. requester's standing pre_authorization ("quorum PASS ⇒ settle")
   if (pre_auth.contract_id !== ref || pre_auth.price_cc !== contract.price_cc ||
       pre_auth.condition !== 'quorum-accepted' ||
       !verify(req.pub, pre_auth, pre_auth_sig)) {
-    return fail(sock, 'forced: invalid pre_authorization', ref);
+    return fail(chan, 'forced: invalid pre_authorization', ref);
   }
   // 3. 2-of-3 PASS attestations from the panel the seed checkpoint selects.
   // Re-derived here, not read off the contract: otherwise a requester could
   // fan out to a panel of its choosing and have the attestations accepted.
   const seedEntry = checkpoints[contract.panel_seed_cp];
   if (!seedEntry) {
-    return fail(sock, `forced: seed checkpoint #${contract.panel_seed_cp} not minted yet`, ref);
+    return fail(chan, `forced: seed checkpoint #${contract.panel_seed_cp} not minted yet`, ref);
   }
   if (panel.poolHash(contract.verifier_pool) !== contract.verifier_pool_hash) {
-    return fail(sock, 'forced: verifier pool does not match its pinned hash', ref);
+    return fail(chan, 'forced: verifier pool does not match its pinned hash', ref);
   }
   const expected = new Set(panel.deriveDids(
     contract.verifier_pool, ref, seedEntry.cp.root));
@@ -430,17 +431,17 @@ function handleForced(msg, sock) {
     if (verify(v.pub, attestation, sig)) passers.add(attestation.verifier);
   }
   if (passers.size < 2) {
-    return fail(sock, `forced: quorum not met (${passers.size}/2 PASS)`, ref);
+    return fail(chan, `forced: quorum not met (${passers.size}/2 PASS)`, ref);
   }
   // 4. provider signature over this exact receipt + fee schedule + CL
   if (!verify(prov.pub, receipt, provider_sig)) {
-    return fail(sock, 'forced: bad provider signature', ref);
+    return fail(chan, 'forced: bad provider signature', ref);
   }
   if (-receipt.postings.find((p) => p.account === receipt.requester).amount_cc
       !== contract.price_cc) {
-    return fail(sock, 'forced: receipt price != contract price', ref);
+    return fail(chan, 'forced: receipt price != contract price', ref);
   }
-  if (!validateSchedule(receipt, sock, ref, attestations)) return;
+  if (!validateSchedule(receipt, chan, ref, attestations)) return;
   console.log(`[hub] FORCED settlement ${ref}: requester refused, ` +
     `pre_auth + ${passers.size}-of-${expected.size} quorum stands in ` +
     `(panel seeded from checkpoint #${contract.panel_seed_cp})`);
@@ -549,134 +550,140 @@ const CHECKPOINT_MS = Number(process.env.HUB_CHECKPOINT_MS || 1200);
 setInterval(makeCheckpoint, CHECKPOINT_MS).unref();
 
 // --- server ---------------------------------------------------------------
-const server = net.createServer((sock) => {
-  // Departures matter for the verifier pool: a panel is drawn from the pool
-  // pinned at contract time, so a verifier that has gone away keeps being
-  // selected, produces no attestation, and silently blocks settlement once
-  // the quorum cannot be met. Mark offline rather than delete — the stats
-  // feed the credit line, and dropping them would reset an agent's standing
-  // on reconnect while its balance persisted.
-  sock.on('close', () => {
-    for (const [did, a] of agents) {
-      if (a.sock !== sock || a.online === false) continue;
-      a.online = false;
-      console.log(`[hub] ${did} disconnected (${a.role})`);
-    }
-  });
-  attachLineReader(sock, (msg) => {
-    switch (msg.type) {
-      case 'register': {
-        const body = { did: msg.did, pub: msg.pub, box_pub: msg.box_pub };
-        if (msg.role) body.role = msg.role;
-        if (!verify(msg.pub, body, msg.sig)) {
-          return fail(sock, 'bad register signature', msg.did);
+transport.listen({
+  port: PORT,
+  host: BIND,
+
+  onChannel: (chan) => {
+    // Departures matter for the verifier pool: a panel is drawn from the pool
+    // pinned at contract time, so a verifier that has gone away keeps being
+    // selected, produces no attestation, and silently blocks settlement once
+    // the quorum cannot be met. Mark offline rather than delete — the stats
+    // feed the credit line, and dropping them would reset an agent's standing
+    // on reconnect while its balance persisted.
+    chan.onClose(() => {
+      for (const [did, a] of agents) {
+        if (a.chan !== chan || a.online === false) continue;
+        a.online = false;
+        console.log(`[hub] ${did} disconnected (${a.role})`);
+      }
+    });
+    chan.onRaw((line) => rawLog.push(line));
+    chan.onMessage((msg) => {
+      switch (msg.type) {
+        case 'register': {
+          const body = { did: msg.did, pub: msg.pub, box_pub: msg.box_pub };
+          if (msg.role) body.role = msg.role;
+          if (!verify(msg.pub, body, msg.sig)) {
+            return fail(chan, 'bad register signature', msg.did);
+          }
+          const prior = agents.get(msg.did);
+          agents.set(msg.did, {
+            pub: msg.pub, boxPub: msg.box_pub, chan, online: true,
+            // Keep the history on reconnect: stats drive the credit line.
+            stats: prior ? prior.stats
+              : (importedStats.get(msg.did) || eeff.newStats()),
+            role: msg.role || 'agent',
+          });
+          balances.set(msg.did, bal(msg.did));
+          // Hand back what this identity already holds. A seeded agent that
+          // restarts keeps its DID and therefore its debt (§4 #17), but its
+          // own view starts at zero — and the strategy engine reads that
+          // balance, so a restarted agent carrying real debt would believe it
+          // was at zero, skip repayment mode, and overestimate what it can
+          // spend until the hub refused it.
+          chan.send({ type: 'registered', did: msg.did,
+                           credit_line: clOf(msg.did), fee_rate: eeff.FEE_RATE,
+                           balance_cc: bal(msg.did),
+                           stake_cc: stakes.get(msg.did) || 0,
+                           settlements: receipts.filter((r) =>
+                             r.receipt.postings.some((p) => p.account === msg.did)).length });
+          console.log(`[hub] registered ${msg.did} (${msg.role || 'agent'}, CL ${clOf(msg.did).toFixed(1)})`);
+          break;
         }
-        const prior = agents.get(msg.did);
-        agents.set(msg.did, {
-          pub: msg.pub, boxPub: msg.box_pub, sock, online: true,
-          // Keep the history on reconnect: stats drive the credit line.
-          stats: prior ? prior.stats
-            : (importedStats.get(msg.did) || eeff.newStats()),
-          role: msg.role || 'agent',
-        });
-        balances.set(msg.did, bal(msg.did));
-        // Hand back what this identity already holds. A seeded agent that
-        // restarts keeps its DID and therefore its debt (§4 #17), but its
-        // own view starts at zero — and the strategy engine reads that
-        // balance, so a restarted agent carrying real debt would believe it
-        // was at zero, skip repayment mode, and overestimate what it can
-        // spend until the hub refused it.
-        sendLine(sock, { type: 'registered', did: msg.did,
-                         credit_line: clOf(msg.did), fee_rate: eeff.FEE_RATE,
-                         balance_cc: bal(msg.did),
-                         stake_cc: stakes.get(msg.did) || 0,
-                         settlements: receipts.filter((r) =>
-                           r.receipt.postings.some((p) => p.account === msg.did)).length });
-        console.log(`[hub] registered ${msg.did} (${msg.role || 'agent'}, CL ${clOf(msg.did).toFixed(1)})`);
-        break;
-      }
-      case 'task': {
-        const req = agents.get(msg.task.requester);
-        if (!req || !verify(req.pub, msg.task, msg.sig)) {
-          return fail(sock, 'bad task signature', msg.task.task_id);
+        case 'task': {
+          const req = agents.get(msg.task.requester);
+          if (!req || !verify(req.pub, msg.task, msg.sig)) {
+            return fail(chan, 'bad task signature', msg.task.task_id);
+          }
+          console.log(`[hub] task ${msg.task.task_id} broadcast ` +
+            `(${msg.task.units}u, max ${msg.task.max_price_cc} CC, ` +
+            `acceptance ${msg.task.acceptance.method})`);
+          broadcast(msg, msg.task.requester);
+          break;
         }
-        console.log(`[hub] task ${msg.task.task_id} broadcast ` +
-          `(${msg.task.units}u, max ${msg.task.max_price_cc} CC, ` +
-          `acceptance ${msg.task.acceptance.method})`);
-        broadcast(msg, msg.task.requester);
-        break;
+        case 'list_verifiers': {
+          const latest = checkpoints.at(-1);
+          chan.send({
+            type: 'verifiers',
+            verifiers: [...agents]
+              .filter(([, a]) => a.role === 'verifier' && a.online !== false)
+              .map(([did, a]) => ({ did, pub: a.pub, box_pub: a.boxPub })),
+            lock: { checkpoint_seq: latest ? latest.cp.seq : -1,
+                    root: latest ? latest.cp.root : sha256('genesis') },
+            // The seq a contract written now must seed its panel from: one that
+            // has not been minted, so its root cannot be ground against.
+            next_checkpoint_seq: checkpoints.length,
+          });
+          break;
+        }
+        case 'fee_quote': {
+          const size = (msg.panel || []).length;
+          const { fee, risk, verifierShares } =
+            feeTerms(msg.requester, msg.price, size);
+          chan.send({ type: 'fee_terms', contract_id: msg.contract_id,
+                           requester: msg.requester, price: msg.price, fee, risk,
+                           panel: msg.panel || [], verifier_shares: verifierShares });
+          break;
+        }
+        case 'bid': case 'contract': case 'contract_ack': case 'delivery':
+        case 'receipt_half': case 'verify_request': case 'attestation':
+        case 'attestation_commit': case 'reveal_request': {
+          const to = agents.get(msg.to);
+          if (to && to.chan) to.chan.send(msg);
+          break;
+        }
+        case 'receipt': handleReceipt(msg, chan); break;
+        case 'forced_settlement': handleForced(msg, chan); break;
+        case 'canary_result': handleCanaryResult(msg, chan); break;
+        case 'export': {
+          chan.send({ type: 'ledger_export', ...buildExport() });
+          break;
+        }
       }
-      case 'list_verifiers': {
-        const latest = checkpoints.at(-1);
-        sendLine(sock, {
-          type: 'verifiers',
-          verifiers: [...agents]
-            .filter(([, a]) => a.role === 'verifier' && a.online !== false)
-            .map(([did, a]) => ({ did, pub: a.pub, box_pub: a.boxPub })),
-          lock: { checkpoint_seq: latest ? latest.cp.seq : -1,
-                  root: latest ? latest.cp.root : sha256('genesis') },
-          // The seq a contract written now must seed its panel from: one that
-          // has not been minted, so its root cannot be ground against.
-          next_checkpoint_seq: checkpoints.length,
-        });
-        break;
-      }
-      case 'fee_quote': {
-        const size = (msg.panel || []).length;
-        const { fee, risk, verifierShares } =
-          feeTerms(msg.requester, msg.price, size);
-        sendLine(sock, { type: 'fee_terms', contract_id: msg.contract_id,
-                         requester: msg.requester, price: msg.price, fee, risk,
-                         panel: msg.panel || [], verifier_shares: verifierShares });
-        break;
-      }
-      case 'bid': case 'contract': case 'contract_ack': case 'delivery':
-      case 'receipt_half': case 'verify_request': case 'attestation':
-      case 'attestation_commit': case 'reveal_request': {
-        const to = agents.get(msg.to);
-        if (to) sendLine(to.sock, msg);
-        break;
-      }
-      case 'receipt': handleReceipt(msg, sock); break;
-      case 'forced_settlement': handleForced(msg, sock); break;
-      case 'canary_result': handleCanaryResult(msg, sock); break;
-      case 'export': {
-        sendLine(sock, { type: 'ledger_export', ...buildExport() });
-        break;
-      }
+    });
+  },
 
+  onError: (err) => {
+    console.error(`[hub] listen failed on ${BIND}:${PORT}: ${err.code || err.message}` +
+      (err.code === 'EADDRINUSE' ? ' — another hub is already running, or set HUB_PORT' : ''));
+    process.exit(1);
+  },
+
+  onListening: () => {
+    console.log(
+      `[hub] listening on ${BIND}:${PORT} — ${transport.name} transport, ` +
+      `protocol v${PROTOCOL_VERSION}, ` +
+      // The DID an agent pins with hubPin, so it must not depend on whether
+      // the beacon happens to be enabled.
+      `hub did ${discovery.didOf(hubId.pub)}, ` +
+      `starter CL ${eeff.STARTER_CC}, fee ${eeff.FEE_RATE * 100}%, ` +
+      `risk ${eeff.RISK_THIN * 100}%/${eeff.RISK_BASE * 100}%, hash-chained + checkpointed`);
+    if (process.env.HUB_BEACON === '0') {
+      console.log('[hub] discovery beacon disabled (HUB_BEACON=0)');
+    } else {
+      // Targets follow BIND, so the hub only ever advertises addresses it serves.
+      const b = discovery.startBeacon(hubId, PORT, { bind: BIND });
+      console.log(`[hub] discovery beacon on udp/${b.port} → ${b.targets.join(', ')}`);
     }
-  }, (line) => rawLog.push(line));
-});
-
-server.on('error', (err) => {
-  console.error(`[hub] listen failed on ${BIND}:${PORT}: ${err.code || err.message}` +
-    (err.code === 'EADDRINUSE' ? ' — another hub is already running, or set HUB_PORT' : ''));
-  process.exit(1);
-});
-
-server.listen(PORT, BIND, () => {
-  console.log(
-    `[hub] listening on ${BIND}:${PORT} — protocol v${PROTOCOL_VERSION}, ` +
-    // The DID an agent pins with hubPin, so it must not depend on whether
-    // the beacon happens to be enabled.
-    `hub did ${discovery.didOf(hubId.pub)}, ` +
-    `starter CL ${eeff.STARTER_CC}, fee ${eeff.FEE_RATE * 100}%, ` +
-    `risk ${eeff.RISK_THIN * 100}%/${eeff.RISK_BASE * 100}%, hash-chained + checkpointed`);
-  if (process.env.HUB_BEACON === '0') {
-    console.log('[hub] discovery beacon disabled (HUB_BEACON=0)');
-  } else {
-    // Targets follow BIND, so the hub only ever advertises addresses it serves.
-    const b = discovery.startBeacon(hubId, PORT, { bind: BIND });
-    console.log(`[hub] discovery beacon on udp/${b.port} → ${b.targets.join(', ')}`);
-  }
-  if (!process.env.HUB_SEED) {
-    console.log('[hub] no HUB_SEED: this hub\'s DID changes on every restart, ' +
-      'so agents pinning it (hubPin) must be reconfigured after a restart');
-  }
-  startAutoDump();
-  if (CANARY_DID) {
-    console.log(`[hub] canary issuer authorised: ${CANARY_DID} ` +
-      '(may spend Treasury on decoy tasks)');
-  }
+    if (!process.env.HUB_SEED) {
+      console.log('[hub] no HUB_SEED: this hub\'s DID changes on every restart, ' +
+        'so agents pinning it (hubPin) must be reconfigured after a restart');
+    }
+    startAutoDump();
+    if (CANARY_DID) {
+      console.log(`[hub] canary issuer authorised: ${CANARY_DID} ` +
+        '(may spend Treasury on decoy tasks)');
+    }
+  },
 });

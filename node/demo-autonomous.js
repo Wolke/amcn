@@ -14,7 +14,8 @@
 'use strict';
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { connect, verify, sha256, canon } = require('./lib/wire');
+const { verify, sha256, canon } = require('./lib/wire');
+const transport = require('./lib/transport').fromEnv();
 
 const OFFSET = Number(process.env.DEMO_PORT_OFFSET || 0);
 const PORT = 47180 + OFFSET;
@@ -154,7 +155,8 @@ async function main() {
     `執行 ${elapsed}s 後匯出 --\n`);
 
   const ex = await new Promise((resolve) => {
-    const c = connect(PORT, (m) => { if (m.type === 'ledger_export') resolve(m); });
+    const c = transport.dial({ port: PORT });
+    c.onMessage((m) => { if (m.type === 'ledger_export') resolve(m); });
     c.send({ type: 'export' });
   });
   const consoles = {};

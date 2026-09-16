@@ -6,8 +6,9 @@
 // env AGENT_CONFIG: { name, hubPort, hubHost?, hubPin?, beaconPort? }
 // hubHost "discover" uses the UDP beacon instead of a hand-copied IP.
 'use strict';
-const { genIdentity, identityFromSeed, sign, verify, sha256, canon,
-        connectLazy } = require('./lib/wire');
+const { genIdentity, identityFromSeed, sign, verify, sha256,
+        canon } = require('./lib/wire');
+const transport = require('./lib/transport').fromEnv();
 const crypto = require('node:crypto');
 const discovery = require('./lib/discovery');
 const { genBoxKeys, open } = require('./lib/e2e');
@@ -32,7 +33,7 @@ const log = (m) => console.log(`[${cfg.name} ${id.did}] ${m}`);
 // commit and reveal.
 const pending = new Map();
 
-const hub = connectLazy(discovery.resolveHubTarget(cfg, log), (msg) => {
+const hub = transport.dialLazy(discovery.resolveHubTarget(cfg, log), (msg) => {
   switch (msg.type) {
     case 'registered':
       log('registered as verifier');

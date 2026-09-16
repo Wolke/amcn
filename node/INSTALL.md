@@ -226,18 +226,19 @@ node agent.js configs\provider.json
 | PowerShell 說 `panel.cmd` 不是命令 | PowerShell 不把當前目錄放進 PATH。用 `.\panel.cmd ...`，或直接 `node panel.js <hub IP>`（與 shell 無關）|
 | 想診斷跨機發現（§4 #18） | 在 Hub 那台 `node discovery-probe.js send`，在發現失敗的那台 `node discovery-probe.js listen`。listen 端沒有任何 `跨機 ✓` 就是網路在丟廣播；有封包但簽章失敗才是 beacon 程式的問題 |
 | `no hub beacon heard` | Hub 沒設 `HUB_BIND=0.0.0.0`（綁 loopback 時只會往 127.0.0.1 廣告）；或兩台不在同一廣播網段（跨 VLAN／訪客網路／Wi-Fi 隔離會擋 UDP 廣播）→ 改回手填 IP |
-| `no beacon matching pinned hub` | `hubPin` 與 Hub 現在的身分不符。Hub 重啟會換身分，照它新印出的 `hub did` 更新 |
+| `no beacon matching pinned hub` | `hubPin` 與 Hub 現在的身分不符。Hub 沒設 `HUB_SEED` 時每次重啟換身分，照它新印出的 `hub did` 更新 |
+| `refused a tcp peer on the http transport`（或反向） | 兩端 `AMCN_TRANSPORT` 不同。Hub 啟動 log 的 `listening on ... — <名稱> transport` 就是它講的那種，把每一台設成同一個（預設 `tcp`）|
 
 ## 8. 安全注意（試點範圍）
 
-- Hub 綁 `0.0.0.0` 只該在**受信任的區網**做；傳輸層目前無 TLS（訊息本身有簽章、payload 有 E2E 加密，但 metadata 是明文）。不要暴露到公網。
+- Hub 綁 `0.0.0.0` 只該在**受信任的區網**做；傳輸層目前無 TLS（訊息本身有簽章、payload 有 E2E 加密，但 metadata 是明文）。不要暴露到公網。兩種傳輸實作（`AMCN_TRANSPORT=tcp|http`）都沒有 TLS——`http` 是明文 HTTP，不是 HTTPS。
 - Console（47201/47202）只綁 localhost，這是刻意的——它是 Owner 的控制面。
 - **Verifier panel 與交易雙方應在不同機器**（第 6 節）。同機 panel 使 2-of-3 quorum 的獨立性只存在於協議層（§4 #31）。
 - API key 永遠只在 agent 進程的機器上；試點時可用 `sk-test-anything` 假 key 跑 mock adapter，完全不花錢。
 
 ## 9. 已知限制（試點範圍內會撞到的）
 
-- **Hub 與 Agent 的狀態都不持久化**。Hub 帳本在記憶體，`export` 有出口但沒有 import 入口；而 `agent.js` 每次啟動都 `genIdentity()` 產生**新 DID**（keystore 只保管 API key，不保管身分）。所以任一邊重啟，餘額與信用歷史都會歸零、無法延續。想留證據就在重啟前把 `export` 的輸出存檔——收據本身是雙簽的，離線可獨立驗證。
-- **Hub 身分每次重啟改變**，所以 `hubPin` 只在單次 Hub 生命週期內有意義，真正的「發現與輪替」還需要 Hub 身分持久化。
-- **傳輸層無 TLS**。訊息有簽章、payload 有 E2E 加密，但 metadata 是明文（見第 8 節）。
-- **協議沒有版本欄位，升級必須所有機器同時做**（§4 #33）。混版節點會拒絕互通——`git pull` 後請把**每一台**的 Hub 與 Agent 都重啟，不要只更新其中一台。實測中一台舊版 provider 收到新版合約時會拒絕該筆並記錄 `[wire] dropped frame`（修復前是直接崩潰）。
+- **持久化要自己開，預設是關的**（§4 #17 已修，但不是自動生效）。Hub 帳本仍在記憶體：要活過重啟，啟動時就得設 `HUB_DUMP_PATH`（自動匯出）並在下次啟動設 `HUB_IMPORT`（見第 1 節）。Agent／Verifier／Canary 的身分同理——設定檔沒有 `seed` 欄位時每次啟動都 `genIdentity()` 產生**新 DID**，範本也沒有預設值。被棄置的負餘額身分會在帳上留下永不償還的洞，所以正式跑試點前，每個角色都該有固定的 `seed`。keystore 只保管 API key，不保管身分。
+- **傳輸層無 TLS**。訊息有簽章、payload 有 E2E 加密，但 metadata 是明文（見第 8 節）。兩種 `AMCN_TRANSPORT` 實作都一樣，`http` 是明文 HTTP。
+- **升級必須所有機器同時做**（§4 #33 已修：協議有版本欄位，混版是拒絕而非崩潰）。`git pull` 後請把**每一台**的 Hub 與 Agent 都重啟，不要只更新其中一台——版本不符的 frame 會被丟棄並記錄 `[wire] rejected ...: protocol v...`，功能上等於那台不存在。
+- **`AMCN_TRANSPORT` 每台都要一致**。不一致時雙方都會印出拒絕原因（第 7 節），但網路不會運作。

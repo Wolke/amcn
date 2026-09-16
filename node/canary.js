@@ -23,8 +23,9 @@
 // Print the DID it derives, set HUB_CANARY_DID to it on the hub, restart the
 // hub, then start this.
 'use strict';
-const { genIdentity, identityFromSeed, sign, verify, sha256, canon,
-        connectLazy } = require('./lib/wire');
+const { genIdentity, identityFromSeed, sign, verify, sha256,
+        canon } = require('./lib/wire');
+const transport = require('./lib/transport').fromEnv();
 const { genBoxKeys, seal } = require('./lib/e2e');
 const { assertsHash } = require('./lib/dsl');
 const discovery = require('./lib/discovery');
@@ -59,7 +60,7 @@ const cpRoots = new Map();
 let verifierDir = { verifiers: [], lock: null };
 let seq = 0;
 
-const hub = connectLazy(discovery.resolveHubTarget(cfg, log), (msg) => {
+const hub = transport.dialLazy(discovery.resolveHubTarget(cfg, log), (msg) => {
   switch (msg.type) {
     case 'registered':
       log(`registered as canary issuer, hub credit line ${msg.credit_line.toFixed(1)} CC`);
