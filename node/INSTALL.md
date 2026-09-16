@@ -180,6 +180,14 @@ panel.cmd 192.168.1.10
 node panel.js 192.168.1.10 47180 5     # IP、Hub 埠、panel 大小
 ```
 
+讓 panel 自己找 Hub（W10 演練需要的模式——搬移過的 Hub 會被跟隨，不必登入這台改設定）：
+
+```bash
+AMCN_HUB_PIN=did:demo:xxxxxxxx AMCN_PANEL_SEED='panel-seed' node panel.js discover
+```
+
+`AMCN_HUB_PIN` 填 Hub 啟動 log 印出的 `hub did`。不設也能跑，但那表示廣播網段上任何一個信標都能冒充 Hub。
+
 想手動逐一啟動（或需要不同名稱）也可以：
 
 ```bash
