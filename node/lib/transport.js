@@ -98,12 +98,15 @@ const RETRY_BASE_MS = 500;
 const RETRY_MAX_MS = 15000;
 
 function dialLazy(transport, resolveTarget, opts = {}) {
-  const { onMessage, onOpen, label = 'wire' } = opts;
+  const { onMessage, onOpen, label = 'wire',
+          ackType = null, handshakeMs = 5000 } = opts;
   let live = null;          // current channel, or null while disconnected
   let stopped = false;      // deliberate close(); do not reconnect
   let attempt = 0;          // consecutive failed/lost connections
   let dropped = 0;          // outbound frames lost while disconnected
   let downSince = null;     // when the current outage began
+  let acked = false;        // has the peer answered our handshake?
+  let hsTimer = null;
 
   // Exponential with jitter, capped. Jitter matters with a panel: three
   // verifiers that lost the same hub would otherwise retry in lockstep
@@ -136,6 +139,10 @@ function dialLazy(transport, resolveTarget, opts = {}) {
     let opened = false;
 
     chan.onMessage((msg, c) => {
+      if (ackType && msg && msg.type === ackType) {
+        acked = true;
+        clearTimeout(hsTimer);
+      }
       // The first frame back is proof the far end is really speaking AMCN;
       // a TCP connect alone is not (a transport mismatch connects fine).
       if (!opened) {
@@ -155,6 +162,7 @@ function dialLazy(transport, resolveTarget, opts = {}) {
     });
 
     chan.onClose(() => {
+      clearTimeout(hsTimer);
       if (live === chan) live = null;
       if (stopped) return;
       if (downSince === null) downSince = Date.now();
@@ -170,11 +178,33 @@ function dialLazy(transport, resolveTarget, opts = {}) {
     });
 
     live = chan;
+    acked = false;
     // Re-sent on every connection, not just the first: the hub keys agents
     // by DID, so a new channel is unknown to it until the identity registers
     // again. Re-registration keeps the existing stats and balance (#35), so
     // a reconnect resumes standing rather than resetting it.
-    if (onOpen) onOpen(chan);
+    //
+    // And retried until acknowledged, which fault injection showed is not
+    // optional. A verifier reconnected during a blackhole, its register frame
+    // was dropped, and then the fault cleared: pings flowed both ways, so
+    // neither side's liveness timer ever fired again, while the hub had no
+    // idea who the peer was. A live, anonymous, permanently invisible
+    // connection — both sides reporting health. Fire-and-forget registration
+    // cannot survive a single lost frame, which is also all that packet loss
+    // needs to do.
+    const shake = () => {
+      if (!onOpen || stopped || chan.destroyed) return;
+      onOpen(chan);
+      if (!ackType) return;
+      clearTimeout(hsTimer);
+      hsTimer = setTimeout(() => {
+        if (acked || stopped || chan.destroyed) return;
+        console.error(`[${label}] no ${ackType} from ${where} — ` +
+          'resending handshake (connection is up but anonymous)');
+        shake();
+      }, handshakeMs);
+    };
+    shake();
   }
 
   function schedule() {

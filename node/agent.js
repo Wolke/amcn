@@ -161,7 +161,33 @@ function requestReveal(contractId, why = 'quorum') {
   log(`reveal requested on ${contractId} (${ctx.commits.size} commitments, ${why})`);
 }
 
+function armVerifyTimeout(contractId, ctx) {
+  clearTimeout(ctx.verifyTimer);
+  ctx.verifyTimer = setTimeout(() => {
+    if (ctx.done) return;
+    const passes = (ctx.attest || [])
+      .filter((a) => a.attestation.verdict === 'PASS').length;
+    if (passes >= 2) return;            // the settlement path owns it now
+    ctx.verifyAttempts = (ctx.verifyAttempts || 0) + 1;
+    if (ctx.verifyAttempts <= VERIFY_RETRIES && ctx.fanOut) {
+      log(`no quorum on ${contractId} after ${VERIFY_TIMEOUT_MS}ms — ` +
+          `resending verify_request (${ctx.verifyAttempts}/${VERIFY_RETRIES})`);
+      fanOut(ctx.fanOut.delivery, ctx, ctx.fanOut.chosen);
+      return;
+    }
+    ctx.done = true;
+    ctx.abandoned = true;
+    console_.abandoned = (console_.abandoned || 0) + 1;
+    log(`ABANDONING ${contractId}: no quorum after ${VERIFY_RETRIES + 1} ` +
+        'attempts. The provider did the work and will not be paid — the ' +
+        'panel is derived from a pinned pool, so a retry reaches the same ' +
+        'verifiers. A re-seeded backup panel (§2.3) needs hub support.');
+  }, VERIFY_TIMEOUT_MS);
+}
+
 function fanOut(delivery, ctx, chosen) {
+  ctx.fanOut = { delivery, chosen };   // so a retry can repeat exactly this
+  armVerifyTimeout(delivery.contract_id, ctx);
   for (const v of chosen) {
     const request = {
       contract_id: delivery.contract_id, requester: id.did,
@@ -188,6 +214,10 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
     hub.send({ type: 'list_verifiers' });
   },
   label: cfg.name || 'agent',
+  // Registration is a handshake, not a broadcast: retried until the hub
+  // answers, because one lost frame used to leave a live but anonymous
+  // connection that nothing ever noticed.
+  ackType: 'registered',
   onMessage: async (msg) => {
     switch (msg.type) {
       case 'registered':
@@ -252,6 +282,13 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
         if (msg.bid.price_cc <= p.task.max_price_cc) {
           p.bids.push({ ...msg.bid, pub: msg.pub });
         }
+        // Wait a little longer for the rest of the field, bounded by the
+        // deadline, so a slow link does not decide the auction.
+        if (p.timer && p.fire) {
+          clearTimeout(p.timer);
+          const wait = Math.min(BID_QUIET_MS, Math.max(0, p.deadline - Date.now()));
+          p.timer = setTimeout(p.fire, wait);
+        }
         break;
       }
 
@@ -286,14 +323,26 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
             contract: c, contract_sigs: { requester: msg.sig, provider: mySig },
             pre_auth: msg.pre_auth, pre_auth_sig: msg.pre_auth_sig,
             output: null, attest: [], settled: false, failed: err.message,
+            at: Date.now(),
           });
           break;
         }
-        asProvider.set(c.contract_id, {
+        const provEntry = {
           contract: c, contract_sigs: { requester: msg.sig, provider: mySig },
           pre_auth: msg.pre_auth, pre_auth_sig: msg.pre_auth_sig,
-          output, attest: [], settled: false,
-        });
+          output, attest: [], settled: false, at: Date.now(),
+        };
+        // Mirror of the requester's timeout: without it a provider whose
+        // panel never answered kept the contract open for the life of the
+        // process, which is what the leak looked like from the supply side.
+        provEntry.giveUp = setTimeout(() => {
+          if (provEntry.settled) return;
+          provEntry.failed = 'no quorum reached before the verify timeout';
+          console_.abandoned = (console_.abandoned || 0) + 1;
+          log(`giving up on ${c.contract_id}: no quorum before timeout — ` +
+              'work delivered, not paid');
+        }, VERIFY_TIMEOUT_MS * (VERIFY_RETRIES + 2));
+        asProvider.set(c.contract_id, provEntry);
         const delivery = { contract_id: c.contract_id, output, provider: id.did };
         hub.send({ type: 'delivery', to: c.requester, delivery,
                    sig: sign(id.privateKey, delivery), pub: id.pub });
@@ -408,6 +457,7 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
           const passes = reqCtx.attest.filter((x) => x.attestation.verdict === 'PASS').length;
           if (passes >= 2 && !reqCtx.done) {
             reqCtx.done = true;
+            clearTimeout(reqCtx.verifyTimer);
             if (cfg.refuseToSettle) {
               log(`quorum PASS on ${a.contract_id} — REFUSING to settle (malicious demo)`);
             } else {
@@ -436,7 +486,7 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
               log(`no settlement for ${a.contract_id} after quorum PASS → ` +
                   `FORCING with pre_auth + attestations`);
               requestSettlement(a.contract_id, 'forced', id.did, provCtx.output);
-            }, 1200);
+            }, FORCE_AFTER_MS);
           }
         }
         break;
@@ -507,7 +557,11 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
       case 'settled': {
         const me = msg.receipt.postings.find((p) => p.account === id.did);
         const provCtx = asProvider.get(msg.receipt.contract_id);
-        if (provCtx) { provCtx.settled = true; clearTimeout(provCtx.timer); }
+        if (provCtx) {
+          provCtx.settled = true;
+          clearTimeout(provCtx.timer);
+          clearTimeout(provCtx.giveUp);
+        }
         if (me) {
           console_.balance = +(console_.balance + me.amount_cc).toFixed(4);
           console_.settled.push({ contract_id: msg.receipt.contract_id,
@@ -585,6 +639,25 @@ if (cfg.consolePort) {
         in_repayment_since: repayTracker.since,
         paused_posts: pausedPosts.length,
       },
+      // Open contracts and how long they have been open. A blackholed link
+      // produces contracts that can never settle (#46); nothing used to
+      // measure whether any were stuck, so an invariant had nothing to read.
+      contracts: (() => {
+        const open = [
+          ...[...asRequester.values()].filter((c) => !c.done),
+          ...[...asProvider.values()].filter((c) => !c.settled && !c.failed),
+        ];
+        const now = Date.now();
+        return {
+          open: open.length,
+          abandoned: console_.abandoned || 0,
+          as_requester_open: [...asRequester.values()].filter((c) => !c.done).length,
+          as_provider_open: [...asProvider.values()]
+            .filter((c) => !c.settled && !c.failed).length,
+          oldest_open_ms: open.length
+            ? Math.max(...open.map((c) => now - (c.at || now))) : 0,
+        };
+      })(),
       resumed_from: console_.resumedFrom || null,
       // §20-8: publishes that required a human, versus ones the policy made
       // on its own. An unattended run must show manual + scripted == 0.
@@ -640,6 +713,33 @@ if (cfg.provide && canExecute) {
 // up holding receipts under one contract_id, which is the settlement
 // idempotency key (W1 schema freeze). The DID tag makes it unique per
 // identity, and genIdentity() runs per process.
+// Timing that used to be loopback constants. Found by fault injection: with
+// an 80ms±40 WAN profile the fixed 500ms bid window produced `no bids` on
+// every single task — zero settlements in 90 seconds, where the same topology
+// without latency settled 27 in 60. Same shape as #36, worse outcome: not a
+// stuck contract but a market that never trades.
+//
+// The bid window is now event-driven rather than a guess: award once bids
+// have stopped arriving for `bidQuietMs`, never before `bidWindowMs` (so a
+// LAN still awards at 500ms) and never after `bidWindowMaxMs`. A constant
+// that has to be right for both loopback and a WAN is the thing to remove,
+// not to re-tune.
+const T = (cfg.policy && cfg.policy.timing) || {};
+const BID_WINDOW_MS = T.bidWindowMs || 500;
+const BID_QUIET_MS = T.bidQuietMs || 250;
+const BID_MAX_MS = T.bidWindowMaxMs || 3000;
+const FORCE_AFTER_MS = T.forceAfterMs || 1200;
+// VERIFYING has no timeout at all, which fault injection turned into a
+// measurable leak: contracts awarded while the panel's link was blackholed
+// were never settled and never closed — three agents held 12–18 open
+// contracts, the oldest 155s and still growing, because verify_request went
+// into the void and nothing ever retried it. §2.3 calls for a VERIFYING
+// timeout with backup verifiers; a re-seeded panel needs hub-side support, so
+// what is implemented here is the bounded part: retry the same panel, then
+// abandon loudly instead of holding the contract open forever.
+const VERIFY_TIMEOUT_MS = T.verifyTimeoutMs || 15000;
+const VERIFY_RETRIES = T.verifyRetries == null ? 2 : T.verifyRetries;
+
 const idTag = id.did.slice(-8);
 let postSeq = 0;
 const pausedPosts = [];
@@ -654,9 +754,7 @@ function postTask(post) {
       acceptance: { method: post.acceptance,
                     asserts_hash: assertsHash(post.asserts) },
     };
-    pendingBids.set(task.task_id, {
-      task, bids: [],
-      timer: setTimeout(() => {
+    const fire = () => {
         const { bids } = pendingBids.get(task.task_id);
         if (!bids.length) { log(`no bids for ${task.task_id}`); return; }
         bids.sort((a, b) => a.price_cc - b.price_cc);
@@ -699,6 +797,10 @@ function postTask(post) {
           contract, contract_sigs: {}, payload: post.payload,
           asserts: post.asserts, pool, panel: null,
           providerPub: win.pub || null, attest: [], done: false,
+          // When the contract was opened, so an invariant can ask how long it
+          // has been unsettled. A silent partition produces contracts that
+          // can never settle (#46) and nothing measured their age.
+          at: Date.now(),
         });
         log(`selected ${win.provider} @ ${win.price_cc} CC (${bids.length} bids)` +
             (pool.length
@@ -708,7 +810,11 @@ function postTask(post) {
         hub.send({ type: 'contract', to: win.provider, contract,
                    sig: sign(id.privateKey, contract), pub: id.pub,
                    pre_auth, pre_auth_sig: sign(id.privateKey, pre_auth) });
-      }, 500),
+    };
+    pendingBids.set(task.task_id, {
+      task, bids: [], fire,
+      deadline: Date.now() + BID_MAX_MS,
+      timer: setTimeout(fire, BID_WINDOW_MS),
     });
   log(`quota exhausted → posting ${task.task_id} (UC-01, ${post.acceptance})`);
   hub.send({ type: 'task', task, sig: sign(id.privateKey, task) });

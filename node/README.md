@@ -62,6 +62,8 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `lib/transport-http.js` | 實作 2：HTTP——長連 chunked NDJSON 回應載 server→client，POST 載 client→server。刻意不選另一種 socket 方言：那會共用 TCP 的故障模型，換了等於沒換。此實作線上無連線狀態、送達以請求為單位，POST 必須自行保序（單 socket keep-alive）|
 | `pilot-doctor.js` | 跨平台試點診斷（§4 #43）：`node pilot-doctor.js <hub IP>` 依序驗網段、設定檔、TCP、**AMCN 協議層**、UDP 信標，並指出第一個 FAIL。只用 node，Windows 可直接跑 |
 | `lib/log.js` | 長時間執行的時間戳（§4 #42）：hub／agent／verifier／canary／panel 的每一行加 UTC ISO-8601。包裝 console 而非逐一改呼叫端，因為斷線時最關鍵的行來自 `lib/channel.js`／`transport-*.js` |
+| `lib/invariants.js` | 六項協議不變式（Σ=0、雜湊鏈、雙簽、quorum 支撐與費率、信用上限、contract_id 唯一）＋兩項需要現場取樣的（pool 不得宣告離線者、合約不得卡住）。**連續檢查**而非結尾檢查一次——故障情境要問的是「不變式是否曾經被破壞」 |
+| `chaos-run.js` / `scenarios/` | 情境執行器：自行拉起拓撲、依時間表注入故障、持續檢查不變式、輸出時間軸與 PASS/FAIL，每個子行程的 log 落地。`--seed` 讓失敗可重播。取代了原本需要人拔線的開發環節 |
 | `demo-reconnect.js` | W10 預演（8 項）：SIGKILL 掉 Hub → 同 seed 從自動匯出重啟 → 六個 client 自行重連、重新註冊、餘額延續、交易恢復，全程無人介入（§4 #40）|
 | `demo-transport.js` | W10 驗收（7 項）：同一場 `demo.js` 在兩種傳輸下 fingerprint 相同（收據／事件／餘額／額度／驗收方式全等）、混用傳輸雙方都明確拒絕 |
 | `mcp-server.js` | §23.1 需求側入口：MCP server（JSON-RPC over stdio，協議 2025-06-18），三個 tool `amcn_balance` / `amcn_publish_task` / `amcn_request_inference`。不持有任何金鑰，只經 127.0.0.1 的 Owner Console 操作本機 Agent |

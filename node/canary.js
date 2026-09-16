@@ -74,6 +74,10 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
     hub.send({ type: 'list_verifiers' });
   },
   label: name,
+  // Registration is a handshake, not a broadcast: retried until the hub
+  // answers, because one lost frame used to leave a live but anonymous
+  // connection that nothing ever noticed.
+  ackType: 'registered',
   onMessage: (msg) => {
     switch (msg.type) {
       case 'registered':

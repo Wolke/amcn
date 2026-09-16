@@ -1,0 +1,14 @@
+{
+  "name": "baseline",
+  "what": "無故障基準線：確認情境拓撲本身會成交，任何故障情境的失敗才能歸因於故障",
+  "portOffset": 920,
+  "seed": 3,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 60,
+  "sampleS": 10,
+  "expect": [
+    { "kind": "invariantsHold" },
+    { "kind": "settlesBefore", "atS": 40 }
+  ]
+}

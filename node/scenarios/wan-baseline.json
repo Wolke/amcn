@@ -1,0 +1,15 @@
+{
+  "name": "wan-baseline",
+  "what": "只加跨地點延遲（80ms±40，雙端各一次＝單跳約 160ms），不注入任何中斷。驗收環境是不同地點的機器（計畫 §7），所以這是開發應該用的預設條件",
+  "portOffset": 940,
+  "seed": 5,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 90,
+  "sampleS": 15,
+  "profile": { "mode": "latency", "latencyMs": 80, "jitterMs": 40 },
+  "expect": [
+    { "kind": "invariantsHold" },
+    { "kind": "settlesBefore", "atS": 60 }
+  ]
+}

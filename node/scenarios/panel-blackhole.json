@@ -1,0 +1,23 @@
+{
+  "name": "panel-blackhole",
+  "what": "panel 的連線被靜默切斷 80 秒（封包消失、連線不關閉）——#46 就是這樣被找到的，這個情境是它的回歸閘門",
+  "portOffset": 900,
+  "seed": 11,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 200,
+  "sampleS": 10,
+  "maxOpenS": 120,
+  "profile": { "mode": "latency", "latencyMs": 80, "jitterMs": 40 },
+  "timeline": [
+    { "atS": 40, "target": "panel", "fault": { "mode": "blackhole", "direction": "both" } },
+    { "atS": 120, "target": "panel", "fault": "profile" }
+  ],
+  "expect": [
+    { "kind": "invariantsHold" },
+    { "kind": "settlesBefore", "atS": 40 },
+    { "kind": "poolEmptiesWithin", "afterS": 40, "withinS": 45 },
+    { "kind": "poolRefillsWithin", "afterS": 120, "withinS": 45 },
+    { "kind": "settlementResumesWithin", "afterS": 120, "withinS": 70 }
+  ]
+}
