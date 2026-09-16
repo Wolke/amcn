@@ -19,6 +19,8 @@
 | **M2** | 交易 Agent m2（＋階段 B 的待命 Hub、匯出拉取）| 47202（Console）| 交易對手。待命 Hub 放這裡而不是 M3，是為了讓 M3 保持乾淨的單一用途 |
 | **M3** | Verifier panel ×3 | 無對外埠（只出站連 Hub）| 關閉 #31。Verifier 不需要 API key、不需要模型、不參與信用 |
 
+**M3 要挑最穩的那台機器。** panel 離線時 pool 在線人數為 0，judge-quorum 任務會被 Agent 端拒絕得標（#37），也就是**全網停止成交**——試點實測發生過一次：M3 整台離開網路，三個 Verifier 同一秒斷線，之後每筆任務都沒有結果。修好 #40 之後它們會在 M3 回到網路時自行重連，不需要人登入那台做任何事，但那段空窗期是真的沒有交易。
+
 M1 與 M2 **都要同時買也同時賣**。這不是對稱美學：`demo-autonomous.js` 的註解記錄了教訓——單向需求會養出只收不付的吸收端（FR-056「正餘額無處可花」），其他人撞上信用上限，閉環就停了，而且測試會綠燈通過一個壞掉的經濟。
 
 ---
@@ -114,6 +116,25 @@ AMCN_PROVIDER_KEY='sk-test-anything' node agent.js configs/pilot-m2.json
 `sk-test-anything` 只是佔位字串：adapter 是 key-gated（那個 gate 本身就是 P-02 的示範），但 `baseUrl: null` 時走確定性 mock，不呼叫任何模型、不花錢。接真實模型會讓 `sha256_eq` 驗收失敗，見 INSTALL §5。
 
 **要看到**：`registered, dynamic credit line 46.3 CC`（46.3 不是錯誤，見 INSTALL §1d）、`supply armed at ... CC/unit`。約 2 分鐘內出現第一筆 `own quota exhausted → posting`——這是 UC-01 的觸發，來自 agent 自己的額度模型，不是時間表。
+
+### 3c-2. 第三個交易 Agent（選配，但會明顯提高成交率）
+
+兩個交易 Agent 的問題在試點實測出來了：買方缺料的時刻，賣方往往也沒有餘量可賣——出價前要求 `quota.remaining >= units`（#22），而兩邊需求都接近滿載時湊得出 8u 餘量的機率很低。實測**每筆任務約 5 分鐘一次，且經常 `no bids`**，階段 A 的樣本數會不夠。
+
+兩個對策都已納入範本：
+
+1. `maxUnitsPerTask` 由 8 降為 **4**，讓瘦的賣方也接得下。
+2. 在 **Hub 那台**再開一個交易 Agent：
+
+```bash
+cd ai-exchage/node
+cp configs/pilot-m1b.example.json configs/pilot-m1b.json    # 改 seed
+AMCN_PROVIDER_KEY='sk-test-anything' node agent.js configs/pilot-m1b.json
+```
+
+**交易角色可以同機**——需要獨立故障域的是 Verifier panel（#31），不是交易雙方。範本的賣價刻意與 `pilot-m1` 不同（1.05 vs 1.0）：同價會讓選標退回到到達順序決勝（#23），先啟動者系統性勝出，那是啟動順序而不是市場性質。額度週期相位也錯開（30s），讓 burst 落在不同時間。
+
+（這一節的存在本身是個提醒：`demo-autonomous.js` 用三個 Agent 是有原因的，而它的註解早就寫了——「單向需求會養出吸收端」「burst 要落在不同時間」。試點用兩個，就把那兩個條件同時放掉了。）
 
 ### 3d. 驗證 #31 真的關掉了
 
