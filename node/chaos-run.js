@@ -282,6 +282,24 @@ async function runScenario(file) {
           after.length ? `第一筆於 T+${after[0]}s，共 ${after.length} 筆` : '恢復後無成交');
         break;
       }
+      case 'tradingContinues': {
+        // The soak passed 3/3 while the economy had been dead for twelve
+        // minutes: every expectation looked at the beginning or at a
+        // recovery window, and none asked whether trading was still
+        // happening at the end. A long run that cannot notice the market
+        // stopping is not measuring the thing it exists to measure.
+        const from = e.fromS || 0;
+        const marks = [from, ...settleAt.filter((x) => x >= from),
+                       Number(nowS(t0))];
+        let gap = 0, at = null;
+        for (let i = 1; i < marks.length; i++) {
+          if (marks[i] - marks[i - 1] > gap) { gap = marks[i] - marks[i - 1]; at = marks[i - 1]; }
+        }
+        check(`交易全程未中斷超過 ${e.maxGapS}s（T+${from}s 起）`,
+          gap <= e.maxGapS,
+          `最長空窗 ${gap}s（自 T+${at}s）；全程 ${settleAt.length} 筆`);
+        break;
+      }
       case 'noSettlementDuring': {
         const during = settleAt.filter((s) => s >= e.fromS && s <= e.toS);
         check(`故障期間不得有成交（T+${e.fromS}–${e.toS}s）`, during.length === 0,

@@ -64,6 +64,11 @@
       "kind": "settlementResumesWithin",
       "afterS": 540,
       "withinS": 180
+    },
+    {
+      "kind": "tradingContinues",
+      "fromS": 180,
+      "maxGapS": 300
     }
   ]
 }

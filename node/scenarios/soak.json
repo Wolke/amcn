@@ -8,18 +8,67 @@
   "durationS": 2400,
   "sampleS": 60,
   "maxOpenS": 150,
-  "profile": { "mode": "latency", "latencyMs": 80, "jitterMs": 40 },
+  "profile": {
+    "mode": "latency",
+    "latencyMs": 80,
+    "jitterMs": 40
+  },
   "timeline": [
-    { "atS": 600, "target": "panel", "fault": { "mode": "blackhole", "direction": "both" } },
-    { "atS": 700, "target": "panel", "fault": "profile" },
-    { "atS": 1200, "action": "killHub" },
-    { "atS": 1260, "action": "startHub", "import": true },
-    { "atS": 1800, "target": "agents", "fault": { "mode": "loss", "lossPct": 2, "latencyMs": 80, "jitterMs": 40 } },
-    { "atS": 2100, "target": "agents", "fault": "profile" }
+    {
+      "atS": 600,
+      "target": "panel",
+      "fault": {
+        "mode": "blackhole",
+        "direction": "both"
+      }
+    },
+    {
+      "atS": 700,
+      "target": "panel",
+      "fault": "profile"
+    },
+    {
+      "atS": 1200,
+      "action": "killHub"
+    },
+    {
+      "atS": 1260,
+      "action": "startHub",
+      "import": true
+    },
+    {
+      "atS": 1800,
+      "target": "agents",
+      "fault": {
+        "mode": "loss",
+        "lossPct": 2,
+        "latencyMs": 80,
+        "jitterMs": 40
+      }
+    },
+    {
+      "atS": 2100,
+      "target": "agents",
+      "fault": "profile"
+    }
   ],
   "expect": [
-    { "kind": "invariantsHold" },
-    { "kind": "settlesBefore", "atS": 300 },
-    { "kind": "settlementResumesWithin", "afterS": 1260, "withinS": 180 }
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 300
+    },
+    {
+      "kind": "settlementResumesWithin",
+      "afterS": 1260,
+      "withinS": 180
+    },
+    {
+      "kind": "tradingContinues",
+      "fromS": 300,
+      "maxGapS": 300
+    }
   ]
 }
