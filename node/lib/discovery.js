@@ -25,6 +25,19 @@ const didOf = (pub) => 'did:demo:' + sha256(pub).slice(0, 16);
 
 // Per-interface broadcast addresses. 255.255.255.255 alone is unreliable
 // across platforms once more than one interface is up.
+// This machine's own IPv4 addresses — what to advertise in a rendezvous
+// record, as distinct from the broadcast addresses below (which are where
+// the beacon is *sent*, not where anyone can reach us).
+function localAddrs() {
+  const out = [];
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family === 'IPv4' && !a.internal) out.push(a.address);
+    }
+  }
+  return out;
+}
+
 function broadcastAddrs() {
   const out = [];
   for (const addrs of Object.values(os.networkInterfaces())) {
@@ -116,6 +129,27 @@ function discoverHub({ timeoutMs = 3000, port = BEACON_PORT, pin = null } = {}) 
 // the beacon; any other value, including absent, keeps the static behaviour so
 // existing configs are untouched.
 async function resolveHubTarget(cfg, log = () => {}) {
+  // A signed rendezvous record works across networks, which the UDP beacon
+  // cannot (§4 #45). Re-read on every attempt, so a hub that moves is
+  // followed without touching a config — #40 re-resolves on each retry, and
+  // this is what makes that worth doing on a WAN.
+  if (cfg.rendezvous) {
+    const rv = require('./rendezvous');
+    for (let attempt = 1; ; attempt++) {
+      const got = await rv.resolve(cfg.rendezvous,
+        { pin: cfg.hubPin || null, maxAgeMs: cfg.rendezvousMaxAgeMs });
+      if (got.ok) {
+        log(`rendezvous → ${got.host}:${got.port} (${got.did}, ` +
+            `${(got.ageMs / 1000).toFixed(0)}s old)` +
+            (cfg.hubPin ? ' — matches pinned did' : ''));
+        return { host: got.host, port: got.port };
+      }
+      if (attempt <= 3 || attempt % 10 === 0) {
+        log(`rendezvous ${cfg.rendezvous} unusable: ${got.why} (attempt ${attempt})`);
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
   if (cfg.hubHost !== 'discover') {
     return { host: cfg.hubHost || '127.0.0.1', port: cfg.hubPort || 47180 };
   }
@@ -141,5 +175,5 @@ async function resolveHubTarget(cfg, log = () => {}) {
 
 module.exports = {
   BEACON_PORT, startBeacon, discoverHub, resolveHubTarget, didOf,
-  broadcastAddrs, beaconTargets,
+  broadcastAddrs, beaconTargets, localAddrs,
 };

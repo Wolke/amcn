@@ -33,6 +33,8 @@ const IMPLS = {
   // Wraps one of the above and injects faults (§ fault-injection-plan).
   // Never a default: a scenario opts in with AMCN_TRANSPORT=chaos.
   chaos: './transport-chaos',
+  // Encrypted + identity-authenticated, for links that leave the LAN (#44).
+  secure: './transport-secure',
 };
 
 function get(name) {

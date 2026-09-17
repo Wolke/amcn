@@ -21,7 +21,12 @@ const T = require('./lib/transport');
 
 const BASE_OFFSET = Number(process.env.DEMO_PORT_OFFSET || 500);
 // 兩次 demo.js 各自需要一整組埠（hub/beacon/fake provider/console）。
-const OFFSETS = { tcp: BASE_OFFSET, http: BASE_OFFSET + 100 };
+// Three implementations now: the encrypted one (#44) has to produce the
+// same ledger as the plaintext ones, or "replaceable transport" is not true
+// of the one we would actually deploy across locations.
+const KINDS = ['tcp', 'http', 'secure'];
+const OFFSETS = { tcp: BASE_OFFSET, http: BASE_OFFSET + 100,
+                  secure: BASE_OFFSET + 200 };
 const MISMATCH_PORT = 47900 + BASE_OFFSET;
 const RUN_TIMEOUT_MS = 90000;
 
@@ -94,13 +99,18 @@ async function main() {
   console.log('== W10: 第二個 ITransport 實作 — 同一本帳，兩種傳輸 ==');
   console.log(`   可用實作：${T.names().join(', ')}\n`);
 
-  console.log(`-- 1/2 tcp（埠偏移 ${OFFSETS.tcp}）--`);
-  const tcp = await runDemo('tcp');
-  console.log(`   ${tcp.summary || '(無結論)'}  fingerprint ${tcp.fingerprint || '(無)'}`);
-  console.log(`-- 2/2 http（埠偏移 ${OFFSETS.http}）--`);
-  const http = await runDemo('http');
-  console.log(`   ${http.summary || '(無結論)'}  fingerprint ${http.fingerprint || '(無)'}\n`);
-  for (const r of [tcp, http]) r.fails.forEach((l) => console.log(`   ${r.kind}${l}`));
+  const runs = {};
+  let i = 0;
+  for (const kind of KINDS) {
+    i += 1;
+    console.log(`-- ${i}/${KINDS.length} ${kind}（埠偏移 ${OFFSETS[kind]}）--`);
+    runs[kind] = await runDemo(kind);
+    console.log(`   ${runs[kind].summary || '(無結論)'}  ` +
+      `fingerprint ${runs[kind].fingerprint || '(無)'}`);
+  }
+  console.log('');
+  const tcp = runs.tcp, http = runs.http, secure = runs.secure;
+  for (const r of Object.values(runs)) r.fails.forEach((l) => console.log(`   ${r.kind}${l}`));
 
   const httpAtTcp = await mismatch('tcp', 'http', MISMATCH_PORT);
   const tcpAtHttp = await mismatch('http', 'tcp', MISMATCH_PORT + 1);
@@ -113,14 +123,17 @@ async function main() {
     tcp.code === 0 && /^結果：(\d+)\/\1 PASS$/.test(tcp.summary), tcp.summary);
   check('http：同一場 demo 在第二實作上全過',
     http.code === 0 && /^結果：(\d+)\/\1 PASS$/.test(http.summary), http.summary);
-  check('§2.1 可替換性：兩種傳輸產生同一本帳（fingerprint 相同）',
-    !!tcp.fingerprint && tcp.fingerprint === http.fingerprint,
-    tcp.fingerprint === http.fingerprint
-      ? `${(tcp.fingerprint || '').slice(0, 16)}… 相同（收據/事件/餘額/額度/驗收方式全等）`
-      : `tcp ${tcp.fingerprint} vs http ${http.fingerprint}`);
-  check('兩次執行真的用了各自的傳輸（Hub 啟動 log 自報）',
-    tcp.announced && http.announced,
-    `tcp 自報 ${tcp.announced}, http 自報 ${http.announced}`);
+  check('secure：加密實作上同樣全過（#44）',
+    secure.code === 0 && /^結果：(\d+)\/\1 PASS$/.test(secure.summary), secure.summary);
+  const prints = KINDS.map((k) => runs[k].fingerprint);
+  check('§2.1 可替換性：三種傳輸產生同一本帳（fingerprint 相同）',
+    !!prints[0] && new Set(prints).size === 1,
+    new Set(prints).size === 1
+      ? `${(prints[0] || '').slice(0, 16)}… 相同（收據/事件/餘額/額度/驗收方式全等）`
+      : KINDS.map((k, n) => `${k} ${prints[n]}`).join(' vs '));
+  check('三次執行真的用了各自的傳輸（Hub 啟動 log 自報）',
+    KINDS.every((k) => runs[k].announced),
+    KINDS.map((k) => `${k} ${runs[k].announced}`).join(', '));
   check('混用傳輸（http client → tcp hub）：雙方都明確拒絕，不是靜默卡住',
     httpAtTcp.serverSpoke && httpAtTcp.clientSpoke && !httpAtTcp.accepted,
     `server 出聲 ${httpAtTcp.serverSpoke}, client 出聲 ${httpAtTcp.clientSpoke}`);
@@ -134,8 +147,7 @@ async function main() {
   console.log(`\n結果：${results.length - failed}/${results.length} PASS`);
   if (failed) {
     console.log('\n--- 失敗時可看完整輸出 ---');
-    console.log(tcp.out.split('\n').slice(-25).join('\n'));
-    console.log(http.out.split('\n').slice(-25).join('\n'));
+    for (const k of KINDS) console.log(runs[k].out.split('\n').slice(-20).join('\n'));
   }
   process.exit(failed ? 1 : 0);
 }

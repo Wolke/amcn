@@ -14,6 +14,8 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 const transport = require('./lib/transport').get('tcp'); // sampling is never faulted
+const { identityFromSeed } = require('./lib/wire');
+const { didOf } = require('./lib/discovery');
 const inv = require('./lib/invariants');
 
 const SHA_OK = [{ op: 'sha256_eq' }, { op: 'max_len', arg: 64 }];
@@ -64,12 +66,19 @@ async function runScenario(file) {
   // restart it — the W10 drill as a timeline action rather than a person
   // pulling a cable.
   const dumpPath = path.join(dir, `${sc.name}-ledger.json`);
+  const rvPath = path.join(dir, `${sc.name}-rendezvous.json`);
+  const hubId = identityFromSeed(`chaos-${sc.name}`);
+  const hubDid = didOf(hubId.pub);
   let hubProc = null;
-  const startHub = (withImport) => {
+  let hubPort = PORT;            // a scenario can move the hub (#45)
+  const startHub = (withImport, port = hubPort) => {
+    hubPort = port;
     hubProc = spawnProc('hub', 'hub.js', {
       ...chaosEnv('hub'),
-      HUB_PORT: String(PORT), HUB_BEACON: '0', HUB_SEED: `chaos-${sc.name}`,
+      HUB_PORT: String(port), HUB_BEACON: '0', HUB_SEED: `chaos-${sc.name}`,
       HUB_DUMP_PATH: dumpPath, HUB_DUMP_MS: '2000',
+      HUB_ADVERTISE_HOST: '127.0.0.1',
+      ...(sc.rendezvous ? { HUB_RENDEZVOUS: rvPath, HUB_RENDEZVOUS_MS: '5000' } : {}),
       ...(withImport && fs.existsSync(dumpPath) ? { HUB_IMPORT: dumpPath } : {}),
     });
   };
@@ -82,12 +91,16 @@ async function runScenario(file) {
     (sc.profile ? `, profile ${JSON.stringify(sc.profile)}` : ''));
 
   fs.rmSync(dumpPath, { force: true });
+  fs.rmSync(rvPath, { force: true });
   startHub(false);
   await sleep(600);
   for (let i = 1; i <= (sc.verifiers || 3); i++) {
     spawnProc(`V${i}`, 'verifier.js', {
       ...chaosEnv('panel'),
-      AGENT_CONFIG: JSON.stringify({ name: `V${i}`, hubPort: PORT, seed: `cv-${i}` }),
+      AGENT_CONFIG: JSON.stringify({
+        name: `V${i}`, seed: `cv-${i}`,
+        ...(sc.rendezvous ? { rendezvous: rvPath, hubPin: hubDid } : { hubPort: PORT }),
+      }),
     });
   }
   await sleep(400);
@@ -99,7 +112,8 @@ async function runScenario(file) {
       ...chaosEnv('agents'),
       [`K${name}`]: `sk-chaos-${name}`,
       AGENT_CONFIG: JSON.stringify({
-        name, seed: `ca-${name}`, hubPort: PORT, consolePort: CONSOLE0 + i,
+        name, seed: `ca-${name}`, consolePort: CONSOLE0 + i,
+        ...(sc.rendezvous ? { rendezvous: rvPath, hubPin: hubDid } : { hubPort: PORT }),
         adapter: { baseUrl: null, key: { env: `K${name}` } },
         provide: { afterMs: 0, pricePerUnit: 1 + i * 0.05, repayment: true },
         posts: [],
@@ -124,7 +138,7 @@ async function runScenario(file) {
 
   const ask = (type, want) => new Promise((resolve) => {
     const t = setTimeout(() => { try { c.close(); } catch {} resolve(null); }, 5000);
-    const c = transport.dial({ port: PORT });
+    const c = transport.dial({ port: hubPort });
     c.onMessage((m) => {
       if (m.type !== want) return;
       clearTimeout(t); c.close(); resolve(m);
@@ -151,8 +165,10 @@ async function runScenario(file) {
         return;
       }
       if (step.action === 'startHub') {
-        startHub(step.import !== false);
-        const how = step.import === false ? '空帳本' : '從自動匯出重建';
+        const port = step.portDelta ? PORT + step.portDelta : hubPort;
+        startHub(step.import !== false, port);
+        const how = (step.import === false ? '空帳本' : '從自動匯出重建') +
+          (step.portDelta ? `，換到埠 ${port}` : '');
         timeline.push(`T+${nowS(t0)}s  Hub 回來（同 seed，${how}）`);
         console.log(`T+${nowS(t0)}s  Hub 回來（同 seed，${how}）`);
         return;

@@ -109,6 +109,15 @@ let cpKeptAt = 0;
 const events = [];          // {kind, ref, postings, receipt_idx?}
 // Stats replayed from an import, adopted when the DID registers.
 const importedStats = new Map();
+// Every public key ever seen, not just the ones currently connected. The
+// export used to derive this from the live `agents` map, so a dump taken
+// while nobody was connected carried no keys — and since the auto-dump
+// overwrites the same file every couple of seconds, one such moment
+// replaced a good backup with one that cannot verify a single receipt.
+// HUB_IMPORT then refuses to start and the ledger is unrecoverable. #17 added
+// the auto-dump so recovery would not depend on a person; this is the part
+// that made it able to poison itself.
+const pubkeys = new Map();
 const rawLog = [];
 
 const bal = (a) => balances.get(a) || 0;
@@ -481,7 +490,7 @@ function handleForced(msg, chan) {
 function buildExport() {
   return {
     receipts,
-    pubkeys: Object.fromEntries([...agents].map(([d, a]) => [d, a.pub])),
+    pubkeys: Object.fromEntries(pubkeys),
     balances: Object.fromEntries(balances),
     credit_lines: Object.fromEntries(
       [...agents].filter(([, a]) => a.role === 'agent')
@@ -563,6 +572,7 @@ if (process.env.HUB_IMPORT) {
   // ledger does not justify. The agent entry is created on registration;
   // park the stats until then.
   for (const [did, st] of r.stats) importedStats.set(did, st);
+  for (const [did, pub] of Object.entries(r.pubkeys || {})) pubkeys.set(did, pub);
   console.log(`[hub] rebuilt from ${file}: ${r.summary.receipts} receipts, ` +
     `${r.summary.events} events, ${r.summary.accounts} accounts, ` +
     `${r.summary.checkpoints} checkpoints — all signatures and chains verified` +
@@ -623,6 +633,7 @@ transport.listen({
               : (importedStats.get(msg.did) || eeff.newStats()),
             role: msg.role || 'agent',
           });
+          pubkeys.set(msg.did, msg.pub);
           balances.set(msg.did, bal(msg.did));
           // Hand back what this identity already holds. A seeded agent that
           // restarts keeps its DID and therefore its debt (§4 #17), but its
@@ -744,6 +755,22 @@ transport.listen({
         'so agents pinning it (hubPin) must be reconfigured after a restart');
     }
     startAutoDump();
+  // §4 #45: publish where I am, signed, so clients on other networks can
+  // find me and keep finding me after a move. The file is data, not a
+  // service — put it anywhere stable.
+  if (process.env.HUB_RENDEZVOUS) {
+    const rv = require('./lib/rendezvous');
+    const where = process.env.HUB_RENDEZVOUS;
+    const host = process.env.HUB_ADVERTISE_HOST ||
+      (BIND === '0.0.0.0' ? (discovery.localAddrs()[0] || '127.0.0.1') : BIND);
+    const republish = () => {
+      try { rv.publish(hubId, { host, port: PORT }, where); }
+      catch (err) { console.error(`[hub] rendezvous publish failed: ${err.message}`); }
+    };
+    republish();
+    setInterval(republish, Number(process.env.HUB_RENDEZVOUS_MS || 60000)).unref();
+    console.log(`[hub] rendezvous published → ${where} (${host}:${PORT})`);
+  }
     if (CANARY_DID) {
       console.log(`[hub] canary issuer authorised: ${CANARY_DID} ` +
         '(may spend Treasury on decoy tasks)');

@@ -54,8 +54,12 @@ const TRANSPORT_ERROR = 'transport_error';
 // it.
 const HEARTBEAT_MS = Number(process.env.AMCN_HEARTBEAT_MS || 5000);
 const IDLE_TIMEOUT_MS = Number(process.env.AMCN_IDLE_TIMEOUT_MS || 20000);
-const PING = 'ping';
-const PONG = 'pong';
+// Underscore-prefixed because these are channel-layer frames, not protocol
+// messages, and an application type called `ping` would otherwise be
+// swallowed silently — which cost a debugging round the first time a test
+// named a message `pong`. The prefix is reserved for the channel.
+const PING = '_ping';
+const PONG = '_pong';
 
 function createChannel({ remote, write, close, isClosed, label = 'wire',
                         heartbeat = true }) {

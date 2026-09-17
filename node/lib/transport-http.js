@@ -33,9 +33,22 @@ const pass = (hook, text, deliver, remote) =>
 
 function listen({ port, host = '127.0.0.1', onChannel, onError, onListening,
                  hooks = {} }) {
-  const open = new Map(); // cid -> channel
+  const open = new Map(); // cid -> { chan, h }  (hooks are per connection)
 
   const server = http.createServer((req, res) => {
+    // #13/#34 isolated frame handlers; the transport's own request handling
+    // sat outside that. A ReferenceError in here took the whole hub down and
+    // every client saw ECONNREFUSED — the failure looks like "the hub was
+    // never up", which is exactly the misdiagnosis this guard prevents.
+    try {
+      handle(req, res);
+    } catch (err) {
+      console.error(`[wire] request handler threw: ${err.message}`);
+      try { res.writeHead(500).end(); } catch { /* already sent */ }
+    }
+  });
+
+  function handle(req, res) {
     const url = new URL(req.url, 'http://amcn.invalid');
     if (req.method === 'GET' && url.pathname === '/amcn/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -56,13 +69,17 @@ function listen({ port, host = '127.0.0.1', onChannel, onError, onListening,
       });
       res.flushHeaders();
       const remote = `${req.socket.remoteAddress} (http ${cid.slice(0, 8)})`;
-      const chan = createChannel({
+      const rawWrite = (out) => res.write(out);
+      let h = typeof hooks === 'function' ? {} : hooks;
+      let chan;
+      chan = createChannel({
         remote,
-        write: (s) => pass(hooks.onWrite, s, (out) => res.write(out), remote),
+        write: (s) => pass(h.onWrite, s, rawWrite, remote),
         close: () => res.end(),
         isClosed: () => res.writableEnded || res.destroyed,
       });
-      open.set(cid, chan);
+      if (typeof hooks === 'function') h = hooks(chan, rawWrite) || {};
+      open.set(cid, { chan, h });
       const hb = setInterval(() => {
         if (!chan.destroyed) res.write('\n');
       }, HEARTBEAT_MS);
@@ -77,8 +94,8 @@ function listen({ port, host = '127.0.0.1', onChannel, onError, onListening,
     }
 
     if (req.method === 'POST' && url.pathname === '/amcn/send') {
-      const chan = open.get(String(req.headers['x-amcn-cid'] || ''));
-      if (!chan) {
+      const conn = open.get(String(req.headers['x-amcn-cid'] || ''));
+      if (!conn) {
         res.writeHead(409, { 'content-type': 'application/json' });
         return res.end(JSON.stringify({ type: 'transport_error',
           why: 'no open stream for this connection id' }) + '\n');
@@ -98,7 +115,7 @@ function listen({ port, host = '127.0.0.1', onChannel, onError, onListening,
       req.on('end', () => {
         if (oversize) return;
         res.writeHead(204).end();
-        pass(hooks.onData, body, (out) => chan.feed(out), chan.remote);
+        pass(conn.h.onData, body, (out) => conn.chan.feed(out), conn.chan.remote);
       });
       return undefined;
     }
@@ -106,7 +123,7 @@ function listen({ port, host = '127.0.0.1', onChannel, onError, onListening,
     res.writeHead(404, { 'content-type': 'application/json' });
     return res.end(JSON.stringify({ type: 'transport_error',
       why: `no such endpoint: ${req.method} ${url.pathname}` }) + '\n');
-  });
+  }
 
   // A peer on the tcp transport sends '{"v":1,...}', which is not a request
   // line: node reports HPE_INVALID_METHOD and we would otherwise close in
@@ -122,7 +139,7 @@ function listen({ port, host = '127.0.0.1', onChannel, onError, onListening,
   server.listen(port, host, () => onListening && onListening({ port, host }));
   return {
     close: (cb) => {
-      for (const chan of open.values()) chan.close();
+      for (const { chan } of open.values()) chan.close();
       server.close(cb);
     },
     port, host, name,
@@ -141,10 +158,12 @@ function dial({ port, host = '127.0.0.1', hooks = {} }) {
   let outbox = '', sending = false;
 
   const remote = `${host}:${port} (http)`;
-  const chan = createChannel({
+  const rawWrite = (out) => { outbox += out; pump(); };
+  let h = typeof hooks === 'function' ? {} : hooks;
+  let chan;
+  chan = createChannel({
     remote,
-    write: (s) => pass(hooks.onWrite, s,
-      (out) => { outbox += out; pump(); }, remote),
+    write: (s) => pass(h.onWrite, s, rawWrite, remote),
     close: () => {
       closed = true;
       streamReq.destroy();
@@ -152,6 +171,7 @@ function dial({ port, host = '127.0.0.1', hooks = {} }) {
     },
     isClosed: () => closed,
   });
+  if (typeof hooks === 'function') h = hooks(chan, rawWrite) || {};
 
   function pump() {
     if (sending || closed || !streaming || !outbox) return;
@@ -204,7 +224,7 @@ function dial({ port, host = '127.0.0.1', hooks = {} }) {
     }
     streaming = true;
     res.setEncoding('utf8');
-    res.on('data', (t) => pass(hooks.onData, t, (out) => chan.feed(out), remote));
+    res.on('data', (t) => pass(h.onData, t, (out) => chan.feed(out), remote));
     res.on('close', () => chan.emitClose());
     pump();
   });

@@ -226,6 +226,9 @@ function rebuild(ex, opts = {}) {
     balances, chains, stakes,
     stats,
     creditLines,
+    // Handed back so a rebuilt hub keeps every key it was given, rather
+    // than re-deriving them from whoever happens to reconnect.
+    pubkeys,
     checkpoints: cps,
     // Sparse storage (§4 #41) means the array length no longer implies the
     // sequence position, so a rebuilt hub has to be told where to resume

@@ -35,12 +35,21 @@ const pass = (hook, text, deliver, remote) =>
   (hook ? hook(text, deliver, remote) : deliver(text));
 
 function wrap(sock, remote, { sniff = false, hooks = {} } = {}) {
-  const chan = createChannel({
+  // hooks may be a plain object (one fault policy for every channel, which
+  // is what chaos wants) or a factory called once per channel with a raw
+  // writer. The factory form exists because an encrypted transport needs
+  // per-connection state *and* a way to put its handshake on the wire in
+  // plaintext, underneath its own encryption.
+  const rawWrite = (out) => sock.write(out);
+  let h = typeof hooks === 'function' ? {} : hooks;
+  let chan;
+  chan = createChannel({
     remote,
-    write: (s) => pass(hooks.onWrite, s, (out) => sock.write(out), remote),
+    write: (s) => pass(h.onWrite, s, rawWrite, remote),
     close: () => sock.destroy(),
     isClosed: () => sock.destroyed,
   });
+  if (typeof hooks === 'function') h = hooks(chan, rawWrite) || {};
   // Unhandled 'error' on a socket is fatal to the process; a peer that
   // disconnects mid-frame (ECONNRESET) must not be able to do that. Log it
   // rather than swallowing it — silently dropping ECONNREFUSED turns "cannot
@@ -58,7 +67,7 @@ function wrap(sock, remote, { sniff = false, hooks = {} } = {}) {
         return refuseHttp(sock);
       }
     }
-    pass(hooks.onData, chunk.toString('utf8'), (out) => chan.feed(out), remote);
+    pass(h.onData, chunk.toString('utf8'), (out) => chan.feed(out), remote);
   });
   return chan;
 }
