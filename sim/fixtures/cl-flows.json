@@ -1,0 +1,89 @@
+{
+  "_comment": "跨語言信用額度對照的共用流水（紅隊盤點 E5）。每一步是一筆已結算的交易：payer 付 amount 給 payee。兩個實作各自重放同一組流水，逐步輸出每個 agent 的信用額度，差異即為實作分歧。流水刻意包含：單一對手集中（洗量形態）、多對手分散、以及一個只收不付的帳戶。",
+  "starter_cc": 50,
+  "age_days": 0,
+  "agents": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E"
+  ],
+  "flows": [
+    {
+      "payer": "A",
+      "payee": "B",
+      "amount": 10
+    },
+    {
+      "payer": "A",
+      "payee": "B",
+      "amount": 10
+    },
+    {
+      "payer": "A",
+      "payee": "B",
+      "amount": 10
+    },
+    {
+      "payer": "C",
+      "payee": "B",
+      "amount": 5
+    },
+    {
+      "payer": "D",
+      "payee": "B",
+      "amount": 5
+    },
+    {
+      "payer": "E",
+      "payee": "B",
+      "amount": 5
+    },
+    {
+      "payer": "B",
+      "payee": "A",
+      "amount": 8
+    },
+    {
+      "payer": "C",
+      "payee": "A",
+      "amount": 8
+    },
+    {
+      "payer": "D",
+      "payee": "A",
+      "amount": 8
+    },
+    {
+      "payer": "E",
+      "payee": "A",
+      "amount": 8
+    },
+    {
+      "payer": "B",
+      "payee": "C",
+      "amount": 12
+    },
+    {
+      "payer": "A",
+      "payee": "C",
+      "amount": 12
+    },
+    {
+      "payer": "D",
+      "payee": "C",
+      "amount": 3
+    },
+    {
+      "payer": "E",
+      "payee": "D",
+      "amount": 20
+    },
+    {
+      "payer": "E",
+      "payee": "D",
+      "amount": 20
+    }
+  ]
+}

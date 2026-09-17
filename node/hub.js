@@ -118,6 +118,18 @@ const importedStats = new Map();
 // the auto-dump so recovery would not depend on a person; this is the part
 // that made it able to poison itself.
 const pubkeys = new Map();
+// When each DID first registered, so the bootstrap line can ramp the way the
+// simulator's does (E5). Persisted with the ledger: an identity that survives
+// a restart must not have its age reset, or #17's whole point is lost.
+const joinedAt = new Map();
+// 30 days in production; harnesses compress it so a demo is not stuck at half
+// the starter line for its entire few seconds of life.
+const AGE_RAMP_MS = Number(process.env.HUB_AGE_RAMP_MS || 30 * 24 * 3600 * 1000);
+const ageFactorOf = (did) => {
+  const since = joinedAt.get(did);
+  if (!since) return 0;
+  return Math.max(0, Math.min(1, (Date.now() - since) / AGE_RAMP_MS));
+};
 // The full-traffic audit log the NFR-005 plaintext scan reads. Bounded,
 // because it is the dominant term in a long run: 20 minutes of the soak
 // produced 5.4 MB of it against 1.3 MB of actual ledger, and it used to be
@@ -137,7 +149,9 @@ function recordRaw(line) {
 const bal = (a) => balances.get(a) || 0;
 const statsOf = (did) => agents.get(did)?.stats;
 const clOf = (did) =>
-  agents.has(did) ? eeff.creditLine(did, agents.get(did).stats, statsOf) : 0;
+  agents.has(did)
+    ? eeff.creditLine(did, agents.get(did).stats, statsOf, ageFactorOf(did))
+    : 0;
 
 function broadcast(obj, exceptDid) {
   for (const [did, a] of agents) if (did !== exceptDid && a.chan) a.chan.send(obj);
@@ -509,6 +523,7 @@ function buildExport({ includeRawLog = true } = {}) {
   return {
     receipts,
     pubkeys: Object.fromEntries(pubkeys),
+    joined_at: Object.fromEntries(joinedAt),
     balances: Object.fromEntries(balances),
     credit_lines: Object.fromEntries(
       [...agents].filter(([, a]) => a.role === 'agent')
@@ -591,6 +606,7 @@ if (process.env.HUB_IMPORT) {
   // park the stats until then.
   for (const [did, st] of r.stats) importedStats.set(did, st);
   for (const [did, pub] of Object.entries(r.pubkeys || {})) pubkeys.set(did, pub);
+  for (const [did, at] of Object.entries(ex.joined_at || {})) joinedAt.set(did, at);
   console.log(`[hub] rebuilt from ${file}: ${r.summary.receipts} receipts, ` +
     `${r.summary.events} events, ${r.summary.accounts} accounts, ` +
     `${r.summary.checkpoints} checkpoints — all signatures and chains verified` +
@@ -652,6 +668,7 @@ transport.listen({
             role: msg.role || 'agent',
           });
           pubkeys.set(msg.did, msg.pub);
+          if (!joinedAt.has(msg.did)) joinedAt.set(msg.did, Date.now());
           balances.set(msg.did, bal(msg.did));
           // Hand back what this identity already holds. A seeded agent that
           // restarts keeps its DID and therefore its debt (§4 #17), but its

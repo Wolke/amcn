@@ -65,7 +65,7 @@ const exportFrom = (port) => new Promise((resolve, reject) => {
 async function main() {
   fs.mkdirSync(path.join(__dirname, 'out'), { recursive: true });
 
-  spawnProc('hub.js', { HUB_PORT: String(PORT_A), HUB_BEACON: '0', HUB_SEED });
+  spawnProc('hub.js', { HUB_PORT: String(PORT_A), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0', HUB_SEED });
   await new Promise((r) => setTimeout(r, 500));
   for (let i = 1; i <= 3; i++) {
     spawnProc('verifier.js', cfg({ name: `V${i}`, seed: `demo-rebuild-V${i}` }));

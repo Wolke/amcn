@@ -67,6 +67,9 @@ cd node && node redteam.js
 # W11 紅隊第二批（約 40 秒，9 案：惡意參與者——不交付的 provider、沉默的 verifier）
 cd node && node redteam-agents.js
 
+# 信用額度跨語言對照（模擬器 vs 原型，逐步比對同一組流水）
+cd node && node cl-compare.js
+
 # 還債政策參數掃描（折價 × band 定義 × 情境，約 10 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_repay
 

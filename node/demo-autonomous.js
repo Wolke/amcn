@@ -124,7 +124,7 @@ const agentCfg = (o) => ({
 async function main() {
   const procs = [];
   procs.push(spawnProc('hub.js', {
-    HUB_PORT: String(PORT), HUB_BEACON: '0',
+    HUB_PORT: String(PORT), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0',
   }));
   await new Promise((r) => setTimeout(r, 400));
   for (const v of ['V1', 'V2', 'V3']) {

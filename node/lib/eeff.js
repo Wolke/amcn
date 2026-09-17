@@ -2,8 +2,9 @@
 // effective_contribution + credit_limit (GATE-0 round 2, findings F-1/F-4).
 // Parameters per the sweep recommendation: starter 50 CC, risk fee 6%/2%.
 //
-// Prototype simplification: age factor fixed at 1 (a demo runs for
-// seconds, not 30 days); production uses account age like the sim.
+// The age ramp is real now (E5): the hub passes a factor derived from when
+// the DID first registered. Harnesses compress the ramp so a demo still runs
+// in seconds — see HUB_AGE_RAMP_MS.
 'use strict';
 
 const STARTER_CC = Number(process.env.DEMO_STARTER_CC || 50);
@@ -48,15 +49,27 @@ function effectiveContribution(myDid, myStats, statsOf) {
   return weighted.reduce((s, v) => s + Math.min(v, 0.20 * (total - v)), 0);
 }
 
-function creditLine(myDid, myStats, statsOf) {
+// ageFactor ∈ [0,1] ramps the bootstrap line, exactly as the simulator does
+// (`credit_limit` in sim/amcn_sim/agents.py): a brand-new account gets half
+// the starter, reaching the full amount as the account ages. The prototype
+// used to fix this at 1, which the cross-language comparison (E5) showed was
+// the *entire* divergence between the two implementations — a constant 25 CC
+// on every step, i.e. day-zero credit at twice the intended bootstrap.
+//
+// It also settles what §2.2's "L_boot 上限 25 CC" meant: not a stale value
+// contradicting GATE-0's starter of 50, but the effective line at t=0 with
+// that starter. Both numbers were right; #1 conflated them, and so did my
+// ruling on it.
+function creditLine(myDid, myStats, statsOf, ageFactor = 1) {
   const contribution = Math.min(
     effectiveContribution(myDid, myStats, statsOf), 2000);
   const diversity = Math.min(1, myStats.earnedBy.size / 8);
   const done = myStats.completed + myStats.failed;
   const completionRate = done ? myStats.completed / done : 0.9; // prior
   const quality = 0.25 + 0.75 * completionRate;
-  const line = (STARTER_CC + 0.35 * contribution * (0.3 + 0.7 * diversity))
-    * quality;
+  const age = Math.max(0, Math.min(1, ageFactor));
+  const line = (STARTER_CC * (0.5 + 0.5 * age)
+    + 0.35 * contribution * (0.3 + 0.7 * diversity)) * quality;
   return Math.min(HARD_CAP_CC, Math.max(0, line));
 }
 

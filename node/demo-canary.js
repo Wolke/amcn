@@ -50,7 +50,7 @@ const agentCfg = (o, extra) => ({
 async function main() {
   const procs = [];
   procs.push(spawnProc('hub.js', {
-    HUB_PORT: String(PORT), HUB_BEACON: '0',
+    HUB_PORT: String(PORT), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0',
     // The issuer is authorised by DID, which is why canary.js derives its
     // identity from a seed: the hub has to know it before it starts.
     HUB_CANARY_DID: CANARY.did,

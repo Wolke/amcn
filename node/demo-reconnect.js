@@ -55,7 +55,7 @@ const agentCfg = (o) => ({
   A_KEY: 'sk-recon-A', B_KEY: 'sk-recon-B', C_KEY: 'sk-recon-C',
 });
 const hubEnv = (extra) => ({
-  HUB_PORT: String(PORT), HUB_BEACON: '0', HUB_SEED,
+  HUB_PORT: String(PORT), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0', HUB_SEED,
   HUB_DUMP_PATH: DUMP, HUB_DUMP_MS: '1000', ...extra,
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -91,7 +91,7 @@ async function main() {
   console.log(`   transport: ${transport.name} (AMCN_TRANSPORT)\n`);
   const procs = [];
   procs.push(spawnProc('hub.js',
-    { HUB_PORT: String(PORT), HUB_BEACON_PORT: String(BEACON_PORT) }));
+    { HUB_PORT: String(PORT), HUB_AGE_RAMP_MS: '1', HUB_BEACON_PORT: String(BEACON_PORT) }));
   procs.push(spawnProc('fake-provider.js', { FAKE_PORT: String(FAKE_A_PORT), FAKE_KEY: KEY_A }));
   procs.push(spawnProc('fake-provider.js', { FAKE_PORT: String(FAKE_B_PORT), FAKE_KEY: KEY_B }));
   await new Promise((r) => setTimeout(r, 300));

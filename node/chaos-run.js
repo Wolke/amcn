@@ -75,7 +75,7 @@ async function runScenario(file) {
     hubPort = port;
     hubProc = spawnProc('hub', 'hub.js', {
       ...chaosEnv('hub'),
-      HUB_PORT: String(port), HUB_BEACON: '0', HUB_SEED: `chaos-${sc.name}`,
+      HUB_PORT: String(port), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0', HUB_SEED: `chaos-${sc.name}`,
       HUB_DUMP_PATH: dumpPath, HUB_DUMP_MS: '2000',
       HUB_ADVERTISE_HOST: '127.0.0.1',
       ...(sc.rendezvous ? { HUB_RENDEZVOUS: rvPath, HUB_RENDEZVOUS_MS: '5000' } : {}),

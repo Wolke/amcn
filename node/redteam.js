@@ -65,7 +65,7 @@ async function main() {
     AGENT_CONFIG: JSON.stringify({ hubPort: PORT, adapter: null, posts: [], ...o }),
     ...extra,
   });
-  spawnProc('hub.js', { HUB_PORT: String(PORT), HUB_BEACON: '0', HUB_SEED: 'redteam' });
+  spawnProc('hub.js', { HUB_PORT: String(PORT), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0', HUB_SEED: 'redteam' });
   await sleep(600);
   for (const v of ['V1', 'V2', 'V3']) {
     spawnProc('verifier.js', cfg({ name: v, seed: `rt-${v}` }));

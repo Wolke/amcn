@@ -59,7 +59,7 @@ const status = async (port) => {
 async function main() {
   console.log('== W11 紅隊第二批：惡意參與者 ==\n');
 
-  spawnProc('hub', 'hub.js', { HUB_PORT: String(PORT), HUB_BEACON: '0', HUB_SEED: 'rt2' });
+  spawnProc('hub', 'hub.js', { HUB_PORT: String(PORT), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0', HUB_SEED: 'rt2' });
   await sleep(600);
   // V3 commits and never reveals (#26); V1/V2 are honest.
   spawnProc('V1', 'verifier.js', cfg({ name: 'V1', seed: 'rt2-V1' }));
