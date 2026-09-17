@@ -73,6 +73,9 @@ cd node && node cl-compare.js
 # 還債政策參數掃描（折價 × band 定義 × 情境，約 10 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_repay
 
+# 保證金掃描（推廣額度 × 保證金 × 折扣率，三種子，約 5 分鐘）
+cd sim && python3 -u -m amcn_sim.sweep_deposit
+
 # 保管費掃描（費率 × 收取模式 × N，三種子，約 8 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_demurrage
 

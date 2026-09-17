@@ -21,6 +21,9 @@ INSURANCE = "protocol:insurance"
 # 保管費的中繼帳戶（#66 的 redistribute 模式）。刻意與 Treasury 分開：收益
 # 與回流是兩個不同的目的，混在同一個帳戶裡就分不出哪一筆錢在做哪件事。
 DEMURRAGE_POOL = "protocol:demurrage"
+# 保證金託管帳戶。抵押時為負（持有人把 CC 移進來即形成該帳戶的負餘額側），
+# 沒收時沖銷——與 Treasury 分開，因為它不是收入。
+COLLATERAL = "protocol:collateral"
 LOSS = "protocol:loss"
 
 
@@ -105,13 +108,26 @@ class Ledger:
         postings.extend(Posting(aid, amt) for aid, amt in payouts)
         return self.post(tick, "canary", contract_id, postings)
 
-    def write_off(self, tick: int, account: str) -> float:
-        """Absorb a defaulted negative balance: insurance pool first,
-        protocol:loss for the uncovered remainder."""
+    def write_off(self, tick: int, account: str,
+                  collateral_cc: float = 0.0) -> float:
+        """Absorb a defaulted negative balance: 保證金 → 保險池 → protocol:loss.
+
+        保證金先賠（登記簿 #65）：它是抵押品，存在的目的就是在這一刻被拿走。
+        順序重要——先扣保證金才看得出保險池真正承擔了多少。
+        """
         bal = self.balances.get(account, 0.0)
         if bal >= 0:
             return 0.0
         debt = -bal
+        from_col = min(debt, max(0.0, collateral_cc))
+        self.last_collateral_seized = from_col
+        if from_col > 0:
+            # 保證金由持有人提供，記為對該帳戶的抵扣：Σ 仍為 0。
+            self.post(tick, "collateral_seized", f"collateral:{account}:{tick}",
+                      [Posting(account, from_col), Posting(COLLATERAL, -from_col)])
+            debt -= from_col
+            if debt <= 1e-12:
+                return from_col
         from_ins = min(debt, max(0.0, self.balances.get(INSURANCE, 0.0)))
         postings = [Posting(account, debt)]
         if from_ins > 0:
@@ -140,6 +156,10 @@ class Ledger:
         self.post(tick, "demurrage", f"demurrage:{account}:{tick}",
                   [Posting(account, -take), Posting(dest, take)])
         return take
+
+    # 上一次 write_off 沒收到的保證金金額。呼叫端要分辨「保證金賠掉多少」
+    # 與「保險池賠掉多少」，而 write_off 的回傳值是總吸收額。
+    last_collateral_seized: float = 0.0
 
     def balance(self, account: str) -> float:
         return self.balances.get(account, 0.0)

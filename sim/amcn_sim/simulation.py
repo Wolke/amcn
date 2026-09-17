@@ -30,6 +30,11 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         n_verifiers: int = 9, verifier_rate: float = 0.04,
         canary_rate: float = 0.03, verifier_lazy_frac: float = 0.0,
         verifier_stake_cc: float = 50.0,
+        # 保證金（#65）。deposit_cc 是每個 agent 抵押的金額；
+        # deposit_deadbeats_only 用來回答「只有壞人會被沒收，好人只是被凍結
+        # 資金」這個不對稱是否成立。
+        deposit_cc: float = 0.0,
+        deposit_ltv: float = 1.0,
         # 保管費（登記簿 #66）。rate 是每天對正餘額收取的比例；idle_days 只
         # 對「連續這麼多天沒有動過」的餘額收費（鼓勵流動），0 表示對所有正
         # 餘額收（純收益）。dest 決定它是回流還是抽稅：
@@ -47,6 +52,7 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
     # 每個帳戶最後一次**支出**的 tick。用支出而非任何分錄，見下方註解。
     last_move: dict[str, int] = {}
     seen_events = 0
+    defaults: list[dict] = []          # 每個違約身分拿走多少、賠掉多少
     agents = {a.aid: a for a in build_population(
         n_agents, seed, deadbeat_frac, washer_frac, expiry_cliff)}
     ledger = Ledger()
@@ -55,6 +61,10 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                       if a.behavior == "honest"
                       and a.mean_daily_demand * a.cycle_days > a.quota_capacity),
                      None)
+    if deposit_cc > 0:
+        for a in agents.values():
+            a.collateral_cc = deposit_cc
+            a.collateral_ltv = deposit_ltv
     verifiers = build_verifiers(n_verifiers, seed,
                                 lazy_frac=verifier_lazy_frac,
                                 stake_cc=verifier_stake_cc)
@@ -165,7 +175,14 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                 if (not a.online and a.exit_tick is not None
                         and tick - a.exit_tick >= 14 * TICKS_PER_DAY
                         and ledger.balance(a.aid) < 0):
-                    ledger.write_off(tick, a.aid)
+                    # 違約前的負餘額就是這個身分實際「拿走」的價值；
+                    # 保證金抵掉一部分，剩下的才是網路的損失（#65）。
+                    took = -ledger.balance(a.aid)
+                    ledger.write_off(tick, a.aid, a.collateral_cc)
+                    seized = ledger.last_collateral_seized
+                    defaults.append({"aid": a.aid, "took_cc": took,
+                                     "collateral_cc": a.collateral_cc,
+                                     "seized_cc": seized})
 
             day = tick // TICKS_PER_DAY
             debtors = [x for x in agents.values()
@@ -194,7 +211,8 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
             ))
 
     finalize(report, agents, ledger, market, ticks,
-             lambda a, t: credit_limit(a, t, agents, market.starter_cc))
+             lambda a, t: credit_limit(a, t, agents, market.starter_cc),
+             defaults=defaults)
     if market.trace:
         report.trace_agent = market.trace
         report.trace_lines = list(market.trace_log)

@@ -50,6 +50,12 @@ class Report:
     # 的問題不是他們賺多少，而是賺到的錢**留在那裡不動**，離開了交易流通。
     verifier_balance_cc: float = 0.0
     demurrage_collected_cc: float = 0.0
+    # 每個違約身分平均拿走多少、保證金沒收多少（#65）。單身分淨賺＝
+    # took − seized，就是 Sybil 攻擊的每身分期望收益。
+    defaults_n: int = 0
+    default_took_avg_cc: float = 0.0
+    default_seized_avg_cc: float = 0.0
+    default_net_take_avg_cc: float = 0.0
     verifier_fee_share: float = 0.0        # fees / settled volume
     mean_verifier_revenue_cc: float = 0.0
     min_verifier_revenue_cc: float = 0.0
@@ -100,7 +106,8 @@ def median_price_in(market: Market, tick_lo: int, tick_hi: int) -> float | None:
 
 
 def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
-             market: Market, ticks: int, credit_limit_fn) -> Report:
+             market: Market, ticks: int, credit_limit_fn,
+             defaults: list[dict] | None = None) -> Report:
     s = market.stats
     report.fill_rate = s.matched / s.posted if s.posted else 0.0
     report.expired_rate = s.expired / s.posted if s.posted else 0.0
@@ -181,6 +188,14 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
         report.conservation_ok = False
     # --- verification market (§4 #25) --------------------------------
     vs = [v for v in getattr(market, 'verifiers', [])]
+    if defaults:
+        report.defaults_n = len(defaults)
+        report.default_took_avg_cc = statistics.mean(
+            d["took_cc"] for d in defaults)
+        report.default_seized_avg_cc = statistics.mean(
+            d["seized_cc"] for d in defaults)
+        report.default_net_take_avg_cc = statistics.mean(
+            d["took_cc"] - d["seized_cc"] for d in defaults)
     report.verifier_fees_cc = market.verifier_fees_cc
     report.verifier_balance_cc = sum(
         max(0.0, ledger.balance(v.vid)) for v in getattr(market, 'verifiers', []) or [])

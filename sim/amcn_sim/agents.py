@@ -112,6 +112,12 @@ class Agent:
     exit_tick: int | None = None        # deadbeats: tick they vanish
 
     # --- runtime stats (feed the credit-line algorithm, SDD §14.3) ---
+    # INV-C1 的 collateral 項（登記簿 #65，Owner 提議的保證金）。存在於
+    # 不變式裡很久了，但模擬器與原型都沒有實作，所以「保證金能不能壓住
+    # Sybil」從來沒有被算過。
+    collateral_cc: float = 0.0
+    collateral_ltv: float = 1.0        # 抵押折扣：解鎖額度 ÷ 抵押金額
+
     joined_tick: int = 0
     online: bool = True
     earned_cc: float = 0.0
@@ -213,8 +219,16 @@ def credit_limit(a: Agent, tick: int, peers: dict[str, Agent] | None = None,
     quality_factor = 0.25 + 0.75 * a.completion_rate()
     dispute_penalty = max(0.0, 1.0 - 4.0 * a.dispute_rate())
     earned_line = 0.35 * contribution * (0.3 + 0.7 * diversity)
+    # 保證金不乘 quality：它是真實抵押品，不該因為帳戶年輕或紀錄少而打折。
+    # 這也讓下面那個算式變得明顯——保證金把上限抬高的幅度**正好等於**它自己，
+    # 所以對一個打算違約的人來說它是損益中性的：抵押 D、借走 D+L_boot、
+    # 違約、賠掉 D，淨賺 L_boot。真正限制 Sybil 的是無擔保的那一段。
+    # collateral_ltv < 1 是抵押折扣：抵押 D 只解鎖 D×ltv 的額度。LTV=1（原本
+    # 的寫法）對打算違約的人是損益中性的——抵押 D、借走 D+L_boot、違約、賠掉
+    # D，淨賺 L_boot。折扣才讓違約變成虧損：淨賺 = L_boot − D×(1−ltv)。
     limit = (starter_cc * (0.5 + 0.5 * age_factor) + earned_line) \
-        * quality_factor * dispute_penalty
+        * quality_factor * dispute_penalty \
+        + a.collateral_cc * a.collateral_ltv
     return max(0.0, min(limit, 500.0))                       # hard network cap
 
 
