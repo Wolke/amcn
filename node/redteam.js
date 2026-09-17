@@ -244,6 +244,8 @@ async function main() {
       contract_id: `c-rt-evil-${seq}`,
       requester: X.did, provider: Y.did, price_cc: price,
       acceptance_method: 'dsl-local',
+      tx_class: 'market',        // labelled, so the case under test is the
+                                 // one named, not the tx_class check (#20-9)
       verifier_pool: [], verifier_pool_hash: panelLib.poolHash([]),
       panel_seed_cp: 0,
       // The schedule the hub will recompute: fee 2.5% to treasury, risk 6%
@@ -322,6 +324,17 @@ async function main() {
     panel_seed_cp: 999999 } });
   check('S7', '種子 checkpoint 指向未來（尚未鑄造）', 'block',
     !s7 || !/not minted yet/.test(s7.why || ''), s7 ? s7.why : '無回應');
+
+  // Deleted, not set to undefined: `undefined` survives in the object the
+  // signature is computed over but vanishes from the JSON on the wire, so
+  // the hub rejects it as a bad signature and the tx_class check never runs.
+  const s10 = await submit({ fix: (r) => { delete r.tx_class; } });
+  check('S10', '未標示 tx_class 的結算（§20-9）', 'block',
+    !s10 || !/tx_class must be one of/.test(s10.why || ''), s10 ? s10.why : '無回應');
+
+  const s11 = await submit({ receipt: { tx_class: 'definitely-real-trade' } });
+  check('S11', '自創 tx_class 值', 'block',
+    !s11 || !/tx_class must be one of/.test(s11.why || ''), s11 ? s11.why : '無回應');
 
   const s8 = await submit({ fix: (r) => { r.postings[0].amount_cc = -1; } });
   check('S8', 'requester 少付、其餘照領', 'block',

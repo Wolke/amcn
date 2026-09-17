@@ -703,6 +703,15 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
           // instead of trusting a payee list, and so the receipt is
           // self-contained for offline audit.
           acceptance_method: c.acceptance.method,
+          // §20-9 / FR-083: test, subsidy and related-party trade must be
+          // separable from real trade, or every market metric is a mix of
+          // things that mean different things. Declared by the requester,
+          // carried in the signed receipt, and checked by the hub — which
+          // can only verify what it can observe, see the honesty note in
+          // §4 #63.
+          tx_class: (cfg.txClass) ||
+            (cfg.relatedTo && cfg.relatedTo.includes(pf.provider)
+              ? 'related-party' : 'market'),
           verifier_pool: c.verifier_pool || [],
           verifier_pool_hash: c.verifier_pool_hash || null,
           panel_seed_cp: c.panel_seed_cp,

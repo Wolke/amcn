@@ -87,7 +87,10 @@ const hmac = (key, s) =>
 // register_ack). A v1 client would register, never acknowledge, and sit
 // permanently not-online — a silent failure, which is precisely what the
 // version gate exists to convert into a loud one.
-const PROTOCOL_VERSION = 2;
+// v3: receipts must declare tx_class (§20-9). A v2 client's receipt would
+// otherwise be refused by the schedule validator with a confusing message
+// instead of at the version gate, which is what #33 exists to prevent.
+const PROTOCOL_VERSION = 3;
 
 module.exports = {
   genIdentity, identityFromSeed, canon, sign, verify, sha256, hmac,

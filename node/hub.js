@@ -36,6 +36,11 @@ const INSURANCE = 'protocol:insurance';
 // target is met: a new verifier has little at risk and earns little, and
 // works its way to full standing — the same shape as the credit line.
 const STAKE = 'protocol:stake';
+// FR-083 / §20-9. `market` is the only class that counts as real trade;
+// `test` is a rehearsal, `subsidy` is Treasury-funded (canary decoys,
+// bootstrap grants) and `related-party` is trade between identities the
+// requester itself declares as related.
+const TX_CLASSES = new Set(['market', 'test', 'subsidy', 'related-party']);
 const STAKE_TARGET_CC = Number(process.env.HUB_STAKE_TARGET_CC || 5);
 const STAKE_ESCROW_FRAC = Number(process.env.HUB_STAKE_ESCROW_FRAC || 0.5);
 // proposal-C §7: 「Treasury 定期以隨機身分發布已知答案任務」. The issuer is a
@@ -86,7 +91,11 @@ function applyPostings(kind, ref, postings) {
     balances.set(p.account, bal(p.account) + p.amount_cc);
     chainAppend(p.account, idx, p.amount_cc);
   }
-  events.push({ kind, ref, postings, receipt_idx: idx });
+  // Internal accounting movements are not trade at all; labelling them keeps
+  // them out of every market figure without anyone having to remember to
+  // filter by `kind` at the call site.
+  events.push({ kind, ref, postings, receipt_idx: idx,
+                tx_class: kind === 'canary' ? 'subsidy' : 'protocol' });
   makeCheckpoint();
   return true;
 }
@@ -136,6 +145,10 @@ const ageFactorOf = (did) => {
 // re-serialised into the disaster dump every couple of seconds. A recent
 // window is what the scan needs; the ledger never needed it at all.
 const RAW_LOG_MAX_BYTES = Number(process.env.HUB_RAW_LOG_MAX_BYTES || 2 * 1024 * 1024);
+// What the hub relays is enough for the market figures: it sees every task
+// broadcast, every bid and every award go past.
+const market = { tasks: 0, bids: 0, contracts: new Set() };
+
 const rawLog = [];
 let rawLogBytes = 0;
 function recordRaw(line) {
@@ -180,7 +193,8 @@ function feeTerms(requesterDid, price, panelSize = 0) {
 function chainAppend(account, receiptIdx, delta) {
   const chain = chains.get(account) || [];
   // Shared with lib/rebuild.js so an append and a replay cannot disagree.
-  chain.push(rebuildLib.chainEntry(account, chain, receiptIdx, delta, bal(account)));
+  chain.push(rebuildLib.chainEntry(account, chain, receiptIdx, delta,
+    bal(account), Date.now()));
   chains.set(account, chain);
 }
 function makeCheckpoint() {
@@ -246,6 +260,15 @@ function validateSchedule(receipt, chan, ref, attestations) {
   }
   const sum = receipt.postings.reduce((s, p) => s + p.amount_cc, 0);
   if (Math.abs(sum) > 1e-9) { fail(chan, `postings sum ${sum} != 0`, ref); return false; }
+  // §20-9: every settlement declares what kind of trade it is, so market
+  // metrics can exclude test and subsidised volume. Unlabelled is refused
+  // rather than defaulted — a default would silently relabel whatever the
+  // sender forgot, which is how measurement lies start.
+  if (!TX_CLASSES.has(receipt.tx_class)) {
+    fail(chan, `tx_class must be one of ${[...TX_CLASSES].join('/')}, ` +
+      `got ${receipt.tx_class === undefined ? '(absent)' : receipt.tx_class}`, ref);
+    return false;
+  }
   const price = -receipt.postings.find((p) => p.account === receipt.requester).amount_cc;
   // §4 #5: a judge-quorum settlement must pay the panel, and the hub derives
   // that panel itself from the receipt's pinned pool and future seed — the
@@ -513,6 +536,74 @@ function handleForced(msg, chan) {
     { requester: `pre_auth:${pre_auth_sig}`, provider: provider_sig }, evidence);
 }
 
+// §20-10: 成交率、供需深度、違約率、平均還債時間.
+//
+// Derived here rather than read off anyone's console, because FR-083 asks
+// the simulator and production to share metric definitions and a console is
+// one agent's private view. Everything below comes from what the hub has
+// relayed or settled, so a third party can recompute it from the export.
+//
+// The class split is the point (§20-9): a figure that mixes subsidised
+// decoys and rehearsal traffic into "market volume" is not a market figure.
+function buildMetrics() {
+  const byClass = {};
+  const bump = (cls, field, n = 1) => {
+    byClass[cls] = byClass[cls] || { settlements: 0, volume_cc: 0 };
+    byClass[cls][field] += n;
+  };
+  for (const r of receipts) {
+    const cls = r.receipt.tx_class || 'unlabelled';
+    const price = -(r.receipt.postings
+      .find((p) => p.account === r.receipt.requester) || { amount_cc: 0 }).amount_cc;
+    bump(cls, 'settlements');
+    bump(cls, 'volume_cc', +price.toFixed(4));
+  }
+  for (const e of events) {
+    if (e.tx_class !== 'subsidy') continue;
+    const out = e.postings.filter((p) => p.amount_cc > 0)
+      .reduce((t, p) => t + p.amount_cc, 0);
+    bump('subsidy', 'volume_cc', +out.toFixed(4));
+  }
+
+  // Repayment time from the signed chains: how long an account stayed below
+  // zero. Same definition the simulator uses, computable by anyone holding
+  // the export.
+  const episodes = [];
+  for (const [, chain] of chains) {
+    let since = null;
+    for (const e of chain) {
+      if (e.balance_after < 0 && since === null) since = e.at || null;
+      else if (e.balance_after >= 0 && since !== null) {
+        if (e.at) episodes.push(e.at - since);
+        since = null;
+      }
+    }
+  }
+  const avgRepay = episodes.length
+    ? Math.round(episodes.reduce((t, x) => t + x, 0) / episodes.length) : null;
+
+  const awarded = market.contracts.size;
+  return {
+    tasks_broadcast: market.tasks,
+    bids_seen: market.bids,
+    // 供需深度: how many providers actually competed for each task.
+    avg_bids_per_task: market.tasks
+      ? +(market.bids / market.tasks).toFixed(2) : 0,
+    contracts_awarded: awarded,
+    // 成交率: awarded contracts that reached settlement.
+    fill_rate: awarded ? +(receipts.length / awarded).toFixed(3) : 0,
+    // 違約率 proxy: awarded and never settled. Not the same as a written-off
+    // default — the prototype has no write-off path, so this is the closest
+    // honest measure and is named as a proxy rather than dressed up.
+    unsettled_awarded: Math.max(0, awarded - receipts.length),
+    default_proxy_rate: awarded
+      ? +((awarded - receipts.length) / awarded).toFixed(3) : 0,
+    avg_repayment_ms: avgRepay,
+    repayment_episodes: episodes.length,
+    by_class: byClass,
+  };
+}
+
 // One definition of the export, shared by the `export` message and the
 // auto-dump, so a dumped ledger can never differ from a queried one.
 // includeRawLog=false for the disaster dump: recovery needs receipts,
@@ -524,6 +615,7 @@ function buildExport({ includeRawLog = true } = {}) {
     receipts,
     pubkeys: Object.fromEntries(pubkeys),
     joined_at: Object.fromEntries(joinedAt),
+    metrics: buildMetrics(),
     balances: Object.fromEntries(balances),
     credit_lines: Object.fromEntries(
       [...agents].filter(([, a]) => a.role === 'agent')
@@ -701,6 +793,7 @@ transport.listen({
           console.log(`[hub] task ${msg.task.task_id} broadcast ` +
             `(${msg.task.units}u, max ${msg.task.max_price_cc} CC, ` +
             `acceptance ${msg.task.acceptance.method})`);
+          market.tasks += 1;
           broadcast(msg, msg.task.requester);
           break;
         }
@@ -734,7 +827,13 @@ transport.listen({
                            panel: msg.panel || [], verifier_shares: verifierShares });
           break;
         }
-        case 'bid': case 'contract': case 'contract_ack': case 'delivery':
+        case 'bid': case 'contract':
+          if (msg.type === 'bid') market.bids += 1;
+          if (msg.type === 'contract' && msg.contract) {
+            market.contracts.add(msg.contract.contract_id);
+          }
+          // falls through to the relay below
+        case 'contract_ack': case 'delivery':
         case 'delivery_request':
         case 'receipt_half': case 'verify_request': case 'attestation':
         case 'attestation_commit': case 'reveal_request': {

@@ -430,6 +430,22 @@ async function main() {
     wrongVersionRefused && rightVersionWorks,
     `wrong version refused: ${wrongVersionRefused}, current version served: ${rightVersionWorks}`);
 
+  const m = ex.metrics || {};
+  check('§20-9 tx_class：每筆結算都標明種類，未標示者被拒',
+    receipts.every((r) => ['market', 'test', 'subsidy', 'related-party']
+      .includes(r.receipt.tx_class)) &&
+    Object.keys(m.by_class || {}).length > 0,
+    `分類：${Object.entries(m.by_class || {})
+      .map(([k, v]) => `${k} ${v.settlements} 筆／${v.volume_cc.toFixed(2)} CC`).join('，')}`);
+
+  check('§20-10 四項市場指標可由簽署狀態導出',
+    m.tasks_broadcast > 0 && m.avg_bids_per_task > 0 &&
+    m.fill_rate > 0 && m.avg_repayment_ms !== null,
+    `成交率 ${m.fill_rate}（${receipts.length}/${m.contracts_awarded}）、` +
+    `供需深度 ${m.avg_bids_per_task} 個出價/任務、` +
+    `違約代理 ${m.default_proxy_rate}、還債 ${m.avg_repayment_ms}ms ` +
+    `（${m.repayment_episodes} 次）`);
+
   check('畸形 frame 不能打掉 Hub（§16 區網可用性回歸閘門）', hubSurvived,
     `${JUNK_FRAMES.length} 類畸形 frame 後 Hub 仍正常回應 export`);
 

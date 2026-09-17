@@ -37,7 +37,16 @@ const didOf = (pub) => 'did:demo:' + sha256(pub).slice(0, 16);
 // copies drifted — the replay omitted `account` and rounded delta_cc — so a
 // clean export failed its own verification with "chain hash mismatch". One
 // rule, one implementation.
-function chainEntry(account, chain, receiptIdx, delta, balanceAfter) {
+// `at` is the first timestamp anywhere in the signed data. It is here
+// because §20-10 wants average repayment time and that cannot be derived
+// from a ledger with no clock — and because a replay must reproduce the
+// hash, it has to be part of the hashed body and therefore supplied by the
+// caller rather than read from Date.now() during verification.
+//
+// It does not close §4's "no protocol object carries an expiry": this is a
+// record of when the hub applied a posting, not an expiry anyone can
+// enforce. It also means dumps written before this change no longer verify.
+function chainEntry(account, chain, receiptIdx, delta, balanceAfter, at) {
   const prev = chain.at(-1);
   const entry = {
     account,
@@ -46,6 +55,7 @@ function chainEntry(account, chain, receiptIdx, delta, balanceAfter) {
     receipt_idx: receiptIdx,
     delta_cc: delta,
     balance_after: +balanceAfter.toFixed(6),
+    at: at || 0,
   };
   entry.hash = sha256(canon(entry));
   return entry;
@@ -106,12 +116,21 @@ function rebuild(ex, opts = {}) {
   const stakes = new Map();
   const bal = (a) => balances.get(a) || 0;
 
-  const chainAppend = (account, receiptIdx, delta) => {
-    const chain = chains.get(account) || [];
-    chain.push(chainEntry(account, chain, receiptIdx, delta, bal(account)));
-    chains.set(account, chain);
+  // The timestamp is taken from the export's own chain, because the replay
+  // has to reproduce the hash the hub computed, not invent a new one. If the
+  // export has tampered timestamps the hash check downstream catches it, so
+  // reading them here is not trusting them.
+  const atOf = (account, seq) => {
+    const src = (ex.chains && ex.chains[account]) || [];
+    return (src[seq] && src[seq].at) || 0;
   };
 
+  const chainAppend = (account, receiptIdx, delta) => {
+    const chain = chains.get(account) || [];
+    chain.push(chainEntry(account, chain, receiptIdx, delta, bal(account),
+      atOf(account, chain.length)));
+    chains.set(account, chain);
+  };
   for (const [i, e] of ex.events.entries()) {
     if (!e || !Array.isArray(e.postings)) { fail(`event ${i} malformed`); continue; }
     const sum = e.postings.reduce((t, p) => t + p.amount_cc, 0);
