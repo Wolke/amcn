@@ -60,17 +60,29 @@ async function runScenario(file) {
     AMCN_CHAOS: ctl[target], AMCN_CHAOS_SEED: seed,
   });
 
+  // The hub is spawned through a named helper so a scenario can kill and
+  // restart it — the W10 drill as a timeline action rather than a person
+  // pulling a cable.
+  const dumpPath = path.join(dir, `${sc.name}-ledger.json`);
+  let hubProc = null;
+  const startHub = (withImport) => {
+    hubProc = spawnProc('hub', 'hub.js', {
+      ...chaosEnv('hub'),
+      HUB_PORT: String(PORT), HUB_BEACON: '0', HUB_SEED: `chaos-${sc.name}`,
+      HUB_DUMP_PATH: dumpPath, HUB_DUMP_MS: '2000',
+      ...(withImport && fs.existsSync(dumpPath) ? { HUB_IMPORT: dumpPath } : {}),
+    });
+  };
+  const killHub = () => { try { hubProc.kill('SIGKILL'); } catch { /* gone */ } };
+
   console.log(`\n=== ${sc.name} ===`);
   console.log(`   ${sc.what || ''}`);
   console.log(`   埠 ${PORT}, ${sc.agents} agents, ${sc.verifiers} verifiers, ` +
     `${sc.durationS}s, seed ${seed}, base ${sc.base || 'tcp'}` +
     (sc.profile ? `, profile ${JSON.stringify(sc.profile)}` : ''));
 
-  spawnProc('hub', 'hub.js', {
-    ...chaosEnv('hub'),
-    HUB_PORT: String(PORT), HUB_BEACON: '0', HUB_SEED: `chaos-${sc.name}`,
-    HUB_DUMP_PATH: path.join(dir, `${sc.name}-ledger.json`), HUB_DUMP_MS: '2000',
-  });
+  fs.rmSync(dumpPath, { force: true });
+  startHub(false);
   await sleep(600);
   for (let i = 1; i <= (sc.verifiers || 3); i++) {
     spawnProc(`V${i}`, 'verifier.js', {
@@ -132,6 +144,19 @@ async function runScenario(file) {
 
   for (const step of sc.timeline || []) {
     setTimeout(() => {
+      if (step.action === 'killHub') {
+        killHub();
+        timeline.push(`T+${nowS(t0)}s  殺掉 Hub（SIGKILL，不通知任何人）`);
+        console.log(`T+${nowS(t0)}s  殺掉 Hub（SIGKILL，不通知任何人）`);
+        return;
+      }
+      if (step.action === 'startHub') {
+        startHub(step.import !== false);
+        const how = step.import === false ? '空帳本' : '從自動匯出重建';
+        timeline.push(`T+${nowS(t0)}s  Hub 回來（同 seed，${how}）`);
+        console.log(`T+${nowS(t0)}s  Hub 回來（同 seed，${how}）`);
+        return;
+      }
       setFault(step.target, step.fault);
       const label = step.fault === 'profile' ? 'profile（恢復）'
         : `${step.fault.mode}${step.fault.direction && step.fault.direction !== 'both' ? ` ${step.fault.direction}` : ''}`;

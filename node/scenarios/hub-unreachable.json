@@ -1,0 +1,25 @@
+{
+  "name": "hub-unreachable",
+  "what": "所有 client 的連線同時靜默中斷 80 秒——從它們的角度與「Hub 消失」無法區分。Hub 本身仍在跑，所以取樣器看得見它，可以觀察它那一端怎麼判斷",
+  "portOffset": 1020,
+  "seed": 29,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 200,
+  "sampleS": 10,
+  "maxOpenS": 120,
+  "profile": { "mode": "latency", "latencyMs": 80, "jitterMs": 40 },
+  "timeline": [
+    { "atS": 40, "target": "panel", "fault": { "mode": "blackhole", "direction": "both" } },
+    { "atS": 40, "target": "agents", "fault": { "mode": "blackhole", "direction": "both" } },
+    { "atS": 120, "target": "panel", "fault": "profile" },
+    { "atS": 120, "target": "agents", "fault": "profile" }
+  ],
+  "expect": [
+    { "kind": "invariantsHold" },
+    { "kind": "settlesBefore", "atS": 40 },
+    { "kind": "poolEmptiesWithin", "afterS": 40, "withinS": 45 },
+    { "kind": "poolRefillsWithin", "afterS": 120, "withinS": 45 },
+    { "kind": "settlementResumesWithin", "afterS": 120, "withinS": 70 }
+  ]
+}
