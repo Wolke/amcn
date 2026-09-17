@@ -135,6 +135,7 @@ async function runScenario(file) {
   const settleAt = [];          // seconds since t0 for each settlement seen
   let poolEmptyAt = null, poolRefillAt = null;
   let lastReceipts = 0;
+  const growth = [];            // wall-clock series: RSS and dump size
 
   const ask = (type, want) => new Promise((resolve) => {
     const t = setTimeout(() => { try { c.close(); } catch {} resolve(null); }, 5000);
@@ -208,9 +209,24 @@ async function runScenario(file) {
     }
     const stuck = inv.noStuckContracts(cs, (sc.maxOpenS || 120) * 1000);
     for (const sv of stuck) violations.push(`T+${t}s  noStuckContracts: ${sv}`);
+    // Growth is only visible if something records it: #41 was mis-diagnosed
+    // from a demo-scale extrapolation, and the real driver only showed up
+    // when an hour of wall-clock was measured.
+    let rssMb = null;
+    try {
+      const out = require('node:child_process')
+        .execSync(`ps -o rss= -p ${hubProc.pid}`, { encoding: 'utf8' }).trim();
+      rssMb = (Number(out) / 1024).toFixed(0);
+    } catch { /* hub is down at this sample */ }
+    let dumpKb = null;
+    try { dumpKb = (fs.statSync(dumpPath).size / 1024).toFixed(0); } catch { /* none yet */ }
+    growth.push({ t: Number(t), rssMb: Number(rssMb), dumpKb: Number(dumpKb),
+                  receipts: lastReceipts });
+
     const line = `T+${t}s  pool ${advertised.length}  結算 ${lastReceipts}  ` +
       `合約開啟 ${Object.values(cs).filter(Boolean)
         .reduce((s, c) => s + (c.contracts ? c.contracts.open : 0), 0)}` +
+      (rssMb ? `  hub ${rssMb}MB` : '') + (dumpKb ? `/${dumpKb}KB` : '') +
       (violations.length ? `  違反 ${violations.length}` : '');
     console.log(`   ${line}`);
     timeline.push(line);
@@ -276,6 +292,19 @@ async function runScenario(file) {
         check(`未知期望 ${e.kind}`, false);
     }
   }
+  if (growth.length >= 4 && sc.durationS >= 600) {
+    const a = growth[1], z = growth.at(-1);
+    const mins = (z.t - a.t) / 60 || 1;
+    console.log(`\n-- 成長（${a.t}s → ${z.t}s）--`);
+    console.log(`   Hub RSS  ${a.rssMb}MB → ${z.rssMb}MB  ` +
+      `(${((z.rssMb - a.rssMb) / mins).toFixed(1)} MB/分)`);
+    console.log(`   匯出檔   ${a.dumpKb}KB → ${z.dumpKb}KB  ` +
+      `(${((z.dumpKb - a.dumpKb) / mins).toFixed(1)} KB/分，` +
+      `${z.receipts - a.receipts} 筆結算)`);
+    fs.writeFileSync(path.join(dir, `${sc.name}-growth.json`),
+      JSON.stringify(growth, null, 2));
+  }
+
   const failed = results.filter(([, ok]) => !ok).length;
   console.log(`\n結果：${results.length - failed}/${results.length} PASS  (${sc.name})`);
   if (violations.length) {

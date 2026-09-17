@@ -1,0 +1,25 @@
+{
+  "name": "soak",
+  "what": "無人值守長跑：跨地點延遲下持續交易 40 分鐘，中途注入三次故障。要回答的不是「會不會壞」而是「放著跑會怎樣」——記憶體、匯出檔、句柄的斜率，以及不變式是否在任何一刻被破壞。這是 4 小時演練裡真正需要牆上時鐘的那一半",
+  "portOffset": 1080,
+  "seed": 41,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 2400,
+  "sampleS": 60,
+  "maxOpenS": 150,
+  "profile": { "mode": "latency", "latencyMs": 80, "jitterMs": 40 },
+  "timeline": [
+    { "atS": 600, "target": "panel", "fault": { "mode": "blackhole", "direction": "both" } },
+    { "atS": 700, "target": "panel", "fault": "profile" },
+    { "atS": 1200, "action": "killHub" },
+    { "atS": 1260, "action": "startHub", "import": true },
+    { "atS": 1800, "target": "agents", "fault": { "mode": "loss", "lossPct": 2, "latencyMs": 80, "jitterMs": 40 } },
+    { "atS": 2100, "target": "agents", "fault": "profile" }
+  ],
+  "expect": [
+    { "kind": "invariantsHold" },
+    { "kind": "settlesBefore", "atS": 300 },
+    { "kind": "settlementResumesWithin", "afterS": 1260, "withinS": 180 }
+  ]
+}

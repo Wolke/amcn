@@ -35,7 +35,14 @@ const CONSOLE_BASE = 47211 + OFFSET;
 // until a repayment episode has actually closed, up to MAX_MS. In the common
 // case this is faster than the old fixed sleep.
 const MIN_MS = Number(process.env.DEMO_MIN_MS || 14000);
-const MAX_MS = Number(process.env.DEMO_MAX_MS || 75000);
+// The ceiling is generous on purpose. This assertion is about whether the
+// economy closes a repayment loop unattended, not about how fast — and it
+// flaked once at 75s under the http transport while the machine was also
+// running the scenario suite. A gate that fails under load teaches people to
+// ignore it, which costs more than the extra wall-clock of a run that
+// usually exits at ~20s anyway (it polls and stops as soon as it sees one).
+const MAX_MS = Number(process.env.DEMO_MAX_MS ||
+  (process.env.AMCN_TRANSPORT && process.env.AMCN_TRANSPORT !== 'tcp' ? 150000 : 100000));
 const POLL_MS = 1000;
 
 const results = [];
