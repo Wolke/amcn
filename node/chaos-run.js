@@ -118,8 +118,30 @@ async function runScenario(file) {
         provide: { afterMs: 0, pricePerUnit: 1 + i * 0.05, repayment: true },
         posts: [],
         policy: {
-          quota: { capacityUnits: 40, cycleMs: 3500, cycleOffsetMs: i * 1200 },
-          demand: { meanUnits: 5, tickMs: 900, burstProb: 0.25, burstMultiplier: 4 },
+          // Heterogeneous on purpose. The simulator's size sweep showed that
+          // whether a small network deadlocks depends on whether the
+          // population contains a structural net seller: at N=3 the pinned
+          // fraction across five seeds was 66.7/66.7/66.7/0/33.3. Identical
+          // agents guarantee there is no such seller — so the symmetric
+          // topology every scenario used until now was measuring the worst
+          // case without saying so. `symmetric: true` in a scenario keeps the
+          // old behaviour when the worst case is what you want.
+          // Heterogeneous in *scale*, identical in demand-to-capacity ratio
+          // (8:1). The first attempt varied the ratio — 40/5, 55/3.5, 30/6.5 —
+          // and made things much worse: the surplus agent became a permanent
+          // creditor at +73.97 CC with zero credit events (FR-056's
+          // 正餘額無處可花 again) while the deficit agent hit its ceiling 362
+          // times, and the market produced 25 settlements instead of 209. So
+          // what a small network cannot survive is not heterogeneity, it is a
+          // structural mismatch between an agent's demand and its capacity.
+          quota: {
+            capacityUnits: sc.symmetric ? 40 : [40, 56, 28][i % 3],
+            cycleMs: 3500, cycleOffsetMs: i * 1200,
+          },
+          demand: {
+            meanUnits: sc.symmetric ? 5 : [5, 7, 3.5][i % 3],
+            tickMs: 900, burstProb: 0.25, burstMultiplier: 4,
+          },
           budget: { maxPricePerUnit: 1.3, minUnits: 3, maxUnitsPerTask: 8 },
           acceptance: { method: 'judge-quorum', asserts: SHA_OK },
         },

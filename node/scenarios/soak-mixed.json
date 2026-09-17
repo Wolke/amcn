@@ -1,7 +1,7 @@
 {
-  "name": "soak-short",
-  "what": "15 分鐘壓縮版 soak（**同質人口＝最壞情況**）：模擬掃描顯示小網路是否鎖死取決於有沒有結構性淨賣方，而同質人口保證沒有。完整 40 分鐘版在 soak.json",
-  "portOffset": 1100,
+  "name": "soak-mixed",
+  "what": "15 分鐘 soak（異質人口）：與 soak-short 的唯一差別是三個 agent 的需求與額度不同。兩者對照即可看出「人口組成決定小網路存活」在原型上是否也成立",
+  "portOffset": 1120,
   "seed": 41,
   "agents": 3,
   "verifiers": 3,
@@ -71,5 +71,5 @@
       "maxGapS": 300
     }
   ],
-  "symmetric": true
+  "symmetric": false
 }
