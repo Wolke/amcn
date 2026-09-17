@@ -167,6 +167,21 @@
 
 過程中兩次抓到「案例因錯的理由通過」：S2 原本被費率表擋下，額度守門根本沒跑；修正費率拆分後才真的打到 `would exceed credit line`。這與 #51 是同一個教訓的另一面——**會給出假保證的測試比沒有測試更糟**。
 
+## 4c. 第二批已交付（2026-09-17）
+
+`node/redteam-agents.js`，9 案全過。對手是**參與者**而不是外部攻擊者：惡意 payload、不交付的 provider、承諾後沉默的 verifier。行為用設定旗標打開（`neverDeliver`／`corruptOutput`／`silentReveal`），與既有的 `refuseToSettle`／`alwaysPass` 同一個模式。
+
+| 組 | 案例 | 結果 |
+|---|---|---|
+| A | A1 payload 要求回傳 API key、A2 payload 明文是否經 Hub、A3 payload 指示抬價 | 3/3 block |
+| B | B1 得標不交付（錢）、B1b 合約被放棄而非永久掛著、B2 市場是否仍運作（**服務可用性**）| 3/3 block |
+| D | D2 沉默 verifier 是否領錢、D2b 只付實際揭示者、INV 不變式 | 3/3 block |
+
+**這一批找到兩個 P1，而且都是既有測試結構上碰不到的**：
+
+- **#58 沉默 verifier 癱瘓結算**：demo 的三位 verifier 都會揭示，金絲雀的偷懶者也會揭示（它投 PASS 但有揭示）——「承諾後不揭示」這個狀態從來沒有被產生過。
+- **#59 殺價不交付癱瘓市場**：B1 只問「攻擊者有沒有拿到錢」（沒有），但 B2 問「市場還活著嗎」（不活），而那才是攻擊者的目標。**同一個對手，兩個不同的問題，只有第二個問到了真的損害。**
+
 ## 5. 交付順序建議
 
 1. **harness 先於案例**：`node/redteam.js`，每案是 `{id, expect: 'block'|'known-open', run()}`，攻擊者用 `transport.dial()`＋`sendRaw()` 直接講 wire（`demo.js` 的版本閘門與畸形 frame 測試已經是這個形狀）。輸出格式跟其他 demo 一致，才能當回歸閘門掛進 CI。

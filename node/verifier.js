@@ -97,6 +97,13 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
       case 'reveal_request': {
         const p = pending.get(msg.contract_id);
         if (!p) break;
+        // The verifier that commits and then goes quiet: it should collect
+        // nothing, because #26 pays only those whose reveal opens a
+        // pre-signed commitment. Adversary scaffolding, like alwaysPass.
+        if (cfg.silentReveal) {
+          log(`ADVERSARY: committed ${msg.contract_id} and staying silent`);
+          break;
+        }
         if (!verify(msg.pub, { contract_id: msg.contract_id, reveal: true }, msg.sig)) break;
         const sig = sign(id.privateKey, p.attestation);
         for (const to of [msg.requester, msg.provider]) {

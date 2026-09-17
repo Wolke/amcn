@@ -122,6 +122,35 @@ function requestSettlement(contractId, role, provider, output) {
       return;
     }
     panel = panelLib.deriveDids(contract.verifier_pool, contractId, seedRoot);
+    // Pay the verifiers who actually revealed, not the whole derived panel.
+    // #26 fixed the hub side — it refuses a receipt whose verifier postings
+    // do not match the accountable attesters — but the requester kept
+    // building postings for all three. With 2-of-3 quorum satisfied and one
+    // verifier silent, every settlement was rejected with "verifier postings
+    // 3 != accountable attesters 2", forever: one non-revealing verifier (a
+    // crash, a dropped link, or malice) halted every contract it was
+    // selected for. Found by the red team's silent-verifier case; no demo
+    // covered it, because in all of them every verifier reveals.
+    const ctx = role === 'forced' ? asProvider.get(contractId)
+      : asRequester.get(contractId);
+    const revealed = new Set((ctx.attest || [])
+      .filter((a) => a.nonce && a.commitment &&
+        sha256(canon(a.attestation) + a.nonce) === a.commitment)
+      .map((a) => a.attestation.verifier));
+    if (revealed.size >= 2) {
+      const accountable = panel.filter((d) => revealed.has(d));
+      if (accountable.length !== panel.length) {
+        log(`paying ${accountable.length}/${panel.length} of the panel on ` +
+            `${contractId}: the rest never revealed`);
+      }
+      panel = accountable;
+    }
+    // The evidence bundle must name exactly the verifiers being paid. Paying
+    // a filtered set while attaching everything held made the hub count more
+    // accountable attesters than there were postings, so it refused and the
+    // provider forced the settlement instead — a `dual` silently became a
+    // `forced`. The set is decided once, here, and both halves read it.
+    ctx.payPanel = panel;
   }
   pendingFees.get(contractId).contract = contract;
   hub.send({ type: 'fee_quote', contract_id: contractId, requester, price, panel });
@@ -229,6 +258,7 @@ function armDeliveryTimeout(contractId, provider) {
     }
     ctx.done = true;
     ctx.abandoned = true;
+    noteProvider(provider, 'failed');
     console_.abandoned = (console_.abandoned || 0) + 1;
     log(`ABANDONING ${contractId}: no delivery after ` +
         `${DELIVER_RETRIES + 1} attempts`);
@@ -442,13 +472,23 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
               'work delivered, not paid');
         }, VERIFY_TIMEOUT_MS * (VERIFY_RETRIES + 2));
         asProvider.set(c.contract_id, provEntry);
-        const delivery = { contract_id: c.contract_id, output, provider: id.did };
+        const delivery = { contract_id: c.contract_id,
+          output: cfg.corruptOutput ? `${output}-TAMPERED` : output,
+          provider: id.did };
         // Kept so a lost delivery can be resent on request. Under 5% packet
         // loss the requester had no timeout for AWARDED→DELIVERED at all:
         // contracts sat open for 144s while the work was already done, and
         // the state machine requires every transition to have a timeout.
         provEntry.delivery = delivery;
         provEntry.deliverySig = sign(id.privateKey, delivery);
+        // Adversary scaffolding, same rationale as refuseToSettle: a real
+        // one does not volunteer for the test. neverDeliver takes the award
+        // and goes quiet (threat 4, 收 credit 不做事); corruptOutput
+        // delivers something the locked asserts cannot accept (threat 3).
+        if (cfg.neverDeliver) {
+          log(`ADVERSARY: awarded ${c.contract_id} and delivering nothing`);
+          break;
+        }
         hub.send({ type: 'delivery', to: c.requester, delivery,
                    sig: provEntry.deliverySig, pub: id.pub });
         break;
@@ -457,6 +497,7 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
       case 'delivery_request': { // requester never saw my delivery
         const p = asProvider.get(msg.contract_id);
         if (!p || !p.delivery) break;
+        if (cfg.neverDeliver) break;   // adversary: stays quiet on resends too
         hub.send({ type: 'delivery', to: p.contract.requester,
                    delivery: p.delivery, sig: p.deliverySig, pub: id.pub });
         log(`resent delivery for ${msg.contract_id} on request`);
@@ -478,6 +519,7 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
         if (!ctx || !verify(msg.pub, d, msg.sig)) break;
         clearTimeout(ctx.deliverTimer);
         if (ctx.output) break;            // a resend of what we already have
+        noteProvider(d.provider, 'delivered');
         ctx.output = d.output;
         if (ctx.contract.acceptance.method === 'dsl-local') {
           const { pass, failures } = runAsserts(ctx.asserts,
@@ -576,8 +618,40 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
                                nonce: msg.nonce, commitment: msg.commitment,
                                commit_sig: msg.commit_sig });
           const passes = reqCtx.attest.filter((x) => x.attestation.verdict === 'PASS').length;
+          // Quorum is enough to settle, but settling the instant it is
+          // reached punishes a verifier that reveals milliseconds later: it
+          // did the work, quorum simply did not need it, and it now gets
+          // nothing while the other two split its share. So wait out a short
+          // grace for the rest of the panel — the same shape as #36's
+          // commit-side grace — and settle early only once everyone has
+          // revealed. A genuinely silent verifier costs one grace period,
+          // and #58 still holds: it is not paid.
+          const full = reqCtx.attest.length >= reqCtx.panel.length;
+          if (passes >= 2 && !reqCtx.done && !full && !reqCtx.settleTimer) {
+            const grace = (cfg.policy && cfg.policy.revealGraceMs) || 3000;
+            reqCtx.settleTimer = setTimeout(() => {
+              reqCtx.settleTimer = null;
+              const ps = reqCtx.attest
+                .filter((x) => x.attestation.verdict === 'PASS').length;
+              if (ps >= 2 && !reqCtx.done) {
+                reqCtx.done = true;
+                clearTimeout(reqCtx.verifyTimer);
+                if (cfg.refuseToSettle) {
+                  log(`quorum PASS on ${a.contract_id} — REFUSING to settle (malicious demo)`);
+                } else {
+                  log(`quorum PASS on ${a.contract_id} (${reqCtx.attest.length}/` +
+                      `${reqCtx.panel.length} revealed after grace) → settling`);
+                  requestSettlement(a.contract_id, 'requester',
+                    reqCtx.contract.provider, reqCtx.output);
+                }
+              }
+            }, grace);
+            break;
+          }
           if (passes >= 2 && !reqCtx.done) {
             reqCtx.done = true;
+            clearTimeout(reqCtx.settleTimer);
+            reqCtx.settleTimer = null;
             clearTimeout(reqCtx.verifyTimer);
             if (cfg.refuseToSettle) {
               log(`quorum PASS on ${a.contract_id} — REFUSING to settle (malicious demo)`);
@@ -652,7 +726,8 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
             evidence: {
               contract: e.contract, contract_sigs: e.contract_sigs,
               pre_auth: e.pre_auth, pre_auth_sig: e.pre_auth_sig,
-              attestations: e.attest,
+              attestations: (e.attest || []).filter((a) =>
+                !e.payPanel || e.payPanel.includes(a.attestation.verifier)),
             },
           });
         }
@@ -670,7 +745,15 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
                    sigs: { requester: msg.sig, provider: sign(id.privateKey, r) },
                    // §4 #26: the hub pays the verifiers that actually revealed a
                    // verdict, so it needs the bundle, not just the receipt.
-                   attestations: pc ? pc.attest : [] });
+                   // Exactly the verifiers this receipt pays. The receipt
+                   // itself is the source of truth — the countersigning
+                   // provider has no view of which of them revealed in time,
+                   // and attaching more than are paid makes the hub count
+                   // more accountable attesters than there are postings and
+                   // refuse the settlement.
+                   attestations: (pc ? pc.attest : []).filter((a) =>
+                     r.postings.some((x) => x.account === a.attestation.verifier
+                       && x.amount_cc > 0)) });
         log(`countersigned ${r.contract_id} → submitted`);
         break;
       }
@@ -867,6 +950,29 @@ const AWARD_RETRIES = T.awardRetries == null ? 2 : T.awardRetries;
 const SEED_TIMEOUT_MS = T.seedTimeoutMs || 8000;
 const SEED_RETRIES = T.seedRetries == null ? 3 : T.seedRetries;
 
+// Local reliability, kept by this agent for its own selection decisions.
+// FR-012 makes choosing a winner the requester's prerogative, and the hub's
+// completed/failed stats feed the credit line, not the auction — so a
+// provider that underbids everyone and delivers nothing won every task and
+// the market stopped. Nothing was stolen (no delivery, no settlement, no
+// payment), but that is a denial of service at near-zero cost: identities
+// are free and providers post no stake. Found by the red team's
+// never-deliver case; SDD §16 threat 4 is usually read as theft, and this
+// is the other half of it.
+//
+// Laplace-smoothed so a newcomer starts at parity rather than being frozen
+// out — the cold-start problem this system already worries about elsewhere.
+const providerRep = new Map();
+const repOf = (did) => {
+  const r = providerRep.get(did) || { won: 0, delivered: 0, failed: 0 };
+  return (r.delivered + 1) / (r.won + 1);
+};
+function noteProvider(did, field) {
+  const r = providerRep.get(did) || { won: 0, delivered: 0, failed: 0 };
+  r[field] += 1;
+  providerRep.set(did, r);
+}
+
 const idTag = id.did.slice(-8);
 let postSeq = 0;
 const pausedPosts = [];
@@ -884,8 +990,21 @@ function postTask(post) {
     const fire = () => {
         const { bids } = pendingBids.get(task.task_id);
         if (!bids.length) { log(`no bids for ${task.task_id}`); return; }
-        bids.sort((a, b) => a.price_cc - b.price_cc);
-        const win = bids[0];
+        // Effective price, not raw price: a provider that has taken awards
+        // and delivered nothing has to be much cheaper to stay attractive,
+        // and one that has failed twice with nothing delivered is skipped.
+        const usable = bids.filter((b) => {
+          const r = providerRep.get(b.provider);
+          return !(r && r.failed >= 2 && r.delivered === 0);
+        });
+        const field = usable.length ? usable : bids;
+        field.sort((a, b) => a.price_cc / repOf(a.provider) -
+                             b.price_cc / repOf(b.provider));
+        const win = field[0];
+        if (usable.length < bids.length) {
+          log(`skipping ${bids.length - usable.length} bid(s) from providers ` +
+              'that took awards and never delivered');
+        }
         const contractId = `c-${task.task_id}`;
         const pool = post.acceptance === 'judge-quorum'
           ? [...(verifierDir.verifiers || [])] : [];
@@ -929,6 +1048,7 @@ function postTask(post) {
           // can never settle (#46) and nothing measured their age.
           at: Date.now(),
         });
+        noteProvider(win.provider, 'won');
         armDeliveryTimeout(contractId, win.provider);
         armAwardTimeout(contractId, contract, pre_auth, win.provider);
         log(`selected ${win.provider} @ ${win.price_cc} CC (${bids.length} bids)` +

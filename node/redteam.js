@@ -340,10 +340,14 @@ async function main() {
 
   // G15: equal-price tie-break by arrival order — #23
   const strat = require('node:fs').readFileSync(path.join(__dirname, 'agent.js'), 'utf8');
-  check('G15', '同價以到達順序決勝（#23）', 'known-open',
-    /bids\.sort\(\(a, b\) => a\.price_cc - b\.price_cc\)/.test(strat) &&
-    !/sha256\(.*contract_id.*did/.test(strat),
-    '仍是穩定排序，未改用 sha256(contract_id+did) 決勝');
+  // Source-level, and knowingly weaker than it should be: selection now
+  // sorts by price÷reliability (#59), so equal price *and* equal reliability
+  // still falls through to Array.sort's stability, i.e. arrival order. A
+  // behavioural version — two providers, identical price, identical history,
+  // see who wins repeatedly — belongs in batch three.
+  check('G15', '同價同信譽時仍以到達順序決勝（#23）', 'known-open',
+    /field\.sort\(/.test(strat) && !/sha256\([^)]*contract_id[^)]*did/.test(strat),
+    '穩定排序，未改用 sha256(contract_id+did) 決勝');
 
   const finalEx = await exportLedger();
   const violations = finalEx ? inv.checkLedger(finalEx) : ['無法取得匯出'];
