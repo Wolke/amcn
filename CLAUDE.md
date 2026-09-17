@@ -57,6 +57,13 @@ cd node && node demo-reconnect.js
 # 每支 demo 都可用 DEMO_PORT_OFFSET=100 與跑中的試點並存；
 # AMCN_TRANSPORT=http 可把整個 stack 換到第二個傳輸實作（預設 tcp）
 
+# 故障注入情境（10 個，約 35 分鐘；單跑一個約 3 分鐘）
+cd node && node chaos-run.js scenarios/panel-blackhole.json
+cd node && node chaos-run.js scenarios/*.json
+
+# W11 紅隊第一批（約 40 秒，26 案：協議層攻擊＋串謀結算）
+cd node && node redteam.js
+
 # 還債政策參數掃描（折價 × band 定義 × 情境，約 10 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_repay
 
