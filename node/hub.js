@@ -41,6 +41,19 @@ const STAKE = 'protocol:stake';
 // bootstrap grants) and `related-party` is trade between identities the
 // requester itself declares as related.
 const TX_CLASSES = new Set(['market', 'test', 'subsidy', 'related-party']);
+// Clocks on different machines disagree; the beacon already tolerates 60s
+// (lib/discovery.js) and expiry checks use the same allowance. Refusing a
+// settlement because the requester's clock is a minute fast would be a worse
+// failure than accepting a slightly stale authorisation.
+const CLOCK_SKEW_MS = Number(process.env.HUB_CLOCK_SKEW_MS || 60000);
+// An expiry the hub can check: absent is still accepted for now (a receipt
+// from a client that predates the field), but a *present* one is enforced.
+// Making it mandatory is a separate step from making it work.
+function expired(obj, what) {
+  if (!obj || typeof obj.expires_at !== 'number') return null;
+  const over = Date.now() - (obj.expires_at + CLOCK_SKEW_MS);
+  return over > 0 ? `${what} expired ${Math.round(over / 1000)}s ago` : null;
+}
 const STAKE_TARGET_CC = Number(process.env.HUB_STAKE_TARGET_CC || 5);
 const STAKE_ESCROW_FRAC = Number(process.env.HUB_STAKE_ESCROW_FRAC || 0.5);
 // proposal-C §7: 「Treasury 定期以隨機身分發布已知答案任務」. The issuer is a
@@ -260,6 +273,13 @@ function validateSchedule(receipt, chan, ref, attestations) {
   }
   const sum = receipt.postings.reduce((s, p) => s + p.amount_cc, 0);
   if (Math.abs(sum) > 1e-9) { fail(chan, `postings sum ${sum} != 0`, ref); return false; }
+  // §16 威脅 8: an expired authorisation must not settle. Checked here rather
+  // than trusted from the sender, because the sender is the party that
+  // benefits from a stale one being honoured.
+  {
+    const why = expired(receipt, 'receipt');
+    if (why) { fail(chan, why, ref); return false; }
+  }
   // §20-9: every settlement declares what kind of trade it is, so market
   // metrics can exclude test and subsidised volume. Unlabelled is refused
   // rather than defaulted — a default would silently relabel whatever the
@@ -489,6 +509,10 @@ function handleForced(msg, chan) {
       !verify(req.pub, contract, contract_sigs.requester) ||
       !verify(prov.pub, contract, contract_sigs.provider)) {
     return fail(chan, 'forced: contract not dual-signed by both parties', ref);
+  }
+  for (const [obj, what] of [[contract, 'contract'], [pre_auth, 'pre_authorization']]) {
+    const why = expired(obj, `forced: ${what}`);
+    if (why) return fail(chan, why, ref);
   }
   // 2. requester's standing pre_authorization ("quorum PASS ⇒ settle")
   if (pre_auth.contract_id !== ref || pre_auth.price_cc !== contract.price_cc ||
@@ -828,7 +852,11 @@ transport.listen({
           break;
         }
         case 'bid': case 'contract':
-          if (msg.type === 'bid') market.bids += 1;
+          if (msg.type === 'bid') {
+            const why = expired(msg.bid, 'bid');
+            if (why) { fail(chan, why, msg.bid && msg.bid.task_id); break; }
+            market.bids += 1;
+          }
           if (msg.type === 'contract' && msg.contract) {
             market.contracts.add(msg.contract.contract_id);
           }

@@ -376,10 +376,18 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
           break;
         }
         const unitPrice = strategy.priceFor(cfg.provide.pricePerUnit, mode);
+        // A task past its own expiry gets no bid: bidding on it would produce
+        // a contract the requester must refuse, which is worse than silence.
+        if (msg.task.expires_at && Date.now() > msg.task.expires_at) {
+          log(`ignoring expired task ${msg.task.task_id}`);
+          break;
+        }
         const bid = {
           task_id: msg.task.task_id, provider: id.did,
           price_cc: +(msg.task.units * unitPrice).toFixed(4),
           box_pub: box.boxPub,
+          issued_at: Date.now(),
+          expires_at: Date.now() + BID_TTL_MS,
         };
         bidUnits.set(bid.task_id, msg.task.units);
         hub.send({ type: 'bid', to: msg.task.requester, bid,
@@ -958,6 +966,20 @@ const AWARD_TIMEOUT_MS = T.awardTimeoutMs || 6000;
 const AWARD_RETRIES = T.awardRetries == null ? 2 : T.awardRetries;
 const SEED_TIMEOUT_MS = T.seedTimeoutMs || 8000;
 const SEED_RETRIES = T.seedRetries == null ? 3 : T.seedRetries;
+// §16 威脅 8 / §4 新開口 (a): until now no protocol object carried a time, so
+// nothing expired and a months-old bid or pre_authorization was as valid as a
+// fresh one. The only replay defence was settledIds, which knows about
+// contract_ids that already settled and nothing else.
+//
+// Windows are generous relative to the protocol's own timeouts: a task must
+// outlive the bid window, a contract must outlive verification plus its
+// retries, and a pre_authorization must outlive the forced-settlement path —
+// an expiry that fires during normal operation is worse than none, because it
+// turns a working system into an intermittently broken one.
+const TASK_TTL_MS = T.taskTtlMs || 60000;
+const BID_TTL_MS = T.bidTtlMs || 60000;
+const CONTRACT_TTL_MS = T.contractTtlMs || 600000;
+const PREAUTH_TTL_MS = T.preAuthTtlMs || 900000;
 
 // Local reliability, kept by this agent for its own selection decisions.
 // FR-012 makes choosing a winner the requester's prerogative, and the hub's
@@ -988,11 +1010,14 @@ const pausedPosts = [];
 function postTask(post) {
   postSeq += 1;
   hub.send({ type: 'list_verifiers' }); // refresh panel directory + lock
+  const now = Date.now();
   const task = {
       task_id: `t-${cfg.name}-${idTag}-${postSeq}`,
       requester: id.did,
       units: post.units,
       max_price_cc: post.maxPriceCC,
+      issued_at: now,
+      expires_at: now + TASK_TTL_MS,
       acceptance: { method: post.acceptance,
                     asserts_hash: assertsHash(post.asserts) },
     };
@@ -1002,13 +1027,27 @@ function postTask(post) {
         // Effective price, not raw price: a provider that has taken awards
         // and delivered nothing has to be much cheaper to stay attractive,
         // and one that has failed twice with nothing delivered is skipped.
-        const usable = bids.filter((b) => {
+        const fresh = bids.filter((b) => !b.expires_at || Date.now() <= b.expires_at);
+        if (fresh.length < bids.length) {
+          log(`dropping ${bids.length - fresh.length} expired bid(s) on ${task.task_id}`);
+        }
+        const usable = fresh.filter((b) => {
           const r = providerRep.get(b.provider);
           return !(r && r.failed >= 2 && r.delivered === 0);
         });
-        const field = usable.length ? usable : bids;
-        field.sort((a, b) => a.price_cc / repOf(a.provider) -
-                             b.price_cc / repOf(b.provider));
+        const field = usable.length ? usable : fresh;
+        // §4 #23: equal effective price used to fall through to Array.sort's
+        // stability, i.e. arrival order, so in a homogeneous price market the
+        // earliest-started process won everything — a property of spawn order
+        // rather than of the market. Ties now break on a hash of the task and
+        // the bidder, the same trick the panel derivation uses: deterministic,
+        // verifiable by both sides, and not gameable by connecting first.
+        field.sort((a, b) => {
+          const d = a.price_cc / repOf(a.provider) - b.price_cc / repOf(b.provider);
+          if (Math.abs(d) > 1e-9) return d;
+          return sha256(task.task_id + a.provider)
+            .localeCompare(sha256(task.task_id + b.provider));
+        });
         const win = field[0];
         if (usable.length < bids.length) {
           log(`skipping ${bids.length - usable.length} bid(s) from providers ` +
@@ -1034,8 +1073,11 @@ function postTask(post) {
         const seedCp = verifierDir.next_checkpoint_seq != null
           ? verifierDir.next_checkpoint_seq
           : (verifierDir.lock ? verifierDir.lock.checkpoint_seq + 1 : 0);
+        const awardedAt = Date.now();
         const contract = {
           contract_id: contractId,
+          issued_at: awardedAt,
+          expires_at: awardedAt + CONTRACT_TTL_MS,
           requester: id.did, provider: win.provider, price_cc: win.price_cc,
           payload_box: seal(win.box_pub, post.payload),
           acceptance: task.acceptance,
@@ -1047,7 +1089,9 @@ function postTask(post) {
         };
         const pre_auth = { contract_id: contractId, requester: id.did,
                            provider: win.provider, price_cc: win.price_cc,
-                           condition: 'quorum-accepted' };
+                           condition: 'quorum-accepted',
+                           issued_at: awardedAt,
+                           expires_at: awardedAt + PREAUTH_TTL_MS };
         asRequester.set(contractId, {
           contract, contract_sigs: {}, payload: post.payload,
           asserts: post.asserts, pool, panel: null,

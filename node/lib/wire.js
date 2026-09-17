@@ -90,7 +90,11 @@ const hmac = (key, s) =>
 // v3: receipts must declare tx_class (§20-9). A v2 client's receipt would
 // otherwise be refused by the schedule validator with a confusing message
 // instead of at the version gate, which is what #33 exists to prevent.
-const PROTOCOL_VERSION = 3;
+// v4: task/bid/contract/pre_authorization carry issued_at and expires_at,
+// and the hub enforces them (§16 威脅 8). A v3 client's objects have no
+// expiry; they would still be accepted, but a v3 *hub* would ignore a v4
+// client's expiry entirely, which is the direction that matters.
+const PROTOCOL_VERSION = 4;
 
 module.exports = {
   genIdentity, identityFromSeed, canon, sign, verify, sha256, hmac,

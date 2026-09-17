@@ -336,6 +336,15 @@ async function main() {
   check('S11', '自創 tx_class 值', 'block',
     !s11 || !/tx_class must be one of/.test(s11.why || ''), s11 ? s11.why : '無回應');
 
+  // Signed by both parties and internally consistent — only the clock says
+  // no. The attacker cannot backdate someone else's expiry (it is inside the
+  // signed body), but it can sign its own stale one, which is the case the
+  // hub has to refuse.
+  const s12 = await submit({ receipt: {
+    issued_at: Date.now() - 3600000, expires_at: Date.now() - 1800000 } });
+  check('S12', '已過期但簽章有效的結算（§16 威脅 8）', 'block',
+    !s12 || !/expired/.test(s12.why || ''), s12 ? s12.why : '無回應');
+
   const s8 = await submit({ fix: (r) => { r.postings[0].amount_cc = -1; } });
   check('S8', 'requester 少付、其餘照領', 'block',
     !s8 || !/postings sum|fee schedule/.test(s8.why || ''), s8 ? s8.why : '無回應');
@@ -345,11 +354,14 @@ async function main() {
 
   console.log('\n== 已知開口（攻擊成功才是 PASS）==');
 
-  // F4: no protocol object carries an expiry — §4 新開口 (a)
-  const oldBid = before.receipts[0];
-  check('F4', '協議物件無時效欄位（過期物件可重放）', 'known-open',
-    !('expires_at' in oldBid.receipt) && !('issued_at' in oldBid.receipt),
-    '收據／合約／pre_auth 都沒有 issued_at 或 expires_at');
+  // F4 used to be a known-open: nothing carried a time, so nothing expired.
+  const ev0 = (forced && forced.evidence) || {};
+  check('F4', '協議物件帶有時效欄位（§16 威脅 8）', 'block',
+    !(ev0.contract && typeof ev0.contract.expires_at === 'number' &&
+      typeof ev0.pre_auth.expires_at === 'number'),
+    ev0.contract
+      ? `合約與 pre_auth 都帶 issued_at／expires_at`
+      : '本輪無 forced 收據可檢查');
 
   // G15: equal-price tie-break by arrival order — #23
   const strat = require('node:fs').readFileSync(path.join(__dirname, 'agent.js'), 'utf8');
@@ -358,9 +370,9 @@ async function main() {
   // still falls through to Array.sort's stability, i.e. arrival order. A
   // behavioural version — two providers, identical price, identical history,
   // see who wins repeatedly — belongs in batch three.
-  check('G15', '同價同信譽時仍以到達順序決勝（#23）', 'known-open',
-    /field\.sort\(/.test(strat) && !/sha256\([^)]*contract_id[^)]*did/.test(strat),
-    '穩定排序，未改用 sha256(contract_id+did) 決勝');
+  check('G15', '同價同信譽時以雜湊決勝，不是到達順序（#23）', 'block',
+    !/sha256\(task\.task_id \+ a\.provider\)/.test(strat),
+    '選標在價格與信譽相同時以 sha256(task_id+provider) 決勝');
 
   const finalEx = await exportLedger();
   const violations = finalEx ? inv.checkLedger(finalEx) : ['無法取得匯出'];
