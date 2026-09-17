@@ -1,0 +1,69 @@
+{
+  "name": "soak-short",
+  "what": "15 分鐘壓縮版 soak：量成長斜率用。完整的 40 分鐘版在 soak.json，適合過夜跑",
+  "portOffset": 1100,
+  "seed": 41,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 900,
+  "sampleS": 60,
+  "maxOpenS": 150,
+  "profile": {
+    "mode": "latency",
+    "latencyMs": 80,
+    "jitterMs": 40
+  },
+  "timeline": [
+    {
+      "atS": 240,
+      "target": "panel",
+      "fault": {
+        "mode": "blackhole",
+        "direction": "both"
+      }
+    },
+    {
+      "atS": 320,
+      "target": "panel",
+      "fault": "profile"
+    },
+    {
+      "atS": 480,
+      "action": "killHub"
+    },
+    {
+      "atS": 540,
+      "action": "startHub",
+      "import": true
+    },
+    {
+      "atS": 660,
+      "target": "agents",
+      "fault": {
+        "mode": "loss",
+        "lossPct": 2,
+        "latencyMs": 80,
+        "jitterMs": 40
+      }
+    },
+    {
+      "atS": 810,
+      "target": "agents",
+      "fault": "profile"
+    }
+  ],
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 180
+    },
+    {
+      "kind": "settlementResumesWithin",
+      "afterS": 540,
+      "withinS": 180
+    }
+  ]
+}

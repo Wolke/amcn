@@ -118,7 +118,21 @@ const importedStats = new Map();
 // the auto-dump so recovery would not depend on a person; this is the part
 // that made it able to poison itself.
 const pubkeys = new Map();
+// The full-traffic audit log the NFR-005 plaintext scan reads. Bounded,
+// because it is the dominant term in a long run: 20 minutes of the soak
+// produced 5.4 MB of it against 1.3 MB of actual ledger, and it used to be
+// re-serialised into the disaster dump every couple of seconds. A recent
+// window is what the scan needs; the ledger never needed it at all.
+const RAW_LOG_MAX_BYTES = Number(process.env.HUB_RAW_LOG_MAX_BYTES || 2 * 1024 * 1024);
 const rawLog = [];
+let rawLogBytes = 0;
+function recordRaw(line) {
+  rawLog.push(line);
+  rawLogBytes += line.length + 1;
+  while (rawLogBytes > RAW_LOG_MAX_BYTES && rawLog.length > 1) {
+    rawLogBytes -= rawLog.shift().length + 1;
+  }
+}
 
 const bal = (a) => balances.get(a) || 0;
 const statsOf = (did) => agents.get(did)?.stats;
@@ -487,7 +501,11 @@ function handleForced(msg, chan) {
 
 // One definition of the export, shared by the `export` message and the
 // auto-dump, so a dumped ledger can never differ from a queried one.
-function buildExport() {
+// includeRawLog=false for the disaster dump: recovery needs receipts,
+// events, chains, checkpoints and pubkeys, and lib/rebuild.js verifies from
+// exactly those. Carrying the audit log as well made the dump 4x larger than
+// the ledger it exists to protect, rewritten on every interval.
+function buildExport({ includeRawLog = true } = {}) {
   return {
     receipts,
     pubkeys: Object.fromEntries(pubkeys),
@@ -504,7 +522,7 @@ function buildExport() {
     canary_scored: [...canarySeen],
     events,
     hub_pub: hubId.pub,
-    raw_log: rawLog.join('\n'),
+    ...(includeRawLog ? { raw_log: rawLog.join('\n') } : {}),
   };
 }
 
@@ -524,7 +542,7 @@ function startAutoDump() {
       // Written to a temp path and renamed, so a crash mid-write cannot
       // leave a truncated file where a recoverable one used to be.
       const tmp = `${file}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(buildExport()));
+      fs.writeFileSync(tmp, JSON.stringify(buildExport({ includeRawLog: false })));
       fs.renameSync(tmp, file);
     } catch (err) {
       console.error(`[hub] auto-dump failed: ${err.message}`);
@@ -609,7 +627,7 @@ transport.listen({
         console.log(`[hub] ${did} disconnected (${a.role})`);
       }
     });
-    chan.onRaw((line) => rawLog.push(line));
+    chan.onRaw(recordRaw);
     chan.onMessage((msg) => {
       switch (msg.type) {
         case 'register': {
