@@ -18,6 +18,9 @@ from dataclasses import dataclass, field
 
 TREASURY = "protocol:treasury"
 INSURANCE = "protocol:insurance"
+# 保管費的中繼帳戶（#66 的 redistribute 模式）。刻意與 Treasury 分開：收益
+# 與回流是兩個不同的目的，混在同一個帳戶裡就分不出哪一筆錢在做哪件事。
+DEMURRAGE_POOL = "protocol:demurrage"
 LOSS = "protocol:loss"
 
 
@@ -117,6 +120,26 @@ class Ledger:
             postings.append(Posting(LOSS, -(debt - from_ins)))
         self.post(tick, "write_off", f"writeoff:{account}:{tick}", postings)
         return debt
+
+    def demurrage(self, tick: int, account: str, amount: float,
+                  dest: str) -> float:
+        """保管費：對持有的正餘額收費，轉給 dest（登記簿 #66）。
+
+        SDD §14.1 與 FR-051 的要求是「不得無來源鑄造正餘額」，這裡是搬移
+        而非鑄造，Σ 仍為 0。FR-050 要求每筆變動有雙簽或**可驗證的協議事件**，
+        而 final-architecture §2.2 把 demurrage 明列為 Hub 可執行的非雙簽
+        分錄之一，條件是引用 Owner 加入網路時預簽的費率表 Grant——在模擬裡
+        那個 Grant 是隱含的（所有 agent 視為已簽），在原型裡必須是真的。
+
+        回傳實際收取的金額；正餘額不足時不收（不會把帳戶推成負的）。
+        """
+        bal = self.balances.get(account, 0.0)
+        take = min(max(0.0, amount), max(0.0, bal))
+        if take <= 1e-12:
+            return 0.0
+        self.post(tick, "demurrage", f"demurrage:{account}:{tick}",
+                  [Posting(account, -take), Posting(dest, take)])
+        return take
 
     def balance(self, account: str) -> float:
         return self.balances.get(account, 0.0)

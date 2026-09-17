@@ -46,6 +46,10 @@ class Report:
     credit_velocity_per_month: float = 0.0
     # Verification market (§4 #25)
     verifier_fees_cc: float = 0.0
+    # 期末仍握在 verifier 手上的 CC。與 verifier_fees_cc（收入）不同：#62
+    # 的問題不是他們賺多少，而是賺到的錢**留在那裡不動**，離開了交易流通。
+    verifier_balance_cc: float = 0.0
+    demurrage_collected_cc: float = 0.0
     verifier_fee_share: float = 0.0        # fees / settled volume
     mean_verifier_revenue_cc: float = 0.0
     min_verifier_revenue_cc: float = 0.0
@@ -178,6 +182,11 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
     # --- verification market (§4 #25) --------------------------------
     vs = [v for v in getattr(market, 'verifiers', [])]
     report.verifier_fees_cc = market.verifier_fees_cc
+    report.verifier_balance_cc = sum(
+        max(0.0, ledger.balance(v.vid)) for v in getattr(market, 'verifiers', []) or [])
+    report.demurrage_collected_cc = sum(
+        p.amount_cc for ev in ledger.events if ev.kind == 'demurrage'
+        for p in ev.postings if p.amount_cc > 0)
     report.verifier_fee_share = (market.verifier_fees_cc / report.settled_cc
                                  if report.settled_cc else 0.0)
     if vs:

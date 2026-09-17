@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .agents import (DEADBEAT, TICKS_PER_DAY, WASHER, Agent, DebtEpisode,
                      build_population, build_verifiers, credit_limit)
-from .ledger import Ledger
+from .ledger import DEMURRAGE_POOL, INSURANCE, Ledger, Posting, TREASURY
 from .market import Market
 from .metrics import DailySnapshot, Report, finalize, median_price_in, render_text
 
@@ -30,11 +30,23 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         n_verifiers: int = 9, verifier_rate: float = 0.04,
         canary_rate: float = 0.03, verifier_lazy_frac: float = 0.0,
         verifier_stake_cc: float = 50.0,
+        # 保管費（登記簿 #66）。rate 是每天對正餘額收取的比例；idle_days 只
+        # 對「連續這麼多天沒有動過」的餘額收費（鼓勵流動），0 表示對所有正
+        # 餘額收（純收益）。dest 決定它是回流還是抽稅：
+        #   "treasury"    → 收益，但除非 Treasury 花出去就只是換一個吸收端
+        #   "redistribute" → 依當期結算量分給活躍交易者，強制回流
+        demurrage_rate: float = 0.0,
+        demurrage_idle_days: int = 0,
+        demurrage_dest: str = "treasury",
         trace: str | None = None) -> Report:
     sc_deadbeat, washer_frac, expiry_cliff = SCENARIOS[scenario]
     if deadbeat_frac is None:
         deadbeat_frac = sc_deadbeat
     rng = random.Random(seed)
+    # 每個帳戶最後一次有分錄的 tick，供「閒置」保管費判斷用。
+    # 每個帳戶最後一次**支出**的 tick。用支出而非任何分錄，見下方註解。
+    last_move: dict[str, int] = {}
+    seen_events = 0
     agents = {a.aid: a for a in build_population(
         n_agents, seed, deadbeat_frac, washer_frac, expiry_cliff)}
     ledger = Ledger()
@@ -102,6 +114,51 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                     a.debt_episodes.append(DebtEpisode(start_tick=tick))
                 elif bal >= 0 and in_ep:
                     a.debt_episodes[-1].end_tick = tick
+
+            # 「最後有**流出**」，不是「最後有動過」。第一版記的是任何分錄，
+            # 於是 verifier 每收一筆驗證費就算「有動」——儘管它的餘額只增不
+            # 減。實測下來重分配模式對 verifier 持有量毫無作用（119±43 對
+            # 116±36），就是這個定義錯誤造成的。#62 要抓的是「只進不出」，
+            # 所以只有負向分錄才算動過。
+            while seen_events < len(ledger.events):
+                ev = ledger.events[seen_events]
+                seen_events += 1
+                for pg in ev.postings:
+                    if pg.amount_cc < 0:
+                        last_move[pg.account] = ev.tick
+
+            # --- 保管費（#66）-------------------------------------
+            # 每天一次。對象是持有正餘額者，包含 verifier——#62 量到的正是
+            # verifier 只進不出（原型 soak 每位 +11.9 CC），而保管費是否能把
+            # 那些錢逼回市場，就是這個掃描要回答的。
+            if demurrage_rate > 0:
+                holders = [x.aid for x in agents.values()] + \
+                          [v.vid for v in verifiers]
+                charged = 0.0
+                for acct in holders:
+                    bal = ledger.balance(acct)
+                    if bal <= 0:
+                        continue
+                    if demurrage_idle_days > 0:
+                        last = last_move.get(acct, 0)
+                        if tick - last < demurrage_idle_days * TICKS_PER_DAY:
+                            continue      # 還在流動，不收
+                    charged += ledger.demurrage(
+                        tick, acct, bal * demurrage_rate,
+                        TREASURY if demurrage_dest == "treasury" else DEMURRAGE_POOL)
+                # redistribute: 依「本日有成交」分給活躍交易者，強制回流。
+                # 沒有活躍者時留在池子裡等下一天，不憑空消失。
+                if demurrage_dest != "treasury" and charged > 1e-9:
+                    active = [x.aid for x in agents.values()
+                              if x.online and last_move.get(x.aid, -1)
+                              >= tick - TICKS_PER_DAY]
+                    pool = ledger.balance(DEMURRAGE_POOL)
+                    if active and pool > 1e-9:
+                        share = pool / len(active)
+                        ledger.post(tick, "demurrage_payout",
+                                    f"demurrage_payout:{tick}",
+                                    [Posting(DEMURRAGE_POOL, -pool)] +
+                                    [Posting(a, share) for a in active])
 
             # write off agents gone ≥14 days with negative balance
             for a in agents.values():
