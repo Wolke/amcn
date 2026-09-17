@@ -36,6 +36,9 @@ const INSURANCE = 'protocol:insurance';
 // target is met: a new verifier has little at risk and earns little, and
 // works its way to full standing — the same shape as the credit line.
 const STAKE = 'protocol:stake';
+// 抵押品託管（#65）。與 protocol:stake 分開：押注是 verifier 的履約保證、
+// 由收入累積；抵押品是交易方自願鎖入以換取額度上限，可在無負債時取回。
+const COLLATERAL = 'protocol:collateral';
 // FR-083 / §20-9. `market` is the only class that counts as real trade;
 // `test` is a rehearsal, `subsidy` is Treasury-funded (canary decoys,
 // bootstrap grants) and `related-party` is trade between identities the
@@ -87,6 +90,7 @@ const hubId = process.env.HUB_SEED
   : genIdentity(); // signs checkpoints
 const settledIds = new Set(); // contract_id idempotency keys
 const stakes = new Map();     // verifier did -> CC held in protocol:stake
+const collateral = new Map(); // did -> CC locked in protocol:collateral
 const canaryStats = new Map(); // verifier did -> {seen, failed, slashed_cc}
 const canarySeen = new Set();  // canary contract_ids already scored
 
@@ -176,7 +180,8 @@ const bal = (a) => balances.get(a) || 0;
 const statsOf = (did) => agents.get(did)?.stats;
 const clOf = (did) =>
   agents.has(did)
-    ? eeff.creditLine(did, agents.get(did).stats, statsOf, ageFactorOf(did))
+    ? eeff.creditLine(did, agents.get(did).stats, statsOf, ageFactorOf(did),
+                      collateral.get(did) || 0)
     : 0;
 
 function broadcast(obj, exceptDid) {
@@ -639,6 +644,7 @@ function buildExport({ includeRawLog = true } = {}) {
     receipts,
     pubkeys: Object.fromEntries(pubkeys),
     joined_at: Object.fromEntries(joinedAt),
+    collateral: Object.fromEntries(collateral),
     metrics: buildMetrics(),
     balances: Object.fromEntries(balances),
     credit_lines: Object.fromEntries(
@@ -723,6 +729,7 @@ if (process.env.HUB_IMPORT) {
   for (const [did, st] of r.stats) importedStats.set(did, st);
   for (const [did, pub] of Object.entries(r.pubkeys || {})) pubkeys.set(did, pub);
   for (const [did, at] of Object.entries(ex.joined_at || {})) joinedAt.set(did, at);
+  for (const [did, c] of Object.entries(r.collateral || {})) collateral.set(did, c);
   console.log(`[hub] rebuilt from ${file}: ${r.summary.receipts} receipts, ` +
     `${r.summary.events} events, ${r.summary.accounts} accounts, ` +
     `${r.summary.checkpoints} checkpoints — all signatures and chains verified` +
@@ -872,6 +879,62 @@ transport.listen({
         case 'receipt': handleReceipt(msg, chan); break;
         case 'forced_settlement': handleForced(msg, chan); break;
         case 'canary_result': handleCanaryResult(msg, chan); break;
+        case 'collateral_post': {
+          // 自願鎖入 CC 換取額度上限。必須是自己的正餘額——不能用信用額度
+          // 去抵押信用額度，那等於無擔保放大，正是折扣率要避免的事。
+          const a = agents.get(msg.did);
+          if (!a || a.chan !== chan) break;
+          const amt = Number(msg.amount_cc);
+          if (!(amt > 0)) { fail(chan, 'collateral: amount must be positive', msg.did); break; }
+          if (!verify(a.pub, { did: msg.did, amount_cc: amt, lock: true }, msg.sig)) {
+            fail(chan, 'collateral: bad signature', msg.did); break;
+          }
+          if (bal(msg.did) < amt) {
+            fail(chan, `collateral: balance ${bal(msg.did).toFixed(2)} < ` +
+              `${amt} (credit cannot collateralise credit)`, msg.did);
+            break;
+          }
+          if (!applyPostings('collateral_post', `col:${msg.did}:${Date.now()}`,
+                [{ account: msg.did, amount_cc: -amt },
+                 { account: COLLATERAL, amount_cc: amt }])) break;
+          collateral.set(msg.did, (collateral.get(msg.did) || 0) + amt);
+          chan.send({ type: 'collateral', did: msg.did,
+                      locked_cc: collateral.get(msg.did),
+                      credit_line: clOf(msg.did), ltv: eeff.COLLATERAL_LTV });
+          console.log(`[hub] ${msg.did} locked ${amt} CC as collateral ` +
+            `(total ${collateral.get(msg.did)}, CL ${clOf(msg.did).toFixed(1)})`);
+          break;
+        }
+        case 'collateral_release': {
+          // 只有在釋放後的額度仍然覆蓋現有負債時才准取回，否則取回抵押品
+          // 就成了「先借滿、再抽走擔保」的兩步走。
+          const a = agents.get(msg.did);
+          if (!a || a.chan !== chan) break;
+          const amt = Number(msg.amount_cc);
+          const held = collateral.get(msg.did) || 0;
+          if (!(amt > 0) || amt > held) {
+            fail(chan, `collateral: cannot release ${amt} of ${held}`, msg.did); break;
+          }
+          if (!verify(a.pub, { did: msg.did, amount_cc: amt, lock: false }, msg.sig)) {
+            fail(chan, 'collateral: bad signature', msg.did); break;
+          }
+          const after = eeff.creditLine(msg.did, a.stats, statsOf,
+            ageFactorOf(msg.did), held - amt);
+          if (bal(msg.did) < -after + 1e-9) {
+            fail(chan, `collateral: releasing ${amt} would leave debt ` +
+              `${(-bal(msg.did)).toFixed(2)} above the remaining line ` +
+              `${after.toFixed(2)}`, msg.did);
+            break;
+          }
+          if (!applyPostings('collateral_release', `rel:${msg.did}:${Date.now()}`,
+                [{ account: COLLATERAL, amount_cc: -amt },
+                 { account: msg.did, amount_cc: amt }])) break;
+          collateral.set(msg.did, held - amt);
+          chan.send({ type: 'collateral', did: msg.did,
+                      locked_cc: held - amt, credit_line: clOf(msg.did),
+                      ltv: eeff.COLLATERAL_LTV });
+          break;
+        }
         case 'checkpoint_request': {
           // A lost checkpoint broadcast used to strand a contract: the
           // requester needs the seed root to derive its panel and had no way

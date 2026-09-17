@@ -60,7 +60,13 @@ function effectiveContribution(myDid, myStats, statsOf) {
 // contradicting GATE-0's starter of 50, but the effective line at t=0 with
 // that starter. Both numbers were right; #1 conflated them, and so did my
 // ruling on it.
-function creditLine(myDid, myStats, statsOf, ageFactor = 1) {
+// 抵押折扣（登記簿 #65，模擬掃描 `amcn_sim.sweep_deposit` 定案）。
+// LTV = 1 對打算違約的人是損益中性的：抵押 D、借走 D+L_boot、違約、賠掉 D，
+// 淨賺 L_boot——實測每身分仍淨賺 26.1 CC。折扣才讓它變成虧損，LTV 0.5 時
+// 降到 3.1 CC、壞帳 0.08%。規則：淨賺 ≈ L_boot(t=0) − 抵押×(1−LTV)。
+const COLLATERAL_LTV = Number(process.env.AMCN_COLLATERAL_LTV || 0.5);
+
+function creditLine(myDid, myStats, statsOf, ageFactor = 1, collateralCc = 0) {
   const contribution = Math.min(
     effectiveContribution(myDid, myStats, statsOf), 2000);
   const diversity = Math.min(1, myStats.earnedBy.size / 8);
@@ -68,8 +74,10 @@ function creditLine(myDid, myStats, statsOf, ageFactor = 1) {
   const completionRate = done ? myStats.completed / done : 0.9; // prior
   const quality = 0.25 + 0.75 * completionRate;
   const age = Math.max(0, Math.min(1, ageFactor));
+  // 抵押品不乘 quality：它是真實擔保，不因帳戶年輕或紀錄少而打折。
   const line = (STARTER_CC * (0.5 + 0.5 * age)
-    + 0.35 * contribution * (0.3 + 0.7 * diversity)) * quality;
+    + 0.35 * contribution * (0.3 + 0.7 * diversity)) * quality
+    + Math.max(0, collateralCc) * COLLATERAL_LTV;
   return Math.min(HARD_CAP_CC, Math.max(0, line));
 }
 
@@ -80,6 +88,6 @@ function riskRate(myStats) {
 }
 
 module.exports = {
-  STARTER_CC, FEE_RATE, RISK_THIN, RISK_BASE, VERIFIER_RATE,
+  STARTER_CC, FEE_RATE, RISK_THIN, RISK_BASE, VERIFIER_RATE, COLLATERAL_LTV,
   newStats, effectiveContribution, creditLine, riskRate,
 };

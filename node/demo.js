@@ -210,6 +210,25 @@ async function main() {
     c.send({ type: 'export' });
   });
 
+
+  // §4 #65: A ends positive, so it can convert some of that into credit
+  // headroom. Done here, while the processes are still alive — the first
+  // version of this ran after procs.kill() and got ECONNREFUSED.
+  const clBefore = consoleA.credit_line_cc;
+  const LOCK_CC = 1;
+  let afterLock = null;
+  try {
+    await fetch(`http://127.0.0.1:${CONSOLE_A_PORT}/collateral`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ amount_cc: LOCK_CC, lock: true }),
+    });
+    await new Promise((r) => setTimeout(r, 900));
+    afterLock = await (await fetch(
+      `http://127.0.0.1:${CONSOLE_A_PORT}/status`)).json();
+  } catch (err) {
+    console.log(`  !! collateral probe failed: ${err.message}`);
+  }
+
   procs.forEach((p) => p.kill());
 
   const { receipts, pubkeys, balances, credit_lines, chains, checkpoints,
@@ -429,6 +448,15 @@ async function main() {
   check(`§4 #33 協議版本閘門：v99 的請求無回應、v${PROTOCOL_VERSION} 正常回應`,
     wrongVersionRefused && rightVersionWorks,
     `wrong version refused: ${wrongVersionRefused}, current version served: ${rightVersionWorks}`);
+
+  const expectedCl = clBefore + LOCK_CC * eeff.COLLATERAL_LTV;
+  check(`§4 #65 抵押品帶折扣率進入額度（LTV ${eeff.COLLATERAL_LTV}）`,
+    !!afterLock && Math.abs(afterLock.credit_line_cc - expectedCl) < 0.05 &&
+    afterLock.collateral.locked_cc === LOCK_CC,
+    afterLock
+      ? `鎖入 ${LOCK_CC} CC → 額度 ${clBefore.toFixed(2)} → ` +
+        `${afterLock.credit_line_cc.toFixed(2)}（期望 ${expectedCl.toFixed(2)}）`
+      : 'Console 無回應');
 
   const m = ex.metrics || {};
   check('§20-9 tx_class：每筆結算都標明種類，未標示者被拒',

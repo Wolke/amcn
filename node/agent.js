@@ -342,7 +342,14 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
         refreshMode('registered');
         break;
 
-      case 'credit_update':
+      case 'collateral':
+      console_.collateral = { locked_cc: msg.locked_cc, ltv: msg.ltv };
+      console_.creditLine = msg.credit_line;
+      log(`collateral now ${msg.locked_cc} CC (LTV ${msg.ltv}), ` +
+          `credit line ${msg.credit_line.toFixed(1)} CC`);
+      break;
+
+    case 'credit_update':
         console_.creditLine = msg.credit_line;
         refreshMode('credit line moved');
         break;
@@ -806,6 +813,29 @@ console.log(`DID ${cfg.name} ${id.did} (protocol v${PROTOCOL_VERSION})`);
 // Localhost-only on purpose — this is the Owner's own control surface.
 if (cfg.consolePort) {
   http.createServer((req, res) => {
+    // 抵押品是 Owner 的決策而不是 agent 的自主行為（FR-081）：把自己的
+    // 正餘額鎖起來換額度上限，是要不要承擔風險的判斷，不該由需求模型代勞。
+    if (req.method === 'POST' && req.url === '/collateral') {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try {
+          const { amount_cc, lock = true } = JSON.parse(body);
+          if (!(Number(amount_cc) > 0)) throw new Error('amount_cc must be > 0');
+          const sig = sign(id.privateKey,
+            { did: id.did, amount_cc: Number(amount_cc), lock: !!lock });
+          hub.send({ type: lock ? 'collateral_post' : 'collateral_release',
+                     did: id.did, amount_cc: Number(amount_cc), sig });
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, requested: amount_cc, lock }));
+        } catch (e) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/post') {
       let body = '';
       req.on('data', (d) => { body += d; });
@@ -879,6 +909,7 @@ if (cfg.consolePort) {
             ? Math.max(...open.map((c) => now - (c.at || now))) : 0,
         };
       })(),
+      collateral: console_.collateral || { locked_cc: 0, ltv: null },
       resumed_from: console_.resumedFrom || null,
       // §20-8: publishes that required a human, versus ones the policy made
       // on its own. An unattended run must show manual + scripted == 0.

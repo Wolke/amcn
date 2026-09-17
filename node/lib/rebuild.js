@@ -223,6 +223,27 @@ function rebuild(ex, opts = {}) {
     }
   }
 
+  // Collateral rebuilt from the event stream, not copied from the export:
+  // §20-4 says balances come from signed events, and a locked amount that
+  // only exists as a summary field could disagree with the postings that
+  // produced it (#65).
+  const collateral = new Map();
+  for (const e of ex.events || []) {
+    if (e.kind === 'collateral_post' || e.kind === 'collateral_release') {
+      for (const p of e.postings || []) {
+        if (p.account === 'protocol:collateral') continue;
+        const cur = collateral.get(p.account) || 0;
+        collateral.set(p.account, +(cur - p.amount_cc).toFixed(6));
+      }
+    }
+  }
+  for (const [did, c] of Object.entries(ex.collateral || {})) {
+    const replayed = collateral.get(did) || 0;
+    if (Math.abs(replayed - c) > 1e-6) {
+      fail(`collateral mismatch ${did}: replayed ${replayed} vs export ${c}`);
+    }
+  }
+
   // --- checkpoints: the only signed-by-sequencer artefact --------------
   const cps = ex.checkpoints || [];
   if (ex.hub_pub) {
@@ -248,6 +269,7 @@ function rebuild(ex, opts = {}) {
     // Handed back so a rebuilt hub keeps every key it was given, rather
     // than re-deriving them from whoever happens to reconnect.
     pubkeys,
+    collateral: Object.fromEntries(collateral),
     checkpoints: cps,
     // Sparse storage (§4 #41) means the array length no longer implies the
     // sequence position, so a rebuilt hub has to be told where to resume

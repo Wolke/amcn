@@ -94,7 +94,10 @@ const hmac = (key, s) =>
 // and the hub enforces them (§16 威脅 8). A v3 client's objects have no
 // expiry; they would still be accepted, but a v3 *hub* would ignore a v4
 // client's expiry entirely, which is the direction that matters.
-const PROTOCOL_VERSION = 4;
+// v5: collateral_post / collateral_release, and the credit line takes a
+// collateral term with a haircut (#65). A v4 hub would ignore the messages
+// entirely and the client would wait for an answer that never comes.
+const PROTOCOL_VERSION = 5;
 
 module.exports = {
   genIdentity, identityFromSeed, canon, sign, verify, sha256, hmac,

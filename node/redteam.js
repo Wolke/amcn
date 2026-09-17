@@ -349,7 +349,33 @@ async function main() {
   check('S8', 'requester 少付、其餘照領', 'block',
     !s8 || !/postings sum|fee schedule/.test(s8.why || ''), s8 ? s8.why : '無回應');
 
-  check('S9', '八次攻擊之後帳本完全沒動', 'block', !(await unchanged(before)));
+  // 抵押品（#65）。X 的餘額是 0，所以這三案問的是同一件事的三個面向：
+  // 能不能用信用額度去抵押信用額度（那就是無擔保放大）。
+  const colSig = (did, amt, lock) =>
+    sign(X.privateKey, { did, amount_cc: amt, lock });
+  const colTry = async (msg) => {
+    lastErr = null;
+    pair.send(msg);
+    await sleep(900);
+    return lastErr;
+  };
+  const c1 = await colTry({ type: 'collateral_post', did: X.did,
+    amount_cc: 20, sig: colSig(X.did, 20, true) });
+  check('S13', '用沒有的餘額抵押（信用抵押信用）', 'block',
+    !c1 || !/credit cannot collateralise credit|balance/.test(c1.why || ''),
+    c1 ? c1.why : '無回應');
+
+  const c2 = await colTry({ type: 'collateral_post', did: X.did,
+    amount_cc: 20, sig: 'AAAA' });
+  check('S14', '偽造簽章的抵押請求', 'block',
+    !c2 || !/bad signature/.test(c2.why || ''), c2 ? c2.why : '無回應');
+
+  const c3 = await colTry({ type: 'collateral_release', did: X.did,
+    amount_cc: 5, sig: colSig(X.did, 5, false) });
+  check('S15', '取回從未鎖入的抵押品', 'block',
+    !c3 || !/cannot release/.test(c3.why || ''), c3 ? c3.why : '無回應');
+
+  check('S9', '十一次攻擊之後帳本完全沒動', 'block', !(await unchanged(before)));
   pair.close();
 
   console.log('\n== 已知開口（攻擊成功才是 PASS）==');

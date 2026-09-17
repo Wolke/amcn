@@ -59,6 +59,7 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `lib/channel.js` | 兩種傳輸共用的 frame 語義：JSON-lines 切分、信封版本閘門（§4 #33）、handler 例外隔離（§4 #13／#34）。傳輸層只提供 write／close，不得改寫語義——這是「兩傳輸同一本帳」能成立的原因 |
 | `lib/transport-tcp.js` | 實作 1：TCP JSON-lines（至今所有試點跑的行為，原樣搬過來） |
 | `lib/transport-secure.js` | 實作 4：加密＋身分認證的通道（§4 #44）。臨時 X25519 → HKDF → AES-256-GCM，臨時金鑰由 Ed25519 身分簽章，以 DID 為信任錨（不是 TLS，也沒有 CA）。防的是路徑上的第三方；防 Hub 本身仍靠簽章與 payload E2E |
+| 抵押品（#65）| `POST /collateral {amount_cc, lock}` 到 Owner Console：把自己的正餘額鎖入 `protocol:collateral`，額度上升 `amount × AMCN_COLLATERAL_LTV`（預設 0.5，取自 `amcn_sim.sweep_deposit`）。只能抵押自己的正餘額，取回時剩餘額度必須仍覆蓋負債 |
 | `lib/rendezvous.js` | 跨網段的發現與輪替（§4 #45）：Hub 發布簽署的位址記錄，client 每次重連重新解析、以 `hubPin` 驗身分。承載記錄的主機不受信任——它能扣住或給舊的，但無法冒充 |
 | `lib/transport-chaos.js` | 實作 3：故障注入（`AMCN_TRANSPORT=chaos`）。包裝 tcp／http，由執行期可改的控制檔驅動：`blackhole`（寫入成功但消失、連線永不關閉）、`reset`、`latency`／`jitter`、`loss`、`freeze`（只斷入向＝對手卡死）、單向中斷。注入點在**位元組層**而非 channel 之上——否則 channel 自己的活性 ping 會繞過故障（第一版就是這樣錯的）。`AMCN_CHAOS_SEED` 讓丟包樣式可重播 |
 | `lib/transport-http.js` | 實作 2：HTTP——長連 chunked NDJSON 回應載 server→client，POST 載 client→server。刻意不選另一種 socket 方言：那會共用 TCP 的故障模型，換了等於沒換。此實作線上無連線狀態、送達以請求為單位，POST 必須自行保序（單 socket keep-alive）|
