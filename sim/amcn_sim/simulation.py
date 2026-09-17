@@ -125,6 +125,15 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                 total_credit_cc=sum(credit_limit(x, tick, agents, market.starter_cc)
                                     for x in agents.values() if x.online),
                 settled_cc_cum=market.stats.settled_cc,
+                # 逐帳戶看「還剩多少可用額度」。原型 soak 的鎖死特徵是每一
+                # 個交易者都貼在上限上（#61），而總量比會被健康帳戶稀釋，
+                # 看不出那件事。
+                pinned_frac=(
+                    sum(1 for x in agents.values() if x.online
+                        and -ledger.balance(x.aid)
+                        >= 0.9 * max(1e-9, credit_limit(x, tick, agents,
+                                                        market.starter_cc)))
+                    / max(1, sum(1 for x in agents.values() if x.online))),
             ))
 
     finalize(report, agents, ledger, market, ticks,

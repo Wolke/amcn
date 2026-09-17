@@ -20,6 +20,10 @@ class DailySnapshot:
     total_debt_cc: float
     total_credit_cc: float
     settled_cc_cum: float
+    # 貼著上限的 agent 比例。與 total_debt/total_credit 不同：後者是總量比，
+    # 會被幾個健康帳戶稀釋；原型 soak 的特徵是「每一個人」都動不了，那只有
+    # 逐帳戶看才看得到（登記簿 #61）。
+    pinned_frac: float = 0.0
 
 
 @dataclass

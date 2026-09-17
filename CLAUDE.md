@@ -73,6 +73,9 @@ cd node && node cl-compare.js
 # 還債政策參數掃描（折價 × band 定義 × 情境，約 10 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_repay
 
+# 最小可行網路規模掃描（N × 費率 → 觸底時間，約 3 分鐘）
+cd sim && python3 -u -m amcn_sim.sweep_size
+
 # 驗證市場掃描（費率 × 金絲雀率 × 偷懶比例，約 5 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_verifier
 ```
