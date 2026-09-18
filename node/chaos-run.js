@@ -101,7 +101,10 @@ async function runScenario(file) {
   fs.rmSync(rvPath, { force: true });
   startHub(false);
   await sleep(600);
-  for (let i = 1; i <= (sc.verifiers || 3); i++) {
+  // `|| 3` 會把 verifiers: 0 當成沒設定而起三個——雙角色拓撲（#62 階段 4）
+  // 的第一次煙霧測試因此報 pool 9 而不是 6，對照組在不知情的情況下被污染。
+  const nVerifiers = sc.verifiers != null ? sc.verifiers : 3;
+  for (let i = 1; i <= nVerifiers; i++) {
     spawnProc(`V${i}`, 'verifier.js', {
       ...chaosEnv('panel'),
       AGENT_CONFIG: JSON.stringify({
@@ -113,7 +116,8 @@ async function runScenario(file) {
   await sleep(400);
   const agentNames = [];
   const agentProcs = {};
-  for (let i = 0; i < (sc.agents || 3); i++) {
+  const nAgents = sc.agents != null ? sc.agents : 3;
+  for (let i = 0; i < nAgents; i++) {
     const name = String.fromCharCode(65 + i);
     agentNames.push(name);
     agentProcs[name] = spawnProc(name, 'agent.js', {
@@ -123,6 +127,11 @@ async function runScenario(file) {
         name, seed: `ca-${name}`, consolePort: CONSOLE0 + i,
         ...(sc.rendezvous ? { rendezvous: rvPath, hubPin: hubDid } : { hubPort: PORT }),
         adapter: { baseUrl: null, key: { env: `K${name}` } },
+        // #62 階段 3：同一個進程兼交易與驗證。約束要寫清楚——當事人不得進入
+        // 自己合約的 pool（#62 階段 1），所以 judge-quorum 需要
+        // 節點數 ≥ PANEL_SIZE + 2 = 5，否則扣掉 requester 與 provider 之後
+        // 合格者不足三位、quorum 永遠不成立。
+        ...(sc.dualRole ? { verify: true } : {}),
         provide: { afterMs: 0, pricePerUnit: 1 + i * 0.05, repayment: true },
         posts: [],
         policy: {

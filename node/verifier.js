@@ -6,14 +6,11 @@
 // env AGENT_CONFIG: { name, hubPort, hubHost?, hubPin?, beaconPort? }
 // hubHost "discover" uses the UDP beacon instead of a hand-copied IP.
 'use strict';
-const { genIdentity, identityFromSeed, sign, verify, sha256,
-        canon } = require('./lib/wire');
+const { genIdentity, identityFromSeed, sign, verify } = require('./lib/wire');
 const transport = require('./lib/transport').fromEnv();
 require('./lib/log').install();
-const crypto = require('node:crypto');
 const discovery = require('./lib/discovery');
-const { genBoxKeys, open } = require('./lib/e2e');
-const { runAsserts, assertsHash } = require('./lib/dsl');
+const { genBoxKeys } = require('./lib/e2e');
 
 // Same resolution as agent.js: env for scripted runs, a file path for
 // humans. configs/verifier.example.json shipped from the first commit but
@@ -30,9 +27,10 @@ const cfg = process.env.AGENT_CONFIG
 const id = cfg.seed ? identityFromSeed(cfg.seed) : genIdentity();
 const box = genBoxKeys();
 const log = (m) => console.log(`[${cfg.name} ${id.did}] ${m}`);
-// contract_id -> {attestation, nonce, commitment, commitSig} held between
-// commit and reveal.
-const pending = new Map();
+// 裁決邏輯在 lib/verifier-kernel.js，與 agent.js 的 `verify: true` 共用同一份
+// ——複製一份會讓兩邊的規則慢慢分岔（#60 的形態）。這支因此只剩連線、註冊與
+// 活性，是它日後退場的路徑（#62 階段 4）。
+let kernel = null;
 
 const regBody = { did: id.did, pub: id.pub, box_pub: box.boxPub, role: 'verifier' };
 
@@ -79,82 +77,13 @@ const hub = stampPeerSends(transport.dialLazy(() => discovery.resolveHubTarget(c
         hub.send({ type: 'register_ack', did: id.did });  // proof we can hear (#49)
         log('registered as verifier');
         break;
-      case 'verify_request': {
-        const r = msg.request;
-        if (!verify(msg.pub, r, msg.sig)) break;
-        if (assertsHash(r.asserts) !== r.asserts_hash) {
-          log(`REJECT ${r.contract_id}: assert set does not match locked hash`);
-          break; // FR-041: the acceptance rules were fixed at contract time
-        }
-        const payload = open(box.boxPriv, r.payload_box);
-        const { pass, failures } = runAsserts(r.asserts, { payload, output: r.output });
-        // cfg.alwaysPass models the verifier the canary exists to catch: it
-        // collects the fee and votes PASS without regard to the asserts. Same
-        // kind of scaffolding as agent.js's refuseToSettle for T-05 — a real
-        // adversary is not going to volunteer for the test.
-        const verdict = cfg.alwaysPass ? 'PASS' : (pass ? 'PASS' : 'FAIL');
-        const attestation = {
-          contract_id: r.contract_id,
-          verifier: id.did,
-          verdict,
-          failures: cfg.alwaysPass ? [] : failures, // FR-044 machine-readable
-        };
-        // commit-reveal (§2.2, fixes the other half of §4 #6): publish a
-        // binding hash of the verdict first. Without it, a verifier that sees
-        // the others' verdicts first can just copy the majority, which is both
-        // free and unfalsifiable — the panel would look like three independent
-        // checks while being one.
-        const nonce = crypto.randomBytes(16).toString('base64');
-        const commitment = sha256(canon(attestation) + nonce);
-        pending.set(r.contract_id, { attestation, nonce, commitment });
-        const commitBody = { contract_id: r.contract_id, verifier: id.did, commitment };
-        const commitSig = sign(id.privateKey, commitBody);
-        pending.get(r.contract_id).commitSig = commitSig;
-        for (const to of [r.requester, r.provider]) {
-          hub.send({ type: 'attestation_commit', to, commit: commitBody,
-                     sig: commitSig, pub: id.pub });
-        }
-        log(`committed ${r.contract_id}: ${commitment.slice(0, 12)}…` +
-            (cfg.alwaysPass ? ' (lazy: votes PASS regardless)' : ''));
-        break;
-      }
-
-      case 'reveal_request': {
-        const p = pending.get(msg.contract_id);
-        if (!p) break;
-        // The verifier that commits and then goes quiet: it should collect
-        // nothing, because #26 pays only those whose reveal opens a
-        // pre-signed commitment. Adversary scaffolding, like alwaysPass.
-        if (cfg.silentReveal) {
-          log(`ADVERSARY: committed ${msg.contract_id} and staying silent`);
-          break;
-        }
-        if (!verify(msg.pub, { contract_id: msg.contract_id, reveal: true }, msg.sig)) break;
-        // The verifier that waits to see where the majority is going and
-        // reveals that instead of what it committed to (D3). Commit-reveal
-        // exists for exactly this, so what should happen is that the revealed
-        // attestation no longer opens the commitment and the vote is not
-        // counted. Adversary scaffolding, like alwaysPass/silentReveal.
-        const attest = cfg.copyVerdict
-          ? { ...p.attestation,
-              verdict: p.attestation.verdict === 'PASS' ? 'FAIL' : 'PASS',
-              failures: [] }
-          : p.attestation;
-        if (cfg.copyVerdict) {
-          log(`ADVERSARY: committed ${p.attestation.verdict} on ` +
-              `${msg.contract_id}, revealing ${attest.verdict} instead`);
-        }
-        const sig = sign(id.privateKey, attest);
-        for (const to of [msg.requester, msg.provider]) {
-          hub.send({ type: 'attestation', to, attestation: attest, sig,
-                     nonce: p.nonce, commitment: p.commitment,
-                     commit_sig: p.commitSig, pub: id.pub });
-        }
-        log(`revealed ${msg.contract_id}: ${attest.verdict}`);
-        break;
-      }
+      case 'verify_request': kernel.onVerifyRequest(msg); break;
+      case 'reveal_request': kernel.onRevealRequest(msg); break;
     }
   },
 }));
+
+kernel = require('./lib/verifier-kernel').create(
+  { id, box, log, send: (m) => hub.send(m), cfg });
 
 console.log(`DID ${cfg.name} ${id.did}`);

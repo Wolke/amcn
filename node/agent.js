@@ -315,7 +315,18 @@ function fanOut(delivery, ctx, chosen) {
   }
 }
 
-const regBody = { did: id.did, pub: id.pub, box_pub: box.boxPub };
+// #62 階段 3：一個進程可以同時交易與驗證。這不是新角色，是把原型當初為了
+// 方便而拆開的兩個角色放回一起——SDD 裡「驗證」是從 pool 抽選的角色
+// （FR-041），而 verifier 在 Phase 1 之所以是純吸收端（#62，實測持有全網
+// 97.5% 的正餘額），正是因為它被造成一種不需要算力、也無處可花的物種。
+const alsoVerifies = !!cfg.verify;
+const regBody = alsoVerifies
+  ? { did: id.did, pub: id.pub, box_pub: box.boxPub,
+      roles: ['agent', 'verifier'] }
+  : { did: id.did, pub: id.pub, box_pub: box.boxPub };
+// 內核與 verifier.js 共用同一份（lib/verifier-kernel.js），所以兩邊的裁決規則
+// 不可能分岔。
+let vkernel = null;
 
 // #69c：所有帶 `to` 的訊息（也就是經 Hub 轉發給對等節點的那些）都附上自己
 // 見到的最新 checkpoint。放在這一層而不是逐個 case 改，是因為漏掉任何一種
@@ -842,6 +853,15 @@ const hub = stampPeerSends(transport.dialLazy(() => discovery.resolveHubTarget(c
         break;
       }
 
+      // 雙角色節點（#62 階段 3）。沒開 verify 時這兩種訊息本來就不會送來，
+      // 因為 Hub 只對有 verifier 角色的節點發 verify_request。
+      case 'verify_request':
+        if (vkernel) vkernel.onVerifyRequest(msg);
+        break;
+      case 'reveal_request':
+        if (vkernel) vkernel.onRevealRequest(msg);
+        break;
+
       case 'error': log(`hub error: ${msg.why} (${msg.ref})`); break;
     }
   },
@@ -997,6 +1017,12 @@ if (cfg.consolePort) {
 const termsOk = !!(adapterCfg
   && (!adapterCfg.baseUrl
       || (adapterCfg.terms && adapterCfg.terms.attested === true)));
+if (alsoVerifies) {
+  vkernel = require('./lib/verifier-kernel').create(
+    { id, box, log, send: (m) => hub.send(m), cfg });
+  log('also serving as a verifier (roles: agent+verifier, §4 #62)');
+}
+
 const canExecute = !!(adapterCfg && adapterCfg.apiKey && termsOk);
 if (cfg.provide && !canExecute) {
   log('supply NOT armed: ' + (!adapterCfg

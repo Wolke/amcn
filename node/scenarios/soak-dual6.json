@@ -1,0 +1,84 @@
+{
+  "name": "soak-dual6",
+  "what": "#62 階段 4：6 個**雙角色**節點（兼交易與驗證），沒有獨立的 verifier 進程。對照組是 soak-n6（6 交易者＋3 verifier），那一輪量到 verifier 持有 210.44 CC、佔全部正餘額的 97.5%——原型裡唯一剩下的吸收端。要看的是：把驗證費付給本來就會花錢的節點之後，那筆錢會不會回到流通，以及交易者實質數量從 6 變 9（3 個原 verifier 現在也交易）是否改善 #61 的使用率。新約束：當事人不得進入自己合約的 pool（階段 1），所以 judge-quorum 需要節點數 ≥ 5",
+  "portOffset": 1440,
+  "seed": 41,
+  "agents": 6,
+  "verifiers": 0,
+  "durationS": 2400,
+  "sampleS": 60,
+  "maxOpenS": 150,
+  "hubEnv": {
+    "HUB_REBATE_MS": "30000",
+    "HUB_INSURANCE_TARGET_FRAC": "0.06",
+    "HUB_TREASURY_RESERVE_CC": "2"
+  },
+  "profile": {
+    "mode": "latency",
+    "latencyMs": 80,
+    "jitterMs": 40
+  },
+  "timeline": [
+    {
+      "atS": 600,
+      "target": "panel",
+      "fault": {
+        "mode": "blackhole",
+        "direction": "both"
+      }
+    },
+    {
+      "atS": 700,
+      "target": "panel",
+      "fault": "profile"
+    },
+    {
+      "atS": 1200,
+      "action": "killHub"
+    },
+    {
+      "atS": 1260,
+      "action": "startHub",
+      "import": true
+    },
+    {
+      "atS": 1800,
+      "target": "agents",
+      "fault": {
+        "mode": "loss",
+        "lossPct": 2,
+        "latencyMs": 80,
+        "jitterMs": 40
+      }
+    },
+    {
+      "atS": 2100,
+      "target": "agents",
+      "fault": "profile"
+    }
+  ],
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 300
+    },
+    {
+      "kind": "settlementResumesWithin",
+      "afterS": 1260,
+      "withinS": 180
+    },
+    {
+      "kind": "rebateReturns",
+      "minCc": 20
+    },
+    {
+      "kind": "tradingContinues",
+      "fromS": 300,
+      "maxGapS": 300
+    }
+  ],
+  "dualRole": true
+}

@@ -219,6 +219,11 @@ const clOf = (did) =>
                       collateral.get(did) || 0)
     : 0;
 
+// 角色判斷的唯一入口。舊匯出檔與舊節點只有 `role`，所以缺 `roles` 時退回它
+// ——相容規則與 `checkpoint_seq`／`prev_root` 一致（#69）。
+const hasRole = (a, r) =>
+  !!a && (a.roles ? a.roles.has(r) : a.role === r);
+
 function broadcast(obj, exceptDid) {
   for (const [did, a] of agents) if (did !== exceptDid && a.chan) a.chan.send(obj);
 }
@@ -326,7 +331,7 @@ function validAttesters(receipt, attestations, panelDids) {
     const a = e && e.attestation;
     if (!a || a.contract_id !== receipt.contract_id || a.verdict !== 'PASS') continue;
     const v = agents.get(a.verifier);
-    if (!v || v.role !== 'verifier' || !panelDids.includes(a.verifier)) continue;
+    if (!hasRole(v, 'verifier') || !panelDids.includes(a.verifier)) continue;
     if (!verify(v.pub, a, e.sig)) continue;
     // commitment must bind this exact verdict, and be signed by this verifier
     if (typeof e.nonce !== 'string' || typeof e.commitment !== 'string') continue;
@@ -435,15 +440,14 @@ function validateSchedule(receipt, chan, ref, attestations) {
     [TREASURY]: fee, [INSURANCE]: risk,
   };
   payees.forEach((did, i) => { expect[did] = verifierShares[i]; });
-  const namedVerifiers = receipt.postings
-    .filter((p) => { const a = agents.get(p.account); return a && a.role === 'verifier'; })
-    .map((p) => p.account);
-  if (namedVerifiers.length !== payees.length ||
-      namedVerifiers.some((d) => !payees.includes(d))) {
-    fail(chan, `verifier postings ${namedVerifiers.length} != accountable ` +
-      `attesters ${payees.length}`, ref);
-    return false;
-  }
+  // 這裡原本有一段「收據裡角色為 verifier 的分錄必須恰好等於 payees」的檢查。
+  // 已刪除，因為 #73 的白名單讓它成為多餘：分錄集合**恰好**等於 `expect`，
+  // 所以非當事人、非 protocol 的帳戶就正好是 payees。
+  //
+  // 刪掉它同時拿掉了驗證器裡最後一個角色推論——「付給 role==='verifier' 帳戶
+  // 的分錄就是驗證費」。那個代理判斷在角色互斥時成立，而 #62 階段 2 要讓角色
+  // 重疊，它就會把 provider 的收款誤判成驗證費。**用結構判斷取代身分判斷**，
+  // 這也是 #73 能被發現的同一個角度。
   // 分錄集合必須**恰好**等於費率表算出來的集合（紅隊 S17／S18，登記簿 #73）。
   //
   // 原本只做「該有的都在且金額對」，沒有人問「有沒有多的」——而 `find()` 只取
@@ -517,9 +521,15 @@ function applySettlement(kind, receipt, sigs, evidence) {
   // Escrow part of each verifier's fee into the stake account. A separate
   // posting set, not folded into the receipt: the receipt is what both
   // parties signed, and the hub must not be able to alter it after the fact.
+  // 用**結構**判斷而不是身分判斷：驗證費就是「收據裡既不是當事人、也不是
+  // protocol 帳戶的那些正分錄」。原本問的是「這個帳戶的角色是 verifier 嗎」，
+  // 而那個代理判斷在角色互斥時才成立——#62 階段 2 讓角色可以重疊，於是一個
+  // 同時交易的 verifier 收到 **provider 貨款**時會被誤託管成押注。
+  // #73 的白名單保證分錄集合恰好等於費率表，所以這個結構判斷是精確的。
+  const parties = new Set([receipt.requester, receipt.provider]);
   for (const p of receipt.postings) {
-    const a = agents.get(p.account);
-    if (!a || a.role !== 'verifier' || p.amount_cc <= 0) continue;
+    if (p.amount_cc <= 0) continue;
+    if (parties.has(p.account) || p.account.startsWith('protocol:')) continue;
     const held = stakes.get(p.account) || 0;
     const room = +(STAKE_TARGET_CC - held).toFixed(4);
     if (room <= 0) continue;
@@ -580,7 +590,7 @@ function handleCanaryResult(msg, chan) {
     const a = e && e.attestation;
     if (!a || a.contract_id !== ref) continue;
     const v = agents.get(a.verifier);
-    if (!v || v.role !== 'verifier' || !panelDids.includes(a.verifier)) continue;
+    if (!hasRole(v, 'verifier') || !panelDids.includes(a.verifier)) continue;
     if (!verify(v.pub, a, e.sig)) continue;
     // Same accountability bar as a settlement: the reveal must open a
     // commitment made before the verifier saw anyone else's verdict.
@@ -665,7 +675,7 @@ function handleForced(msg, chan) {
   const passers = new Set();
   for (const { attestation, sig } of attestations) {
     const v = agents.get(attestation.verifier);
-    if (!v || v.role !== 'verifier') continue;
+    if (!hasRole(v, 'verifier')) continue;
     if (!expected.has(attestation.verifier)) continue;
     if (attestation.contract_id !== ref || attestation.verdict !== 'PASS') continue;
     if (verify(v.pub, attestation, sig)) passers.add(attestation.verifier);
@@ -803,7 +813,7 @@ function buildExport({ includeRawLog = true } = {}) {
     metrics: buildMetrics(),
     balances: Object.fromEntries(balances),
     credit_lines: Object.fromEntries(
-      [...agents].filter(([, a]) => a.role === 'agent')
+      [...agents].filter(([, a]) => hasRole(a, 'agent'))
         .map(([d]) => [d, clOf(d)])),
     chains: Object.fromEntries(chains),
     checkpoints,
@@ -1000,6 +1010,8 @@ transport.listen({
         case 'register': {
           const body = { did: msg.did, pub: msg.pub, box_pub: msg.box_pub };
           if (msg.role) body.role = msg.role;
+          // roles 也要進簽署本體，否則任何人都能改別人的角色宣告。
+          if (msg.roles) body.roles = msg.roles;
           if (!verify(msg.pub, body, msg.sig)) {
             return fail(chan, 'bad register signature', msg.did);
           }
@@ -1017,6 +1029,12 @@ transport.listen({
             stats: prior ? prior.stats
               : (importedStats.get(msg.did) || eeff.newStats()),
             role: msg.role || 'agent',
+            // 角色可以重疊（#62 階段 2）。`role` 保留給 log 與既有匯出欄位，
+            // 判斷一律走 hasRole——一個節點同時交易又驗證是 SDD 的模型
+            // （FR-041「驗證」是從 pool 抽選的角色，不是另一種物種），
+            // 而原型把兩者拆成兩個進程只是 Phase 1 的方便。
+            roles: new Set(Array.isArray(msg.roles) && msg.roles.length
+              ? msg.roles : [msg.role || 'agent']),
           });
           pubkeys.set(msg.did, msg.pub);
           if (!joinedAt.has(msg.did)) joinedAt.set(msg.did, Date.now());
@@ -1067,7 +1085,7 @@ transport.listen({
             verifiers: [...agents]
               // === true, not !== false: a verifier that has not confirmed it
             // can hear us is not eligible (#49's sibling).
-            .filter(([, a]) => a.role === 'verifier' && a.online === true)
+            .filter(([, a]) => hasRole(a, 'verifier') && a.online === true)
               .map(([did, a]) => ({ did, pub: a.pub, box_pub: a.boxPub })),
             lock: { checkpoint_seq: latest ? latest.cp.seq : -1,
                     root: latest ? latest.cp.root : sha256('genesis') },
