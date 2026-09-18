@@ -376,6 +376,25 @@ function validateSchedule(receipt, chan, ref, attestations) {
       fail(chan, `seed checkpoint #${receipt.panel_seed_cp} not minted yet`, ref);
       return false;
     }
+    // 當事人不得進入自己合約的 verifier pool（#62 合併角色的前提）。
+    //
+    // 今天不可能發生：Hub 的 role 是互斥的，`list_verifiers` 只廣告
+    // role==='verifier'，所以交易者永遠不在任何 pool 裡。但 #62 要讓 verifier
+    // 也參與市場（N=6 的實測顯示它們持有 210.44 CC、佔全部正餘額 97.5%），
+    // 角色一旦可以重疊，「自己裁判自己」就從不可能變成只差一個設定檔。
+    //
+    // 守門放在 Hub 而不只是 agent 端，因為 pool 是 requester 在合約時**自己
+    // 釘的**，Hub 只比對雜湊是否與釘住的一致——雜湊自洽不代表內容合法。
+    // 這與 #6 的教訓同型：能被一方選擇的東西就必須被另一方重新檢查。
+    const parties = [receipt.requester, receipt.provider];
+    const selfJudge = (receipt.verifier_pool || [])
+      .map((v) => (typeof v === 'string' ? v : v.did))
+      .filter((d) => parties.includes(d));
+    if (selfJudge.length) {
+      fail(chan, `contract party in its own verifier pool: ` +
+        selfJudge.map((d) => d.slice(0, 18)).join(', '), ref);
+      return false;
+    }
     if (panel.poolHash(receipt.verifier_pool) !== receipt.verifier_pool_hash) {
       fail(chan, 'verifier pool does not match its pinned hash', ref);
       return false;

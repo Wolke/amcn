@@ -486,6 +486,20 @@ async function main() {
   check('S15', '取回從未鎖入的抵押品', 'block',
     !c3 || !/cannot release/.test(c3.why || ''), c3 ? c3.why : '無回應');
 
+  // S16 — 把自己放進自己合約的 verifier pool。這是 #62 合併角色的前提守門：
+  // 今天 Hub 的 role 互斥所以不可能發生，但 pool 是 requester 在合約時自己釘
+  // 的、Hub 只比對雜湊是否自洽，所以角色一旦重疊就只差一個設定檔。S 組的做法
+  // 正好適用——兩個身分可以簽任何東西，所以這份收據簽章全部有效。
+  const selfPool = [X.did, Y.did];
+  const s16 = await submit({ receipt: {
+    acceptance_method: 'judge-quorum',
+    verifier_pool: selfPool,
+    verifier_pool_hash: panelLib.poolHash(selfPool),
+    panel_seed_cp: 1 } });
+  check('S16', '把合約當事人放進自己的 verifier pool', 'block',
+    !s16 || !/contract party in its own verifier pool/.test(s16.why || ''),
+    s16 ? s16.why : '無回應');
+
   check('S9', '十一次攻擊之後帳本完全沒動', 'block', !(await unchanged(before)));
   pair.close();
 

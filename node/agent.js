@@ -1143,8 +1143,15 @@ function postTask(post) {
               'that took awards and never delivered');
         }
         const contractId = `c-${task.task_id}`;
+        // 當事人不得進入自己合約的 pool（#62 合併角色的前提）。今天是 no-op，
+        // 因為 Hub 的 role 互斥、`list_verifiers` 不會廣告交易者；但角色一旦
+        // 重疊，這一行與 Hub 的守門必須**算出同一個 pool**，否則就是 #72 那種
+        // 雙方推導不一致導致結算做不成的形態。
+        const parties = [id.did, win.provider];
         const pool = post.acceptance === 'judge-quorum'
-          ? [...(verifierDir.verifiers || [])] : [];
+          ? [...(verifierDir.verifiers || [])]
+            .filter((v) => !parties.includes(typeof v === 'string' ? v : v.did))
+          : [];
         // Awarding a quorum contract against too small a pool produces a
         // contract that can never settle: the panel is short, attestations
         // never reach two, and the hub refuses. Twelve tasks stalled exactly
