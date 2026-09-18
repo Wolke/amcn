@@ -64,6 +64,9 @@ cd node && node chaos-run.js scenarios/soak-norebate.json
 # 快照＋尾檔恢復（#74）：歷史只存在尾檔時殺掉 Hub，驗證重播完整
 cd node && node chaos-run.js scenarios/tail-recover.json
 
+# 大尾檔（#74）：把快照預算調緊使間隔拉到 ~394s，測大尾檔重播（約 20 分鐘）
+cd node && node chaos-run.js scenarios/tail-large.json
+
 # 說謊的排序器（#69c／#72）：Hub 對一半節點供應分叉 checkpoint，看誰說出來
 cd node && node chaos-run.js scenarios/hub-equivocates.json
 cd node && node chaos-run.js scenarios/hub-equivocates-panel.json
