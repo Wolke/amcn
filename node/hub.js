@@ -314,9 +314,13 @@ function makeCheckpoint() {
         ? { type: 'checkpoint', cp: forked, sig: forkedSig }
         : { type: 'checkpoint', cp, sig: entry.sig });
     }
+    tailAppend();
     return cp;
   }
   broadcast({ type: 'checkpoint', cp, sig: entry.sig });
+  // 每一筆帳本變動之後都會走到這裡（applyPostings 與結算路徑都呼叫
+  // makeCheckpoint），所以這是唯一不會漏掉任何 append 的位置（#74）。
+  tailAppend();
   return cp;
 }
 
@@ -842,34 +846,175 @@ function buildExport({ includeRawLog = true } = {}) {
 // A disaster export you have to remember to take is not disaster recovery.
 // The pilot proved it: export->import shipped, then the hub went down with
 // nobody having run ledger-dump.js, and that ledger was gone regardless.
-// HUB_DUMP_PATH writes the same artefact on a timer, so the most a crash
-// costs is one interval.
+// 快照＋附加尾檔（登記簿 #74）。
+//
+// 原本每 `HUB_DUMP_MS`（預設 2 秒，chaos 設定）把**整份歷史**重新
+// `JSON.stringify` 一次，成本 O(全部歷史)。實測：雙角色拓撲的匯出檔以
+// 296.9 KB/分成長，而每 2 秒重寫一次就是每分鐘上百 MB 的暫時字串——RSS
+// 因此以 4.82 MB/分爬升（堆完全是平的，所以那不是洩漏，是配置 churn）。
+// 4 小時後匯出檔約 50MB，每 2 秒重寫就是每秒 25MB，Owner 裁定的 4 小時
+// 演練會死在這裡。這與 #41 同型：稀疏 checkpoint 只修掉其中一個實例。
+//
+// 改法：快照不常寫，每一筆新的 event／receipt／checkpoint **立刻附加**到
+// `<file>.tail`（JSON-lines）。成本從 O(全部) 變成 O(新增)，而且耐久性
+// **比原本更好**——原本崩潰最多損失一個間隔（2 秒），現在損失的是尚未
+// 落盤的那一筆。
+//
+// 崩潰安全的順序：寫快照 tmp → rename → 才清空尾檔。若在 rename 與清空
+// 之間崩潰，尾檔會含有快照裡已有的記錄——所以每一行都帶**目標陣列的索引**，
+// 匯入時只在「剛好是下一筆」時套用，重播因此是幂等的。寫到一半被截斷的
+// 最後一行由 JSON.parse 的守衛跳過。
+const dumpTail = { file: null,
+  written: { events: 0, receipts: 0, checkpoints: 0, pubkeys: 0 } };
+function tailAppend() {
+  if (!dumpTail.file) return;
+  const lines = [];
+  // 公鑰**無法從事件推導**，所以尾檔必須帶它。第一版沒帶，於是快照（開場寫、
+  // 當時還沒有人註冊）之後所有重播的收據都報「provider signature invalid」
+  // ——439 筆套用成功、96 個驗證失敗。demo-rebuild 照不出這個洞，因為它的
+  // 匯出檔本來就是完整的；要靠「歷史只存在於尾檔」的情境才會現形。
+  const pkEntries = [...pubkeys.entries()];
+  for (let i = dumpTail.written.pubkeys; i < pkEntries.length; i++) {
+    const [did, pub] = pkEntries[i];
+    lines.push(JSON.stringify({ k: i, did, pub, joined: joinedAt.get(did) || null }));
+  }
+  for (let i = dumpTail.written.events; i < events.length; i++) {
+    lines.push(JSON.stringify({ e: i, ev: events[i] }));
+  }
+  for (let i = dumpTail.written.receipts; i < receipts.length; i++) {
+    lines.push(JSON.stringify({ r: i, rc: receipts[i] }));
+  }
+  for (let i = dumpTail.written.checkpoints; i < checkpoints.length; i++) {
+    lines.push(JSON.stringify({ c: i, cp: checkpoints[i] }));
+  }
+  if (!lines.length) return;
+  try {
+    require('node:fs').appendFileSync(dumpTail.file, lines.join('\n') + '\n');
+    dumpTail.written = { events: events.length, receipts: receipts.length,
+                         checkpoints: checkpoints.length,
+                         pubkeys: pubkeys.size };
+  } catch (err) {
+    console.error(`[hub] tail append failed: ${err.message}`);
+  }
+}
+
 function startAutoDump() {
   const file = process.env.HUB_DUMP_PATH;
   if (!file) return;
-  const ms = Number(process.env.HUB_DUMP_MS || 10000);
+  // 快照間隔與原本的 dump 間隔分開：尾檔已經提供逐筆耐久性，所以快照只是
+  // 為了讓重播不必從創世開始，可以慢得多。
+  const ms = Number(process.env.HUB_SNAPSHOT_MS
+    || process.env.HUB_DUMP_MS || 60000);
   const fs = require('node:fs');
   fs.mkdirSync(require('node:path').dirname(file), { recursive: true });
+  // HUB_TAIL=0 關掉尾檔，退回「只有快照」的舊行為。存在的理由有兩個：
+  // 一是它讓 `tail-recover` 的斷言可以被證明**會失敗**（關掉之後歷史就真的
+  // 不見，#51 的教訓——不會失敗的檢查等於沒有檢查）；二是萬一附加寫入在某個
+  // 檔案系統上出問題，有一條退路。
+  dumpTail.file = process.env.HUB_TAIL === '0' ? null : `${file}.tail`;
+  if (!dumpTail.file) console.log('[hub] tail disabled (HUB_TAIL=0)');
+  if (dumpTail.file) {
+    try { fs.rmSync(dumpTail.file, { force: true }); } catch { /* 沒有就算了 */ }
+  }
   const write = () => {
     try {
-      // Written to a temp path and renamed, so a crash mid-write cannot
-      // leave a truncated file where a recoverable one used to be.
+      // 寫 tmp 再 rename，所以寫一半崩潰不會把可恢復的檔案換成截斷的檔案。
       const tmp = `${file}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(buildExport({ includeRawLog: false })));
+      const snap = buildExport({ includeRawLog: false });
+      const body = JSON.stringify(snap);
+      fs.writeFileSync(tmp, body);
       fs.renameSync(tmp, file);
+      // 順序：快照就位之後才清空尾檔。反過來的話，兩者之間的崩潰會讓那段
+      // 歷史兩邊都沒有。
+      if (dumpTail.file) fs.writeFileSync(dumpTail.file, '');
+      dumpTail.written = { events: snap.events.length,
+                           receipts: snap.receipts.length,
+                           checkpoints: (snap.checkpoints || []).length,
+                           pubkeys: Object.keys(snap.pubkeys || {}).length };
+      return body.length;
     } catch (err) {
-      console.error(`[hub] auto-dump failed: ${err.message}`);
+      console.error(`[hub] snapshot failed: ${err.message}`);
+      return 0;
     }
   };
-  setInterval(write, ms).unref();
-  write();
-  console.log(`[hub] auto-dump every ${ms}ms → ${file}`);
+  // 快照間隔隨檔案大小自動放慢，讓快照的寫入頻寬有上界（#74）。
+  //
+  // 這件事**只有在尾檔存在時才做得到**：原本放慢間隔的代價是崩潰損失的視窗
+  // 變長，而尾檔已經提供逐筆耐久性，所以放慢快照不損失任何恢復點——它只是
+  // 讓重播的起點舊一些。11 分鐘實測：固定 30 秒把 RSS 迴歸從 4.82 壓到 2.02
+  // MB/分，剩下的成長就是「快照仍是 O(全部歷史)」這一項。
+  //
+  // 預算式而非固定倍數：4 小時後匯出檔約 50MB，固定 30 秒是每秒 1.7MB，而
+  // 100 KB/s 的預算會把間隔拉到 8 分鐘。尾檔在那 8 分鐘裡累積的是事件而不是
+  // 整份歷史，所以代價很小。
+  const budgetKbs = Number(process.env.HUB_SNAPSHOT_KBPS || 100);
+  let timer = null;
+  const schedule = (lastBytes) => {
+    const needed = budgetKbs > 0
+      ? Math.round(lastBytes / 1024 / budgetKbs * 1000) : ms;
+    const next = Math.max(ms, needed);
+    if (needed > ms) {
+      console.log(`[hub] snapshot ${(lastBytes / 1048576).toFixed(1)}MB → ` +
+        `下一次延到 ${(next / 1000).toFixed(0)}s（預算 ${budgetKbs} KB/s）`);
+    }
+    timer = setTimeout(() => { const n = write(); schedule(n); }, next);
+    timer.unref();
+  };
+  schedule(write());
+  console.log(`[hub] snapshot every ${ms}ms → ${file}` +
+    (dumpTail.file
+      ? `（每筆變動即時附加到 ${require('node:path').basename(dumpTail.file)}）`
+      : '（尾檔已關閉，崩潰最多損失一個快照間隔）'));
 }
 
 // W10: start as a second sequencer from a disaster export. Verified, not
 // trusted — see lib/rebuild.js. A refusal to start is the correct outcome
 // when the export does not check out; carrying on with an unverified ledger
 // would make the sequencer exactly the trust root §2.2 says it is not.
+// 尾檔重播（#74）。合併發生在**驗證之前**，所以尾檔裡的東西一樣要過
+// rebuild 的簽章、鏈、checkpoint 與 #69 的截短／分叉檢查——附加檔案不是
+// 信任邊界的破口。
+function mergeTail(ex, tailFile) {
+  const fs = require('node:fs');
+  if (!fs.existsSync(tailFile)) return 0;
+  let applied = 0, skipped = 0, torn = 0;
+  for (const line of fs.readFileSync(tailFile, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    let rec;
+    // 寫到一半被截斷的最後一行：跳過而不是中止。它代表崩潰發生在 append
+    // 的中途，而那一筆本來就還沒落盤。
+    try { rec = JSON.parse(line); } catch { torn += 1; continue; }
+    // 只在「剛好是下一筆」時套用。快照 rename 與清空尾檔之間的崩潰會留下
+    // 已在快照裡的記錄，這個條件讓重播變成幂等的。
+    if (rec.ev !== undefined && rec.e === ex.events.length) {
+      ex.events.push(rec.ev); applied += 1;
+    } else if (rec.rc !== undefined && rec.r === ex.receipts.length) {
+      ex.receipts.push(rec.rc); applied += 1;
+    } else if (rec.cp !== undefined && rec.c === (ex.checkpoints || []).length) {
+      (ex.checkpoints = ex.checkpoints || []).push(rec.cp); applied += 1;
+    } else if (rec.pub !== undefined && rec.k === Object.keys(ex.pubkeys || {}).length) {
+      ex.pubkeys = ex.pubkeys || {};
+      ex.pubkeys[rec.did] = rec.pub;
+      if (rec.joined) { (ex.joined_at = ex.joined_at || {})[rec.did] = rec.joined; }
+      applied += 1;
+    } else {
+      skipped += 1;
+    }
+  }
+  if (applied || skipped || torn) {
+    console.log(`[hub] tail replay: ${applied} applied, ${skipped} already in ` +
+      `snapshot, ${torn} torn`);
+  }
+  if (applied) {
+    // 快照裡的**衍生**欄位現在都過期了。刪掉它們讓 rebuild 從事件重算——
+    // 留著 collateral 會直接讓驗證失敗（rebuild 會拿它跟重播結果對照），
+    // 而留著 balances／chains 只是把過期的數字帶進來。
+    delete ex.balances; delete ex.chains; delete ex.collateral;
+    delete ex.credit_lines; delete ex.metrics; delete ex.checkpoint_seq;
+  }
+  return applied;
+}
+
 if (process.env.HUB_IMPORT) {
   const file = process.env.HUB_IMPORT;
   let ex;
@@ -879,6 +1024,7 @@ if (process.env.HUB_IMPORT) {
     console.error(`[hub] cannot read import ${file}: ${err.message}`);
     process.exit(1);
   }
+  if (process.env.HUB_TAIL !== '0') mergeTail(ex, `${file}.tail`);
   const r = rebuildLib.rebuild(ex, { expectHubDid: process.env.HUB_EXPECT_DID || null });
   if (!r.ok) {
     console.error(`[hub] REFUSING to start: import failed verification ` +

@@ -61,6 +61,9 @@ cd node && node demo-reconnect.js
 cd node && node chaos-run.js scenarios/soak-rebate.json
 cd node && node chaos-run.js scenarios/soak-norebate.json
 
+# 快照＋尾檔恢復（#74）：歷史只存在尾檔時殺掉 Hub，驗證重播完整
+cd node && node chaos-run.js scenarios/tail-recover.json
+
 # 說謊的排序器（#69c／#72）：Hub 對一半節點供應分叉 checkpoint，看誰說出來
 cd node && node chaos-run.js scenarios/hub-equivocates.json
 cd node && node chaos-run.js scenarios/hub-equivocates-panel.json

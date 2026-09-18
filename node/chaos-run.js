@@ -76,7 +76,10 @@ async function runScenario(file) {
     hubProc = spawnProc('hub', 'hub.js', {
       ...chaosEnv('hub'),
       HUB_PORT: String(port), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0', HUB_SEED: `chaos-${sc.name}`,
-      HUB_DUMP_PATH: dumpPath, HUB_DUMP_MS: '2000',
+      // 快照慢、尾檔即時（#74）。原本 2 秒重寫整份歷史，而那個成本是
+      // O(全部歷史)——雙角色長跑因此以 4.82 MB/分推高 RSS。尾檔提供逐筆
+      // 耐久性，所以快照可以慢得多而不損失恢復點。
+      HUB_DUMP_PATH: dumpPath, HUB_SNAPSHOT_MS: '30000',
       HUB_ADVERTISE_HOST: '127.0.0.1',
       ...(sc.defaultAfterS ? {
         HUB_DEFAULT_AFTER_MS: String(sc.defaultAfterS * 1000),
@@ -187,6 +190,8 @@ async function runScenario(file) {
     c.send({ type });
   });
   let lastConsoles = {};
+  let receiptsAtKill = 0;   // #74：殺掉 Hub 當下的收據數，供 noHistoryLoss 用
+  let idAtKill = null;      // 同上，但記具體的 contract_id——數量會說謊
   const console_ = async () => {
     const out = {};
     for (let i = 0; i < agentNames.length; i++) {
@@ -201,6 +206,15 @@ async function runScenario(file) {
   for (const step of sc.timeline || []) {
     setTimeout(async () => {
       if (step.action === 'killHub') {
+        // 殺掉的那一刻記下收據數。第一版用整輪樣本的 Math.max，而那包含了
+        // 重啟之後的樣本，於是「歷史沒有倒退」變成恆真——又是一個不會失敗
+        // 的檢查（#51 的教訓）。
+        receiptsAtKill = Math.max(receiptsAtKill, lastReceipts);
+        // 光看數量還是不夠：重啟的 Hub 從空快照起來、再跑 130 秒也能累積到
+        // 比殺掉當下更多的筆數，於是「不倒退」照樣成立。所以記下一個**具體
+        // 的 contract_id**，期末的帳裡必須找得到它。
+        const rs = (lastExport && lastExport.receipts) || [];
+        if (rs.length) idAtKill = rs[rs.length - 1].receipt.contract_id;
         killHub();
         timeline.push(`T+${nowS(t0)}s  殺掉 Hub（SIGKILL，不通知任何人）`);
         console.log(`T+${nowS(t0)}s  殺掉 Hub（SIGKILL，不通知任何人）`);
@@ -354,6 +368,22 @@ async function runScenario(file) {
         const ok = after.length > 0 && after[0] - e.afterS <= e.withinS;
         check(`恢復後 ${e.withinS}s 內交易恢復`, ok,
           after.length ? `第一筆於 T+${after[0]}s，共 ${after.length} 筆` : '恢復後無成交');
+        break;
+      }
+      case 'noHistoryLoss': {
+        // 恢復測試真正該問的問題。`settlementResumesWithin` 會在一個歷史被
+        // 吞掉的帳上通過——重啟的 Hub 從幾乎空的快照起來、開始收新的結算，
+        // 看起來完全健康。所以斷言的是**收據數不得倒退**（#74）。
+        const end = lastReceipts;
+        const kept = idAtKill && (lastExport.receipts || [])
+          .some((r) => r.receipt.contract_id === idAtKill);
+        check('重啟後歷史沒有倒退（快照＋尾檔重播完整）',
+          receiptsAtKill > 0 && end >= receiptsAtKill && !!kept,
+          receiptsAtKill === 0
+            ? '本輪沒有殺掉 Hub，本案未測到'
+            : `殺掉當下 ${receiptsAtKill} 筆、期末 ${end} 筆；` +
+              `殺掉前的 ${idAtKill ? idAtKill.slice(0, 22) : '?'} ` +
+              (kept ? '仍在帳上' : '**不見了**'));
         break;
       }
       case 'forkDetected': {

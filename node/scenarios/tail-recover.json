@@ -1,0 +1,42 @@
+{
+  "name": "tail-recover",
+  "what": "#74 的恢復測試：快照只在開場寫一次（HUB_SNAPSHOT_MS 遠大於跑程），所以殺掉 Hub 之前的所有歷史**只存在於尾檔裡**。若尾檔重播是對的，重啟後的 Hub 應該擁有全部結算；若尾檔沒被讀，它會退回到幾乎空的開場快照，而 settlementResumesWithin 會在一個歷史被吞掉的帳上通過——所以真正的斷言是重啟後的收據數不得倒退",
+  "portOffset": 1640,
+  "seed": 41,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 300,
+  "sampleS": 30,
+  "maxOpenS": 200,
+  "hubEnv": {
+    "HUB_SNAPSHOT_MS": "600000"
+  },
+  "timeline": [
+    {
+      "atS": 150,
+      "action": "killHub"
+    },
+    {
+      "atS": 170,
+      "action": "startHub",
+      "import": true
+    }
+  ],
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 120
+    },
+    {
+      "kind": "settlementResumesWithin",
+      "afterS": 170,
+      "withinS": 120
+    },
+    {
+      "kind": "noHistoryLoss"
+    }
+  ]
+}
