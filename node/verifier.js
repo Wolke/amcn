@@ -36,7 +36,23 @@ const pending = new Map();
 
 const regBody = { did: id.did, pub: id.pub, box_pub: box.boxPub, role: 'verifier' };
 
-const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
+// #69c：verifier 同樣參與跨觀察者比對。不加它就等於在 attestation 這條路徑
+// 上沒有偵測，而那是 verifier 唯一會送給對等節點的訊息——也正是串謀最在意的
+// 那一條。`cp` 掛在信封上，不進被簽署的 attestation 本體。
+const cpw = require('./lib/cpwatch').create(log);
+function stampPeerSends(conn) {
+  const raw = conn.send.bind(conn);
+  conn.send = (m) => {
+    if (m && m.to) {
+      const cp = cpw.stamp();
+      if (cp) return raw({ ...m, cp });
+    }
+    return raw(m);
+  };
+  return conn;
+}
+
+const hub = stampPeerSends(transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
   // A panel that lost the hub used to stay lost, which ended the network:
   // the pool goes empty and judge-quorum tasks stop being awarded (#40).
   onOpen: () => hub.send({ type: 'register', ...regBody,
@@ -47,7 +63,16 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
   // connection that nothing ever noticed.
   ackType: 'registered',
   onMessage: (msg) => {
+    // `checkpoint` 自己的頂層 cp 是 Hub 的 checkpoint 而不是對等戳記，
+    // 要排除——否則比對的是自己跟自己（第一版就這樣寫了）。
+    if (msg.cp && msg.type !== 'checkpoint') {
+      cpw.check(msg.cp, `${msg.type} sender`);
+    }
     switch (msg.type) {
+      case 'checkpoint':
+        cpw.observe(msg.cp.seq, msg.cp.root,
+                    typeof msg.for_seq !== 'number');
+        break;
       case 'registered':
         // The hub cannot tell a healthy client from one that only
         // talks unless the client proves it heard the reply (#49).
@@ -130,6 +155,6 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
       }
     }
   },
-});
+}));
 
 console.log(`DID ${cfg.name} ${id.did}`);

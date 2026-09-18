@@ -1,0 +1,83 @@
+{
+  "name": "soak-n6",
+  "what": "測 #61 的主張在原型上是否成立：掃描說貼上限比例由 N 驅動（66.7% @ N=3 → 49% @ N=10），而所有既有長跑都只有 3 個交易者。與 soak-rebate 唯一的差別是交易者 3 → 6，回流同樣開啟。要比的不是成交量（6 個人本來就交易更多），而是**空窗、未償負債／額度、以及誰在累積**。這一輪的用途是決定「讓 verifier 也參與市場」（#62 選項 a）值不值得重構——若 N 翻倍沒有明顯改善，那個重構的理由就消失了",
+  "portOffset": 1280,
+  "seed": 41,
+  "agents": 6,
+  "verifiers": 3,
+  "durationS": 2400,
+  "sampleS": 60,
+  "maxOpenS": 150,
+  "hubEnv": {
+    "HUB_REBATE_MS": "30000",
+    "HUB_INSURANCE_TARGET_FRAC": "0.06",
+    "HUB_TREASURY_RESERVE_CC": "2"
+  },
+  "profile": {
+    "mode": "latency",
+    "latencyMs": 80,
+    "jitterMs": 40
+  },
+  "timeline": [
+    {
+      "atS": 600,
+      "target": "panel",
+      "fault": {
+        "mode": "blackhole",
+        "direction": "both"
+      }
+    },
+    {
+      "atS": 700,
+      "target": "panel",
+      "fault": "profile"
+    },
+    {
+      "atS": 1200,
+      "action": "killHub"
+    },
+    {
+      "atS": 1260,
+      "action": "startHub",
+      "import": true
+    },
+    {
+      "atS": 1800,
+      "target": "agents",
+      "fault": {
+        "mode": "loss",
+        "lossPct": 2,
+        "latencyMs": 80,
+        "jitterMs": 40
+      }
+    },
+    {
+      "atS": 2100,
+      "target": "agents",
+      "fault": "profile"
+    }
+  ],
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 300
+    },
+    {
+      "kind": "settlementResumesWithin",
+      "afterS": 1260,
+      "withinS": 180
+    },
+    {
+      "kind": "rebateReturns",
+      "minCc": 20
+    },
+    {
+      "kind": "tradingContinues",
+      "fromS": 300,
+      "maxGapS": 300
+    }
+  ]
+}

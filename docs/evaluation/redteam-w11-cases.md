@@ -197,7 +197,7 @@
 | 案 | 組 | 結果 |
 |---|---|---|
 | **F6a／F6b** | 排序器 | **兩案第一次執行都失敗** → #69（P0）。盤點表寫「分叉可離線偵測」是錯的；修 `prev_root`＋`receipts_count` 對照後轉 block |
-| F6c | 排序器 | known-open：分叉偵測得到、但協議裡沒有任何東西會讓誰持有雙邊產物 |
+| F6c | 排序器 | ~~known-open~~ **block（2026-09-18 交付 #69c）**：節點在既有對等訊息上附帶自己見到的最新 `(seq, root)`，對不上就出聲。閘門有兩道——`demo.js` 驗**零誤報**（稀疏儲存的別名 root 會製造假分叉），`redteam` F6c 驗抓得到 |
 | F3 | 重放 | block：bid 簽章涵蓋 `task_id`，requester 也以**簽署內容**的 task_id 索引，搬不過去 |
 | G3 | 基礎設施 | block：餵 agent 一份開不了的 `payload_box`，例外落在 async handler 內，進程仍在服務（#34 的修法確實生效）|
 | G14 | 基礎設施 | known-open（#16）：Hub 完全不回應，送出方無從知道少了哪個欄位 |

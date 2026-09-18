@@ -63,7 +63,7 @@ const bidUnits = new Map();     // task_id -> units bid on, to spend quota on aw
 const pendingFees = new Map();   // contract_id -> {role, provider, delivery_hash, output}
 const console_ = { balance: 0, creditLine: 0, settled: [],
                    autoPosts: 0, manualPosts: 0, scriptedPosts: 0,
-                   withheld: [] };
+                   withheld: [], forks: 0 };
 let mode = 'normal';
 const repayTracker = strategy.newTracker();
 
@@ -88,6 +88,11 @@ function refreshMode(why) {
 // that does not exist when the contract is signed (§4 #6), so selection waits
 // for it to arrive.
 const cpRoots = new Map();      // seq -> root
+// #69c：把自己見到的最新 (seq, root) 附在既有的對等訊息上，收到的一方與自己
+// 的比對。單獨的 cpRoots 不夠用——它把 checkpoint_request 的回答（可能是更早
+// 的條目）記在被問的 seq 上，兩個誠實節點因此可以對同一個 seq 持有不同 root，
+// 拿來比對會產生假分叉。cpwatch 把兩者分開，只比廣播來的。
+const cpw = require('./lib/cpwatch').create(log);
 const pendingPanel = new Map(); // contract_id -> () => void
 
 // FR-041 with the §2.2 fix: the pool is pinned at contract time, the
@@ -312,7 +317,23 @@ function fanOut(delivery, ctx, chosen) {
 
 const regBody = { did: id.did, pub: id.pub, box_pub: box.boxPub };
 
-const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
+// #69c：所有帶 `to` 的訊息（也就是經 Hub 轉發給對等節點的那些）都附上自己
+// 見到的最新 checkpoint。放在這一層而不是逐個 case 改，是因為漏掉任何一種
+// 訊息就等於在那條路徑上沒有偵測；而且 `cp` 掛在信封上、不進簽署本體，所以
+// 不影響任何既有簽章。
+function stampPeerSends(conn) {
+  const raw = conn.send.bind(conn);
+  conn.send = (m) => {
+    if (m && m.to) {
+      const cp = cpw.stamp();
+      if (cp) return raw({ ...m, cp });
+    }
+    return raw(m);
+  };
+  return conn;
+}
+
+const hub = stampPeerSends(transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
   // Re-sent on every connection: the hub cannot route to a DID whose
   // channel it does not know, and re-registering resumes the balance and
   // stats this identity already had (#35) rather than starting over.
@@ -327,6 +348,15 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
   // connection that nothing ever noticed.
   ackType: 'registered',
   onMessage: async (msg) => {
+    // #69c：對等訊息帶著送出方見到的最新 (seq, root)。比對只在雙方都見過
+    // 同一個 seq 時才有意義——落後不是分叉。偵測到不否決任何東西，只是讓
+    // 排序器對兩個人講不同故事這件事不再隱形。
+    // `checkpoint` 自己的頂層 cp 是 Hub 的 checkpoint 而不是對等戳記，
+    // 要排除——否則比對的是自己跟自己（第一版就這樣寫了）。
+    if (msg.cp && msg.type !== 'checkpoint') {
+      const why = cpw.check(msg.cp, `${msg.type} sender`);
+      if (why) console_.forks = cpw.forkCount();
+    }
     switch (msg.type) {
       case 'registered':
         // The hub cannot tell a healthy client from one that only
@@ -362,11 +392,15 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
 
       case 'checkpoint': {
         cpRoots.set(msg.cp.seq, msg.cp.root);
+        // 廣播沒有 for_seq；有 for_seq 的是 checkpoint_request 的回答，
+        // 那個 root 可能屬於更早的條目，不可拿來跨節點比對（#69c）。
+        cpw.observe(msg.cp.seq, msg.cp.root, typeof msg.for_seq !== 'number');
         // The hub stores checkpoints sparsely (#41): a root requested for
         // seq N may arrive as the entry at or before N, so record it under
         // the seq that was asked for as well.
         if (typeof msg.for_seq === 'number' && msg.cp.seq <= msg.for_seq) {
           cpRoots.set(msg.for_seq, msg.cp.root);
+          cpw.observe(msg.for_seq, msg.cp.root, false);
         }
         for (const [cid, release] of [...pendingPanel]) {
           const ctx = asRequester.get(cid);
@@ -811,7 +845,7 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
       case 'error': log(`hub error: ${msg.why} (${msg.ref})`); break;
     }
   },
-});
+}));
 
 
 console.log(`DID ${cfg.name} ${id.did} (protocol v${PROTOCOL_VERSION})`);
@@ -887,6 +921,10 @@ if (cfg.consolePort) {
       balance_cc: console_.balance,
       credit_line_cc: console_.creditLine,
       settled: console_.settled,
+      // #69c：這個節點從對等節點的戳記中發現的 checkpoint 分叉。0 是正常，
+      // 非 0 表示排序器對不同節點講了不同的故事——Owner 必須看得到。
+      checkpoint_forks: cpw.forkCount(),
+      checkpoint_fork_detail: cpw.forks().slice(-3),
       // FR-055 strategy state + §20-10 平均還債時間
       strategy: {
         mode,

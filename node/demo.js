@@ -488,6 +488,14 @@ async function main() {
     `${anonCalls} 次未標示；DID ${[...new Set(attributedUsers)]
       .map((u) => u.slice(0, 18)).join('、') || '—'}`);
 
+  // #69c 的假陽性閘門。這條比「抓得到」更容易出錯：稀疏儲存（#41）讓
+  // checkpoint_request 的回答帶著更早條目的 root，而 agent 會把它記在被問的
+  // seq 上——如果拿那種 root 跨節點比對，健康的網路會不停報假分叉。
+  check('§4 #69c 跨節點 checkpoint 比對在健康網路上零誤報',
+    consoleA.checkpoint_forks === 0,
+    `A 回報 ${consoleA.checkpoint_forks} 次分叉（期望 0）` +
+    (consoleA.checkpoint_fork_detail || []).map((f) => `，#${f.seq}`).join(''));
+
   const m = ex.metrics || {};
   check('§20-9 tx_class：每筆結算都標明種類，未標示者被拒',
     receipts.every((r) => ['market', 'test', 'subsidy', 'related-party']

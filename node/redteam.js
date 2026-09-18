@@ -192,6 +192,12 @@ async function main() {
   // detectable offline. These two cases test that claim directly.
   const hubId = identityFromSeed('redteam');
   const rebuildLib = require('./lib/rebuild');
+  // A 的 DID 供 F6c 與 G3 共用。取在這裡而不是各自取：第一版把它宣告在 G 組，
+  // 而 F6c 在 F 組引用它——同一個函式作用域裡的 TDZ 錯誤。
+  let aDid = null;
+  try {
+    aDid = (await (await fetch(`http://127.0.0.1:${47301 + OFF}/status`)).json()).did;
+  } catch { /* 沒有 Console；相關案例會自報未測到 */ }
 
   // F6a — truncation. Nothing is forged: every receipt, event and checkpoint
   // below is genuine and hub-signed. The hub simply shows one observer a
@@ -242,32 +248,39 @@ async function main() {
                 : '離線重建沒抓到')
       : '簽章構造失敗，本案無效');
 
-  // F6c — the honest remainder. #69a/#69b make a fork detectable *by an
-  // observer holding artefacts from both branches*, and nothing in the
-  // protocol ever puts one there: every agent learns roots from the same hub,
-  // and no message type carries another agent's checkpoint view. So detection
-  // is possible and never performed.
+  // F6c — was a known-open: a fork was detectable only by someone holding
+  // artefacts from both branches, and nothing put anyone there. #69c added
+  // the stamp, so this is now behavioural: hand a real agent a peer-directed
+  // message carrying a root that conflicts with what the hub minted, and see
+  // whether it says so.
   //
-  // Testing the absence of a mechanism means looking for the mechanism, which
-  // is why this case reads source rather than sending frames. A behavioural
-  // version would need a hub built to lie to different peers differently —
-  // worth building when the gossip exists to test against, pointless before.
-  // Peer-directed means carrying `to:` — that is how the hub decides what to
-  // relay, so a message without it cannot reach another node. The first
-  // version of this matched `checkpoint_request`, which is agent→hub, and
-  // reported the mechanism as present: the wrong question answered cleanly.
-  const fs = require('node:fs');
-  const peerCpTraffic = ['agent.js', 'verifier.js'].some((f) => {
-    const src = fs.readFileSync(path.join(__dirname, f), 'utf8');
-    return src.split('send({').slice(1).some((chunk) => {
-      const body = chunk.split('})')[0];
-      return /\bto:/.test(body) && /root|checkpoint/.test(body);
-    });
-  });
-  check('F6c', '沒有任何機制讓兩個觀察者比對 checkpoint（分叉可偵測但無人偵測）',
-    'known-open', !peerCpTraffic,
-    'agent／verifier 都只從 Hub 單向接收 root，彼此之間沒有 checkpoint 訊息；' +
-    '最小修法是節點在既有訊息上附帶自己見到的最新 (seq, root)，對不上就出聲');
+  // What this tests and what it does not, because the difference matters: it
+  // exercises the detection path end to end. It does not simulate a hub that
+  // serves two peers different branches — that needs a deliberately lying
+  // sequencer, which is the next thing worth building and is not what this
+  // case claims. A stamp the receiver never checks would pass the old
+  // source-reading version of this case and fail this one.
+  const seenSeq = (before.checkpoints.at(-1) || {}).cp.seq;
+  let forksSeen = null;
+  if (aDid && typeof seenSeq === 'number') {
+    await ask({ type: 'bid', to: aDid,
+                bid: { task_id: 't-nope', provider: evil.did, price_cc: 1,
+                       box_pub: evil.pub, issued_at: Date.now(),
+                       expires_at: Date.now() + 60000 },
+                sig: 'AAAA', pub: evil.pub,
+                cp: { seq: seenSeq, root: sha256('a different branch') } },
+               null, 1500);
+    await sleep(1200);
+    try {
+      forksSeen = (await (await fetch(
+        `http://127.0.0.1:${47301 + OFF}/status`)).json()).checkpoint_forks;
+    } catch { forksSeen = null; }
+  }
+  check('F6c', '對等節點帶來互斥的 checkpoint root（應被察覺，#69c）', 'block',
+    !(forksSeen > 0),
+    forksSeen === null
+      ? '取不到 A 的 Console，本案未測到'
+      : `A 在收到衝突的 #${seenSeq} root 後回報 ${forksSeen} 次分叉`);
 
   // F3 — a bid is only usable on the task it was signed for. Checked on the
   // object rather than through a victim agent, because the binding is what
@@ -514,10 +527,6 @@ async function main() {
   // the trigger is a contract whose sealed payload cannot be opened: the
   // throw happens inside an async handler, where an unhandled rejection used
   // to take the process down mid-contract.
-  let aDid = null;
-  try {
-    aDid = (await (await fetch(`http://127.0.0.1:${47301 + OFF}/status`)).json()).did;
-  } catch { /* no console; case reports itself as untested */ }
   let aliveAfter = null;
   if (aDid) {
     await ask({ type: 'contract', to: aDid, contract: {
