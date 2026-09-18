@@ -157,6 +157,45 @@ class Ledger:
                   [Posting(account, -take), Posting(dest, take)])
         return take
 
+    def protocol_rebate(self, tick: int, source: str,
+                        shares: dict[str, float]) -> float:
+        """把 protocol 帳戶累積的餘額退還給活躍交易者（登記簿 #61／#71）。
+
+        為什麼需要這條路徑：protocol 帳戶只進不出，意味著它們持有的每一塊 CC
+        都是**永久借出去的信用**。所以在沒有結構性淨賣方的小網路裡，交易者的
+        總負債只會隨成交量單調成長，直到全部貼上信用上限——成交量被
+        `Σ額度 ÷ 費率` 封頂。原型 40 分鐘 soak 正是這個結局（最後 12 分鐘
+        零成交，三人全部貼牆）。
+
+        §2.2「Treasury 啟動」把回流列為設計的一部分（金絲雀、逆週期收購、
+        L_boot 補貼），條件是計入有治理上限的創世補貼額度、全部
+        tx_class=subsidy。這裡實作的是其中最直接的一種：退還已收取的費用。
+
+        與 demurrage 的差別要講清楚：demurrage 是**向持有者收費**（#66 量到
+        那只是把一個吸收端換成另一個），這條是**把已收的費用還出去**。方向
+        相反，目的也不同。
+
+        **第一版只針對 Treasury，而量測打掉了那個選擇**：模擬器裡 Treasury
+        在 N=3／10／50 全部是**負的**（金絲雀支出大於費收），真正累積的是保險
+        池與 verifier 持有量；原型 soak 的 122.53 CC 裡保險池佔 75.90（62%），
+        因為三個 agent 永遠是 thin、每筆 6% 進保險池。所以這個方法取
+        `source` 而不是寫死 Treasury——「哪個帳戶在吸」是實測問題。
+
+        Σ=0 仍然成立（搬移而非鑄造，FR-051）。回傳實際退還的總額。
+        """
+        total = sum(max(0.0, v) for v in shares.values())
+        bal = self.balances.get(source, 0.0)
+        if total <= 1e-12 or bal <= 1e-12:
+            return 0.0
+        if total > bal:            # 不得讓來源帳戶因退費而轉負
+            scale = bal / total
+            shares = {k: v * scale for k, v in shares.items()}
+            total = bal
+        self.post(tick, "protocol_rebate", f"rebate:{source}:{tick}",
+                  [Posting(source, -total)] +
+                  [Posting(a, v) for a, v in shares.items() if v > 1e-12])
+        return total
+
     # 上一次 write_off 沒收到的保證金金額。呼叫端要分辨「保證金賠掉多少」
     # 與「保險池賠掉多少」，而 write_off 的回傳值是總吸收額。
     last_collateral_seized: float = 0.0

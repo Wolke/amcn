@@ -43,6 +43,27 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         demurrage_rate: float = 0.0,
         demurrage_idle_days: int = 0,
         demurrage_dest: str = "treasury",
+        # Treasury 退費（登記簿 #61／#71）。protocol 帳戶只進不出，所以它們
+        # 持有的每一塊 CC 都是永久借出去的信用；在沒有結構性淨賣方的小網路
+        # 裡，交易者的總負債因此隨成交量單調成長直到全部貼牆。這條路徑把已
+        # 收取的費用還回去。frac 是每次退還 Treasury **超額部分**的比例，
+        # reserve_cc 是留給金絲雀與 L_boot 補貼的準備金（§2.2 的「創世補貼
+        # 額度」在模擬裡以準備金近似）。權重用**流出量**而非平均分：平均分
+        # 會付給只累積的帳戶，那正是 #62／#64 的形態。
+        treasury_rebate_frac: float = 0.0,
+        treasury_rebate_days: int = 7,
+        treasury_reserve_cc: float = 0.0,
+        # 加權方式做成參數而不是由我斷言，理由與 #66 的 dest 模式相同——
+        # 「該獎勵誰」是個經濟判斷，讓掃描回答比讓我猜可靠：
+        #   outgoing → 依本期支出（獎勵流通，純累積者拿不到）
+        #   gross    → 依本期雙向成交量（買賣都算）
+        #   equal    → 本期有動過的帳戶均分
+        treasury_rebate_weight: str = "outgoing",
+        # 保險池釋放（#61／#71）。保險池只在違約時付出，所以健康的網路裡它
+        # 永久累積——**一個只會成長的準備金就是稅**。規則是準備金目標對應
+        # 曝險（未償負餘額總額），超過目標的部分退還。target_frac=0 表示
+        # 關閉；0.5 表示「持有未償負債的一半」。
+        insurance_target_frac: float = 0.0,
         trace: str | None = None) -> Report:
     sc_deadbeat, washer_frac, expiry_cliff = SCENARIOS[scenario]
     if deadbeat_frac is None:
@@ -51,6 +72,13 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
     # 每個帳戶最後一次有分錄的 tick，供「閒置」保管費判斷用。
     # 每個帳戶最後一次**支出**的 tick。用支出而非任何分錄，見下方註解。
     last_move: dict[str, int] = {}
+    # 本期（上次退費以來）每個帳戶的流出量，供 Treasury 退費加權用。
+    out_volume: dict[str, float] = {}
+    gross_volume: dict[str, float] = {}
+    rebated_total = 0.0
+    rebate_rounds = 0
+    released_total = 0.0
+    release_rounds = 0
     seen_events = 0
     defaults: list[dict] = []          # 每個違約身分拿走多少、賠掉多少
     agents = {a.aid: a for a in build_population(
@@ -136,6 +164,12 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                 for pg in ev.postings:
                     if pg.amount_cc < 0:
                         last_move[pg.account] = ev.tick
+                        if ev.kind == "settlement":
+                            out_volume[pg.account] = out_volume.get(
+                                pg.account, 0.0) - pg.amount_cc
+                    if ev.kind == "settlement" and pg.amount_cc > 0:
+                        gross_volume[pg.account] = gross_volume.get(
+                            pg.account, 0.0) + pg.amount_cc
 
             # --- 保管費（#66）-------------------------------------
             # 每天一次。對象是持有正餘額者，包含 verifier——#62 量到的正是
@@ -169,6 +203,67 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                                     f"demurrage_payout:{tick}",
                                     [Posting(DEMURRAGE_POOL, -pool)] +
                                     [Posting(a, share) for a in active])
+
+            # --- Treasury 退費（#61／#71）---------------------------
+            # 每 treasury_rebate_days 一次。只退「超過準備金的部分」，準備金
+            # 留給金絲雀與 L_boot 補貼——把 Treasury 退到零會讓 §2.2 設計的
+            # 另外兩條支出路徑無法運作，那是把一個問題換成另一個。
+            if (treasury_rebate_frac > 0
+                    and tick > 0
+                    and tick % (treasury_rebate_days * TICKS_PER_DAY) == 0):
+                excess = ledger.balance(TREASURY) - treasury_reserve_cc
+                if excess > 1e-9:
+                    budget = excess * treasury_rebate_frac
+                    if treasury_rebate_weight == "equal":
+                        movers = [x.aid for x in agents.values()
+                                  if x.online and out_volume.get(x.aid, 0.0) > 0]
+                        w = {a: 1.0 for a in movers}
+                    else:
+                        src = (out_volume if treasury_rebate_weight == "outgoing"
+                               else gross_volume)
+                        w = {x.aid: src.get(x.aid, 0.0)
+                             for x in agents.values() if x.online
+                             and src.get(x.aid, 0.0) > 0}
+                    wsum = sum(w.values())
+                    if wsum > 1e-9:
+                        shares = {a: budget * v / wsum for a, v in w.items()}
+                        paid = ledger.protocol_rebate(tick, TREASURY, shares)
+                        if paid > 1e-9:
+                            rebated_total += paid
+                            rebate_rounds += 1
+            # --- 保險池超額釋放（#61／#71）--------------------------
+            # 與 Treasury 退費同一天、同一個加權，但來源不同：量測顯示保險池
+            # 才是主要吸收端（模擬 N=50 持有 52.93 CC、原型 soak 75.90 CC，
+            # 後者是 122.53 總吸收的 62%）。目標綁曝險而不是綁成交量：保險池
+            # 存在是為了吸收違約，而可能違約的金額就是現在的未償負餘額。
+            if (insurance_target_frac > 0
+                    and tick > 0
+                    and tick % (treasury_rebate_days * TICKS_PER_DAY) == 0):
+                exposure = sum(-ledger.balance(x.aid) for x in agents.values()
+                               if ledger.balance(x.aid) < 0)
+                target = exposure * insurance_target_frac
+                surplus = ledger.balance(INSURANCE) - target
+                if surplus > 1e-9:
+                    movers = {x.aid: out_volume.get(x.aid, 0.0)
+                              for x in agents.values()
+                              if x.online and out_volume.get(x.aid, 0.0) > 0}
+                    wsum = sum(movers.values())
+                    if wsum > 1e-9:
+                        shares = {a: surplus * v / wsum
+                                  for a, v in movers.items()}
+                        paid = ledger.protocol_rebate(tick, INSURANCE, shares)
+                        if paid > 1e-9:
+                            released_total += paid
+                            release_rounds += 1
+
+            # 本期歸零，無論兩條路徑有沒有退成功——權重要反映「最近」而不是
+            # 全期。放在兩個區塊之後而不是第一個裡面：保險池釋放單獨開啟時，
+            # 第一版會讓權重從不歸零、累積整個 84 天。
+            if ((treasury_rebate_frac > 0 or insurance_target_frac > 0)
+                    and tick > 0
+                    and tick % (treasury_rebate_days * TICKS_PER_DAY) == 0):
+                out_volume.clear()
+                gross_volume.clear()
 
             # write off agents gone ≥14 days with negative balance
             for a in agents.values():

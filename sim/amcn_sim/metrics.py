@@ -50,6 +50,11 @@ class Report:
     # 的問題不是他們賺多少，而是賺到的錢**留在那裡不動**，離開了交易流通。
     verifier_balance_cc: float = 0.0
     demurrage_collected_cc: float = 0.0
+    # 退還給交易者的 Treasury 收入（#61／#71）。`sweep_size` 的
+    # protocol_share_pct（(treasury + insurance) ÷ 結算量）扣掉這一項，才是
+    # **真正永久離開流通**的金額——這個區別就是整條路徑要證明的東西。
+    treasury_rebated_cc: float = 0.0
+    insurance_released_cc: float = 0.0
     # 每個違約身分平均拿走多少、保證金沒收多少（#65）。單身分淨賺＝
     # took − seized，就是 Sybil 攻擊的每身分期望收益。
     defaults_n: int = 0
@@ -202,6 +207,16 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
     report.demurrage_collected_cc = sum(
         p.amount_cc for ev in ledger.events if ev.kind == 'demurrage'
         for p in ev.postings if p.amount_cc > 0)
+    report.treasury_rebated_cc = sum(
+        p.amount_cc for ev in ledger.events if ev.kind == 'protocol_rebate'
+        for p in ev.postings
+        if p.amount_cc > 0
+        and ev.contract_id.startswith('rebate:protocol:treasury'))
+    report.insurance_released_cc = sum(
+        p.amount_cc for ev in ledger.events if ev.kind == 'protocol_rebate'
+        for p in ev.postings
+        if p.amount_cc > 0
+        and ev.contract_id.startswith('rebate:protocol:insurance'))
     report.verifier_fee_share = (market.verifier_fees_cc / report.settled_cc
                                  if report.settled_cc else 0.0)
     if vs:
