@@ -70,6 +70,9 @@ cd node && node redteam-agents.js
 # 信用額度跨語言對照（模擬器 vs 原型，逐步比對同一組流水）
 cd node && node cl-compare.js
 
+# 洗量拓撲對額度的效果（E3：環狀／團狀／星狀 × N，即時，無需起進程）
+cd node && node wash-sweep.js
+
 # 還債政策參數掃描（折價 × band 定義 × 情境，約 10 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_repay
 
