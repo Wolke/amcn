@@ -61,6 +61,10 @@ cd node && node demo-reconnect.js
 cd node && node chaos-run.js scenarios/soak-rebate.json
 cd node && node chaos-run.js scenarios/soak-norebate.json
 
+# 說謊的排序器（#69c／#72）：Hub 對一半節點供應分叉 checkpoint，看誰說出來
+cd node && node chaos-run.js scenarios/hub-equivocates.json
+cd node && node chaos-run.js scenarios/hub-equivocates-panel.json
+
 # 故障注入情境（10 個，約 35 分鐘；單跑一個約 3 分鐘）
 cd node && node chaos-run.js scenarios/panel-blackhole.json
 cd node && node chaos-run.js scenarios/*.json

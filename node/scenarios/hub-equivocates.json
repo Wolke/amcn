@@ -1,0 +1,27 @@
+{
+  "name": "hub-equivocates",
+  "what": "排序器自己就是對手（§16 威脅 8）：Hub 對一半的節點供應分叉的 checkpoint，兩個分支都用真私鑰簽署、都驗得過。攔不住是前提——§2.2 賭的是偵測得到，而 #69a/#69b 只讓分叉對「同時持有雙邊產物的觀察者」可見，#69c 才讓節點彼此交換自己見到的 root。這個情境驗證完整的攻擊面：說謊的 Hub → 節點互傳既有訊息 → 有人說出來。F6c 只驗證偵測路徑，這裡驗證攻擊本身",
+  "portOffset": 1320,
+  "seed": 41,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 300,
+  "sampleS": 30,
+  "maxOpenS": 150,
+  "hubEnv": {
+    "HUB_EQUIVOCATE": "1"
+  },
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 120
+    },
+    {
+      "kind": "forkDetected",
+      "minNodes": 1
+    }
+  ]
+}

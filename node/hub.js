@@ -63,6 +63,8 @@ const DEFAULT_AFTER_MS = Number(process.env.HUB_DEFAULT_AFTER_MS || 14 * 24 * 36
 // 於是 #71 的對照組跑了 23 分鐘才發現它根本不是對照組。0 是一個合法的政策，
 // 不能同時當關閉的意思。
 const REBATE_ON = process.env.HUB_REBATE !== '0';
+// 對抗腳架（#69c 的完整攻擊面）：對一半的節點供應分叉的 checkpoint。
+const EQUIVOCATE = process.env.HUB_EQUIVOCATE === '1';
 const INSURANCE_TARGET_FRAC = Number(
   process.env.HUB_INSURANCE_TARGET_FRAC != null
     ? process.env.HUB_INSURANCE_TARGET_FRAC : 0.06);
@@ -287,6 +289,28 @@ function makeCheckpoint() {
   // every agent needs to learn roots as they are minted — broadcast on every
   // tick, stored or not, or an agent waiting for seed #N never learns that
   // #N has been reached.
+  if (EQUIVOCATE) {
+    // 對抗腳架，與 agent 的 refuseToSettle／verifier 的 alwaysPass 同一個模式，
+    // 只是這次對手是**排序器自己**（§16 威脅 8）。它持有私鑰，所以兩個分支都
+    // 簽得出來、都驗得過——攔不住，而 §2.2 賭的是偵測得到。
+    //
+    // 分支的分法是「註冊順序的奇偶」而不是隨機：要讓兩邊各自內部一致，否則
+    // 每個節點都看到一堆互相矛盾的 root，那不是 equivocation 而是雜訊，而且
+    // 會讓「偵測到了」變得毫無資訊量。
+    const forked = { ...cp, heads: { ...cp.heads, 'protocol:treasury':
+      sha256(canon(cp.heads) + 'branch-B') } };
+    forked.root = sha256(canon(forked.heads));
+    const forkedSig = sign(hubId.privateKey, forked);
+    let i = 0;
+    for (const [, a] of agents) {
+      if (!a.chan) continue;
+      const odd = (i++ % 2) === 1;
+      a.chan.send(odd
+        ? { type: 'checkpoint', cp: forked, sig: forkedSig }
+        : { type: 'checkpoint', cp, sig: entry.sig });
+    }
+    return cp;
+  }
   broadcast({ type: 'checkpoint', cp, sig: entry.sig });
   return cp;
 }

@@ -177,6 +177,7 @@ async function runScenario(file) {
     });
     c.send({ type });
   });
+  let lastConsoles = {};
   const console_ = async () => {
     const out = {};
     for (let i = 0; i < agentNames.length; i++) {
@@ -265,6 +266,7 @@ async function runScenario(file) {
     if (poolEmptyAt !== null && advertised.length > 0 && poolRefillAt === null) {
       poolRefillAt = Number(t);
     }
+    lastConsoles = cs;   // #69c 的分叉計數要在殺掉子行程之前抓到
     const stuck = inv.noStuckContracts(cs, (sc.maxOpenS || 120) * 1000);
     for (const sv of stuck) violations.push(`T+${t}s  noStuckContracts: ${sv}`);
     // Growth is only visible if something records it: #41 was mis-diagnosed
@@ -338,6 +340,19 @@ async function runScenario(file) {
         const ok = after.length > 0 && after[0] - e.afterS <= e.withinS;
         check(`恢復後 ${e.withinS}s 內交易恢復`, ok,
           after.length ? `第一筆於 T+${after[0]}s，共 ${after.length} 筆` : '恢復後無成交');
+        break;
+      }
+      case 'forkDetected': {
+        // 說謊的排序器（HUB_EQUIVOCATE=1）對一半的節點供應分叉的 checkpoint。
+        // 它持有私鑰所以兩個分支都驗得過——攔不住。要斷言的是**有人說出來**，
+        // 而那只能靠節點之間交換彼此見到的 root（#69c）。
+        const forks = Object.entries(lastConsoles)
+          .filter(([, c]) => c && c.checkpoint_forks > 0);
+        check('說謊的排序器被節點自己抓到（#69c）',
+          forks.length >= (e.minNodes || 1),
+          forks.length
+            ? forks.map(([n, c]) => `${n} 回報 ${c.checkpoint_forks} 次`).join('、')
+            : '沒有任何節點回報分叉——偵測沒有發生');
         break;
       }
       case 'rebateReturns': {

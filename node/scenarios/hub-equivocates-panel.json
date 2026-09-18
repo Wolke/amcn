@@ -1,0 +1,27 @@
+{
+  "name": "hub-equivocates-panel",
+  "what": "接續 hub-equivocates，補上它測不到的那個後果。原情境 pool 3 = PANEL_SIZE 3，derive 不論 root 為何都選中全部三個——只有順序變、panel 沒變，所以分叉無法造成 panel 分歧。這裡放 5 個 verifier：兩個分支推導出**不同的 panel**，於是 requester 可能對著錯的三位扇出，Hub 以自己的視角重新推導（#6／C5 的防線）並拒絕。要問的是：偵測之外，equivocation 會不會把結算打壞——以及打壞時是「明確拒絕」還是「靜默卡住」",
+  "portOffset": 1360,
+  "seed": 41,
+  "agents": 3,
+  "verifiers": 5,
+  "durationS": 300,
+  "sampleS": 30,
+  "maxOpenS": 150,
+  "hubEnv": {
+    "HUB_EQUIVOCATE": "1"
+  },
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 120
+    },
+    {
+      "kind": "forkDetected",
+      "minNodes": 1
+    }
+  ]
+}
