@@ -78,6 +78,10 @@ async function runScenario(file) {
       HUB_PORT: String(port), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0', HUB_SEED: `chaos-${sc.name}`,
       HUB_DUMP_PATH: dumpPath, HUB_DUMP_MS: '2000',
       HUB_ADVERTISE_HOST: '127.0.0.1',
+      ...(sc.defaultAfterS ? {
+        HUB_DEFAULT_AFTER_MS: String(sc.defaultAfterS * 1000),
+        HUB_DEFAULT_SWEEP_MS: '2000',
+      } : {}),
       ...(sc.rendezvous ? { HUB_RENDEZVOUS: rvPath, HUB_RENDEZVOUS_MS: '5000' } : {}),
       ...(withImport && fs.existsSync(dumpPath) ? { HUB_IMPORT: dumpPath } : {}),
     });
@@ -105,10 +109,11 @@ async function runScenario(file) {
   }
   await sleep(400);
   const agentNames = [];
+  const agentProcs = {};
   for (let i = 0; i < (sc.agents || 3); i++) {
     const name = String.fromCharCode(65 + i);
     agentNames.push(name);
-    spawnProc(name, 'agent.js', {
+    agentProcs[name] = spawnProc(name, 'agent.js', {
       ...chaosEnv('agents'),
       [`K${name}`]: `sk-chaos-${name}`,
       AGENT_CONFIG: JSON.stringify({
@@ -157,6 +162,7 @@ async function runScenario(file) {
   const settleAt = [];          // seconds since t0 for each settlement seen
   let poolEmptyAt = null, poolRefillAt = null;
   let lastReceipts = 0;
+  let lastExport = null;
   const growth = [];            // wall-clock series: RSS and dump size
 
   const ask = (type, want) => new Promise((resolve) => {
@@ -180,11 +186,37 @@ async function runScenario(file) {
   };
 
   for (const step of sc.timeline || []) {
-    setTimeout(() => {
+    setTimeout(async () => {
       if (step.action === 'killHub') {
         killHub();
         timeline.push(`T+${nowS(t0)}s  殺掉 Hub（SIGKILL，不通知任何人）`);
         console.log(`T+${nowS(t0)}s  殺掉 Hub（SIGKILL，不通知任何人）`);
+        return;
+      }
+      if (step.action === 'killAgent') {
+        // 一個帶著負餘額消失的 agent 就是違約（#61 的瀑布觸發條件），而這
+        // 是原型唯一無法用故障注入代替的事：拔線的 agent 會重連，死掉的不會。
+        // 「負債最多的那一個」而不是固定名字：誰會欠債取決於那一次的需求
+        // 抽樣，第一版寫死 agent C 而它當時餘額是 +0.39——殺掉一個債權人
+        // 沒有違約可沖銷，情境因此測不到它要測的東西。
+        let victim = step.agent;
+        if (!victim || victim === 'mostIndebted') {
+          const bals = (lastExport && lastExport.balances) || {};
+          const consoles2 = await console_();
+          const byDid = {};
+          for (const [nm, c] of Object.entries(consoles2)) {
+            if (c && c.did) byDid[c.did] = nm;
+          }
+          let worst = null;
+          for (const [did, v] of Object.entries(bals)) {
+            if (!byDid[did]) continue;
+            if (worst === null || v < bals[worst]) worst = did;
+          }
+          victim = worst && bals[worst] < 0 ? byDid[worst] : agentNames.at(-1);
+        }
+        try { agentProcs[victim].kill('SIGKILL'); } catch { /* gone */ }
+        timeline.push(`T+${nowS(t0)}s  殺掉 agent ${victim}（不再回來）`);
+        console.log(`T+${nowS(t0)}s  殺掉 agent ${victim}（不再回來）`);
         return;
       }
       if (step.action === 'startHub') {
@@ -215,6 +247,7 @@ async function runScenario(file) {
     const advertised = vlist ? vlist.verifiers.map((v) => v.did) : [];
     if (advertised.length && !panelDids.length) panelDids = advertised.slice();
     if (ex) {
+      lastExport = ex;
       for (const v of inv.checkLedger(ex)) {
         violations.push(`T+${t}s  ${v}`);
       }
@@ -320,6 +353,19 @@ async function runScenario(file) {
         check(`交易全程未中斷超過 ${e.maxGapS}s（T+${from}s 起）`,
           gap <= e.maxGapS,
           `最長空窗 ${gap}s（自 T+${at}s）；全程 ${settleAt.length} 筆`);
+        break;
+      }
+      case 'writeOffHappens': {
+        const mt = (lastExport && lastExport.metrics) || {};
+        const bal = (lastExport && lastExport.balances) || {};
+        const absorbed = (mt.written_off_cc || 0);
+        const insuranceUsed = e.expectInsurance === false ? true
+          : (bal['protocol:insurance'] !== undefined);
+        check('違約帳戶被沖銷，且瀑布順序正確（抵押→保險→損失）',
+          absorbed > 0 && insuranceUsed,
+          `沖銷 ${absorbed.toFixed(2)} CC，違約率 ${mt.default_rate}，` +
+          `保險池 ${(bal['protocol:insurance'] || 0).toFixed(2)}、` +
+          `損失 ${(bal['protocol:loss'] || 0).toFixed(2)} CC`);
         break;
       }
       case 'noSettlementDuring': {

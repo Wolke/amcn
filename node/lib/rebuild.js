@@ -229,7 +229,10 @@ function rebuild(ex, opts = {}) {
   // produced it (#65).
   const collateral = new Map();
   for (const e of ex.events || []) {
-    if (e.kind === 'collateral_post' || e.kind === 'collateral_release') {
+    // write_off 也會動到抵押品（瀑布的第一層），漏掉它的話重建出來的鎖定額
+    // 會比實際多，而那正是核對步驟會抓到的不一致。
+    if (e.kind === 'collateral_post' || e.kind === 'collateral_release'
+        || e.kind === 'write_off') {
       for (const p of e.postings || []) {
         if (p.account === 'protocol:collateral') continue;
         const cur = collateral.get(p.account) || 0;

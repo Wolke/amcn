@@ -1,0 +1,37 @@
+{
+  "name": "default-writeoff",
+  "what": "一個帶著負餘額的 agent 永久消失（#61 的另一半）。Hub 在 20 秒的違約窗後應依瀑布沖銷：抵押品 → 保險池 → protocol:loss，Σ 仍為 0，而 §20-10 的違約率從代理指標變成真值",
+  "portOffset": 1140,
+  "seed": 53,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 180,
+  "sampleS": 10,
+  "maxOpenS": 120,
+  "defaultAfterS": 20,
+  "symmetric": true,
+  "timeline": [
+    {
+      "atS": 60,
+      "action": "killAgent",
+      "agent": "mostIndebted"
+    }
+  ],
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 60
+    },
+    {
+      "kind": "writeOffHappens"
+    },
+    {
+      "kind": "settlementResumesWithin",
+      "afterS": 90,
+      "withinS": 80
+    }
+  ]
+}

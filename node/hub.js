@@ -39,6 +39,13 @@ const STAKE = 'protocol:stake';
 // 抵押品託管（#65）。與 protocol:stake 分開：押注是 verifier 的履約保證、
 // 由收入累積；抵押品是交易方自願鎖入以換取額度上限，可在無負債時取回。
 const COLLATERAL = 'protocol:collateral';
+// 壞帳瀑布的最後一層（模擬器的 protocol:loss）。保險池不夠時剩下的落在這裡，
+// 它就是「網路真正吃掉的損失」，與保險池已收的費用分開才看得出保險夠不夠用。
+const LOSS = 'protocol:loss';
+// 離線多久且仍為負餘額就視為違約。預設 14 天，與模擬器的 write-off 條件同；
+// demo 與情境會壓縮它，否則沒有任何測試跑得到這條路徑。
+const DEFAULT_AFTER_MS = Number(process.env.HUB_DEFAULT_AFTER_MS || 14 * 24 * 3600 * 1000);
+const DEFAULT_SWEEP_MS = Number(process.env.HUB_DEFAULT_SWEEP_MS || 60000);
 // FR-083 / §20-9. `market` is the only class that counts as real trade;
 // `test` is a rehearsal, `subsidy` is Treasury-funded (canary decoys,
 // bootstrap grants) and `related-party` is trade between identities the
@@ -91,6 +98,7 @@ const hubId = process.env.HUB_SEED
 const settledIds = new Set(); // contract_id idempotency keys
 const stakes = new Map();     // verifier did -> CC held in protocol:stake
 const collateral = new Map(); // did -> CC locked in protocol:collateral
+const writtenOff = new Map();  // did -> CC absorbed by the waterfall
 const canaryStats = new Map(); // verifier did -> {seen, failed, slashed_cc}
 const canarySeen = new Set();  // canary contract_ids already scored
 
@@ -627,6 +635,18 @@ function buildMetrics() {
     unsettled_awarded: Math.max(0, awarded - receipts.length),
     default_proxy_rate: awarded
       ? +((awarded - receipts.length) / awarded).toFixed(3) : 0,
+    // 真正的違約率：已沖銷金額 ÷ 結算量（與模擬器的 bad_debt_rate 同定義，
+    // 所以兩邊第一次可比）。
+    written_off_cc: +[...writtenOff.values()]
+      .reduce((t, v) => t + v, 0).toFixed(4),
+    default_rate: (() => {
+      const vol = receipts.reduce((t, r) => t - (r.receipt.postings
+        .find((p) => p.account === r.receipt.requester) || { amount_cc: 0 }).amount_cc, 0);
+      const off = [...writtenOff.values()].reduce((t, v) => t + v, 0);
+      return vol > 0 ? +(off / vol).toFixed(4) : 0;
+    })(),
+    insurance_cc: +bal(INSURANCE).toFixed(4),
+    loss_cc: +bal(LOSS).toFixed(4),
     avg_repayment_ms: avgRepay,
     repayment_episodes: episodes.length,
     by_class: byClass,
@@ -747,6 +767,44 @@ const CHECKPOINT_MS = Number(process.env.HUB_CHECKPOINT_MS || 1200);
 // panel. A network whose first task wanted a quorum could never start.
 setInterval(makeCheckpoint, CHECKPOINT_MS).unref();
 
+// --- 壞帳瀑布（#61 的另一半）---------------------------------------------
+// 原型一直沒有違約偵測，所以抵押品只會抬高額度、永遠不會被沒收；§20-10 的
+// 違約率只能是「已得標未結算」的代理值；而模擬器早就有完整瀑布（保證金 →
+// 保險池 → protocol:loss），兩邊因此不可比。
+//
+// 觸發條件與模擬器一致：離線超過 DEFAULT_AFTER_MS 且餘額仍為負。用「離線」
+// 而非「逾期未還」是刻意的——一個還在線上、還在交易的負餘額帳戶不是違約，
+// 那是正常的互惠信用（FR-052）。
+function writeOff(did) {
+  const debt = -bal(did);
+  if (debt <= 1e-9) return 0;
+  const col = Math.min(debt, collateral.get(did) || 0);
+  const afterCol = debt - col;
+  const ins = Math.min(afterCol, Math.max(0, bal(INSURANCE)));
+  const loss = afterCol - ins;
+  const postings = [{ account: did, amount_cc: debt }];
+  if (col > 1e-9) postings.push({ account: COLLATERAL, amount_cc: -col });
+  if (ins > 1e-9) postings.push({ account: INSURANCE, amount_cc: -ins });
+  if (loss > 1e-9) postings.push({ account: LOSS, amount_cc: -loss });
+  if (!applyPostings('write_off', `writeoff:${did}:${Date.now()}`, postings)) return 0;
+  if (col > 1e-9) collateral.set(did, (collateral.get(did) || 0) - col);
+  writtenOff.set(did, (writtenOff.get(did) || 0) + debt);
+  console.log(`[hub] WRITE-OFF ${did}: ${debt.toFixed(2)} CC ` +
+    `(抵押 ${col.toFixed(2)}、保險 ${ins.toFixed(2)}、損失 ${loss.toFixed(2)})`);
+  return debt;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [did, a] of agents) {
+    if (a.online !== false || !a.offlineSince) continue;
+    if (now - a.offlineSince < DEFAULT_AFTER_MS) continue;
+    if (bal(did) >= -1e-9) continue;
+    writeOff(did);
+    a.offlineSince = now;        // 不要每個 sweep 都重算同一個帳戶
+  }
+}, DEFAULT_SWEEP_MS).unref();
+
 // --- server ---------------------------------------------------------------
 transport.listen({
   port: PORT,
@@ -763,6 +821,7 @@ transport.listen({
       for (const [did, a] of agents) {
         if (a.chan !== chan || a.online === false) continue;
         a.online = false;
+        a.offlineSince = Date.now();
         console.log(`[hub] ${did} disconnected (${a.role})`);
       }
     });

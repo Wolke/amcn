@@ -22,7 +22,7 @@
 | 7 | 至少一種任務能以 deterministic verification 自動結算 | `node demo.js`「§20-7 DSL 驗收＋真 HTTP 路徑」（assert 集在 TaskSpec 簽章時鎖 hash）| ✅ 自動 |
 | 8 | Agent 能在 Owner Policy 內自動完成全程，無逐筆人工 | `node demo-autonomous.js` 12/12：無 `posts` 時間表、無 Console 呼叫，斷言 `manual_posts + scripted_posts == 0` | ✅ 自動 |
 | 9 | 測試交易、補貼交易與真實交易可清楚區分 | `node demo.js`「§20-9 tx_class」：每筆結算都必須標明 `market`／`test`／`subsidy`／`related-party`，**未標示或自創值一律拒絕**（`node redteam.js` S10／S11 實測）。Hub 的內部分錄（押注託管、沒收）標為 `protocol`、金絲雀付款標為 `subsidy`，所以市場數字不會混入它們 | ✅ 自動 |
-| 10 | 能輸出成交率、供需深度、違約率、平均還債時間 | `node demo.js`「§20-10 四項市場指標」：全部由 Hub 的 `buildMetrics()` 從**簽署狀態**導出並隨匯出提供，第三方可自行重算（FR-083 要求模擬與生產共用定義，所以不讀任何 Console）。成交率＝已結算/已得標；供需深度＝平均每任務出價數；還債時間＝從雜湊鏈的餘額穿越零點算出；**違約率是代理指標**（已得標但未結算），因為原型沒有 write-off 路徑，這一點在輸出欄位名稱裡就寫明（`default_proxy_rate`）| ⚠️→✅ 四項齊備，違約率為誠實的代理 |
+| 10 | 能輸出成交率、供需深度、違約率、平均還債時間 | `node demo.js`「§20-10 四項市場指標」：全部由 Hub 的 `buildMetrics()` 從**簽署狀態**導出並隨匯出提供，第三方可自行重算（FR-083 要求模擬與生產共用定義，所以不讀任何 Console）。成交率＝已結算/已得標；供需深度＝平均每任務出價數；還債時間＝從雜湊鏈的餘額穿越零點算出；違約率**已於 2026-09-18 變成真值**：原型補上違約偵測與壞帳瀑布（抵押→保險→`protocol:loss`），`default_rate` ＝ 已沖銷 ÷ 結算量，與模擬器的 `bad_debt_rate` 同定義；代理欄位 `default_proxy_rate` 保留作為對照。情境 `default-writeoff` 實測 0.089 | ✅ 四項齊備 |
 
 ---
 
