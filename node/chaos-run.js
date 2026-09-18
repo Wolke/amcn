@@ -289,8 +289,13 @@ async function runScenario(file) {
     } catch { /* hub is down at this sample */ }
     let dumpKb = null;
     try { dumpKb = (fs.statSync(dumpPath).size / 1024).toFixed(0); } catch { /* none yet */ }
+    // Hub 自報的堆與保留狀態（#74）。外部 ps 看到的 RSS 分不出「活躍集長大」
+    // 與「V8 沒還頁給 OS」，而那正是判斷洩漏的關鍵。
+    const m = (lastExport && lastExport.metrics) || {};
     growth.push({ t: Number(t), rssMb: Number(rssMb), dumpKb: Number(dumpKb),
-                  receipts: lastReceipts });
+                  receipts: lastReceipts,
+                  heapMb: m.heap_used_mb != null ? m.heap_used_mb : null,
+                  retained: m.retained || null });
 
     const line = `T+${t}s  pool ${advertised.length}  結算 ${lastReceipts}  ` +
       `合約開啟 ${Object.values(cs).filter(Boolean)
@@ -423,8 +428,50 @@ async function runScenario(file) {
     const a = growth[1], z = growth.at(-1);
     const mins = (z.t - a.t) / 60 || 1;
     console.log(`\n-- 成長（${a.t}s → ${z.t}s）--`);
-    console.log(`   Hub RSS  ${a.rssMb}MB → ${z.rssMb}MB  ` +
-      `(${((z.rssMb - a.rssMb) / mins).toFixed(1)} MB/分)`);
+    // RSS 的首尾相減對一個被 GC 的堆是沒有意義的（登記簿 #74）。soak-dual6
+    // 的序列是 50→151→60→236→108→253：**掉下來就證明記憶體被回收了**，
+    // 而首尾相減把它報成 5.3 MB/分的洩漏。對照組在 27–101 間震盪、無趨勢，
+    // 卻可能被同一個算法報成任何數字，取決於最後一點落在鋸齒的哪裡。
+    //
+    // 三個數字取代一個：最小平方斜率（整體趨勢）、**地板**的斜率（兩段
+    // 最小值——GC 之間的最小值才是真正的活躍集），以及峰值。真洩漏會讓
+    // 地板單調上升；鋸齒只會讓峰值跳動。#41 是靠這張報表找到的，所以它
+    // 給出假數字的代價是下一個 #41 找不到。
+    // > 0 而不只是 isFinite：Hub 被殺掉的那幾個取樣點記成 0，而 0 會把「地板」
+    // 直接壓到 0，讓這個指標變成「Hub 有沒有死過」而不是「活躍集有沒有長大」。
+    const pts = growth.filter((g) => Number.isFinite(g.rssMb) && g.rssMb > 0);
+    const slope = (xs, ys) => {
+      const n = xs.length;
+      if (n < 2) return 0;
+      const mx = xs.reduce((t, v) => t + v, 0) / n;
+      const my = ys.reduce((t, v) => t + v, 0) / n;
+      const num = xs.reduce((t, x, i) => t + (x - mx) * (ys[i] - my), 0);
+      const den = xs.reduce((t, x) => t + (x - mx) ** 2, 0);
+      return den ? num / den : 0;
+    };
+    const fit = slope(pts.map((g) => g.t / 60), pts.map((g) => g.rssMb));
+    const half = Math.floor(pts.length / 2);
+    const floorOf = (arr) => Math.min(...arr.map((g) => g.rssMb));
+    const f1 = floorOf(pts.slice(0, half)), f2 = floorOf(pts.slice(half));
+    const floorSlope = (f2 - f1) / ((pts.at(-1).t - pts[half].t) / 60 || 1);
+    const heaps = growth.filter((g) => g.heapMb != null && g.heapMb > 0);
+    if (heaps.length >= 4) {
+      const hf = slope(heaps.map((g) => g.t / 60), heaps.map((g) => g.heapMb));
+      const hh = Math.floor(heaps.length / 2);
+      const h1 = Math.min(...heaps.slice(0, hh).map((g) => g.heapMb));
+      const h2 = Math.min(...heaps.slice(hh).map((g) => g.heapMb));
+      const r1 = heaps[0].retained || {}, r2 = heaps.at(-1).retained || {};
+      console.log(`   Hub 堆    迴歸 ${hf.toFixed(2)} MB/分｜地板 ` +
+        `${h1}MB → ${h2}MB｜峰值 ${Math.max(...heaps.map((g) => g.heapMb))}MB`);
+      console.log(`   保留狀態  事件 ${r1.events}→${r2.events}｜` +
+        `checkpoint ${r1.checkpoints}→${r2.checkpoints}｜` +
+        `鏈分錄 ${r1.chain_entries}→${r2.chain_entries}｜` +
+        `rawLog ${r1.raw_log_kb}→${r2.raw_log_kb}KB`);
+    }
+    console.log(`   Hub RSS  迴歸斜率 ${fit.toFixed(2)} MB/分｜` +
+      `地板 ${f1}MB → ${f2}MB (${floorSlope.toFixed(2)} MB/分)｜` +
+      `峰值 ${Math.max(...pts.map((g) => g.rssMb))}MB｜` +
+      `首尾 ${a.rssMb}→${z.rssMb}MB（首尾相減對 GC 堆無意義，見 #74）`);
     console.log(`   匯出檔   ${a.dumpKb}KB → ${z.dumpKb}KB  ` +
       `(${((z.dumpKb - a.dumpKb) / mins).toFixed(1)} KB/分，` +
       `${z.receipts - a.receipts} 筆結算)`);

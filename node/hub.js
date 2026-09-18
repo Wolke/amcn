@@ -782,6 +782,17 @@ function buildMetrics() {
       const off = [...writtenOff.values()].reduce((t, v) => t + v, 0);
       return vol > 0 ? +(off / vol).toFixed(4) : 0;
     })(),
+    // 自己報堆使用量（登記簿 #74）。從外面用 `ps` 看 RSS 無法區分「活躍集
+    // 長大」與「V8 沒把已釋放的頁還給 OS」，而那個區別正是「有沒有洩漏」。
+    // 順手報出保留狀態的規模，讓成長能被歸因而不只是被觀察到。
+    heap_used_mb: +(process.memoryUsage().heapUsed / 1048576).toFixed(1),
+    rss_mb: +(process.memoryUsage().rss / 1048576).toFixed(1),
+    retained: {
+      events: events.length, receipts: receipts.length,
+      checkpoints: checkpoints.length,
+      chain_entries: [...chains.values()].reduce((t, c) => t + c.length, 0),
+      raw_log_kb: +(rawLogBytes / 1024).toFixed(0),
+    },
     insurance_cc: +bal(INSURANCE).toFixed(4),
     treasury_cc: +bal(TREASURY).toFixed(4),
     loss_cc: +bal(LOSS).toFixed(4),
