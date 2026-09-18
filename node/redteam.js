@@ -185,6 +185,104 @@ async function main() {
     inv.checkLedger(tamperedExport).length === 0,
     `檢查器回報 ${inv.checkLedger(tamperedExport).length} 項違反`);
 
+  // F3/F6 need the sequencer's own key, which this harness has because it
+  // set HUB_SEED. That is not cheating: threat 8's equivocation and a
+  // truncated history are things only the sequencer can do, and §2.2's claim
+  // is not that the hub cannot misbehave — it is that misbehaviour is
+  // detectable offline. These two cases test that claim directly.
+  const hubId = identityFromSeed('redteam');
+  const rebuildLib = require('./lib/rebuild');
+
+  // F6a — truncation. Nothing is forged: every receipt, event and checkpoint
+  // below is genuine and hub-signed. The hub simply shows one observer a
+  // history that stops one settlement short.
+  const truncated = JSON.parse(JSON.stringify(before));
+  truncated.receipts = truncated.receipts.slice(0, -1);
+  const dropped = before.receipts.at(-1).receipt.contract_id;
+  truncated.events = truncated.events.filter((e) => e.ref !== dropped &&
+    e.contract_id !== dropped && !JSON.stringify(e).includes(dropped));
+  delete truncated.balances; delete truncated.chains;
+  const rbTrunc = rebuildLib.rebuild(truncated);
+  check('F6a', '排序器出示截短的歷史（產物全部真實、簽章全部有效）', 'block',
+    rbTrunc.ok,
+    rbTrunc.ok
+      ? `重建通過（開口）：少了 ${dropped}，checkpoint 自稱 receipts_count=` +
+        `${(truncated.checkpoints.at(-1) || {}).cp.receipts_count}` +
+        `，實際只給 ${truncated.receipts.length} 筆`
+      : `重建拒絕：${(rbTrunc.errors.find((e) => /truncated/.test(e)) || rbTrunc.errors[0]).slice(0, 90)}`);
+
+  // F6b — equivocation proper. The sequencer holds the key, so it can always
+  // *produce* two mutually exclusive checkpoints at one seq; nothing can stop
+  // that. The question §2.2 actually stakes its claim on is whether the fork
+  // is detectable, so that is what this tests: fork a stored checkpoint, then
+  // hand an observer the fork plus the next genuine one and see whether the
+  // mismatch surfaces. Before #69b it did not — checkpoints had no link to
+  // each other, so two branches were indistinguishable unless you happened to
+  // hold the colliding pair itself.
+  const cpi = Math.max(0, before.checkpoints.length - 2);
+  const realEntry = before.checkpoints[cpi];
+  const nextEntry = before.checkpoints[cpi + 1];
+  const forkCp = { ...realEntry.cp,
+    heads: { ...realEntry.cp.heads, 'protocol:treasury': sha256('fork') } };
+  forkCp.root = sha256(canon(forkCp.heads));
+  const forkEntry = { cp: forkCp, sig: sign(hubId.privateKey, forkCp) };
+  const bothVerify = verify(before.hub_pub, realEntry.cp, realEntry.sig)
+    && verify(before.hub_pub, forkCp, forkEntry.sig);
+  const forkedExport = JSON.parse(JSON.stringify(before));
+  forkedExport.checkpoints[cpi] = forkEntry;
+  delete forkedExport.balances; delete forkedExport.chains;
+  const rbFork = rebuildLib.rebuild(forkedExport);
+  const caught = !rbFork.ok && rbFork.errors.some((e) => /forked/.test(e));
+  check('F6b', '分叉的 checkpoint 串不回主鏈（§16 威脅 8）', 'block',
+    !(bothVerify && caught),
+    bothVerify
+      ? `#${forkCp.seq} 兩個 root 簽章都有效（排序器有私鑰，攔不住），` +
+        `但 #${nextEntry.cp.seq} 的 prev_root 對不上 → ` +
+        (caught ? `離線重建拒絕：${rbFork.errors.find((e) => /forked/.test(e)).slice(0, 80)}…`
+                : '離線重建沒抓到')
+      : '簽章構造失敗，本案無效');
+
+  // F6c — the honest remainder. #69a/#69b make a fork detectable *by an
+  // observer holding artefacts from both branches*, and nothing in the
+  // protocol ever puts one there: every agent learns roots from the same hub,
+  // and no message type carries another agent's checkpoint view. So detection
+  // is possible and never performed.
+  //
+  // Testing the absence of a mechanism means looking for the mechanism, which
+  // is why this case reads source rather than sending frames. A behavioural
+  // version would need a hub built to lie to different peers differently —
+  // worth building when the gossip exists to test against, pointless before.
+  // Peer-directed means carrying `to:` — that is how the hub decides what to
+  // relay, so a message without it cannot reach another node. The first
+  // version of this matched `checkpoint_request`, which is agent→hub, and
+  // reported the mechanism as present: the wrong question answered cleanly.
+  const fs = require('node:fs');
+  const peerCpTraffic = ['agent.js', 'verifier.js'].some((f) => {
+    const src = fs.readFileSync(path.join(__dirname, f), 'utf8');
+    return src.split('send({').slice(1).some((chunk) => {
+      const body = chunk.split('})')[0];
+      return /\bto:/.test(body) && /root|checkpoint/.test(body);
+    });
+  });
+  check('F6c', '沒有任何機制讓兩個觀察者比對 checkpoint（分叉可偵測但無人偵測）',
+    'known-open', !peerCpTraffic,
+    'agent／verifier 都只從 Hub 單向接收 root，彼此之間沒有 checkpoint 訊息；' +
+    '最小修法是節點在既有訊息上附帶自己見到的最新 (seq, root)，對不上就出聲');
+
+  // F3 — a bid is only usable on the task it was signed for. Checked on the
+  // object rather than through a victim agent, because the binding is what
+  // makes the whole class impossible: without it, the cheapest bid of the day
+  // could be re-used on every later task.
+  const realBid = { task_id: 't-real', provider: evil.did, price_cc: 0.1,
+                    box_pub: evil.pub, issued_at: Date.now(),
+                    expires_at: Date.now() + 60000 };
+  const bidSig = sign(evil.privateKey, realBid);
+  const movedBid = { ...realBid, task_id: 't-other' };
+  check('F3', '把 bid 搬到另一個 task（簽章應涵蓋 task_id）', 'block',
+    verify(evil.pub, movedBid, bidSig),
+    `改 task_id 後原簽章失效；requester 也以簽署內容的 task_id 索引` +
+    `（agent.js pendingBids.get(msg.bid.task_id)），所以搬不過去`);
+
   console.log('\n== G 組：基礎設施與可用性 ==');
 
   const badReg = { did: evil.did, pub: evil.pub, box_pub: evil.pub };
@@ -389,6 +487,15 @@ async function main() {
       ? `合約與 pre_auth 都帶 issued_at／expires_at`
       : '本輪無 forced 收據可檢查');
 
+  // G14 — #16. The frame layer catches the throw (G1/G3 prove that), but the
+  // sender learns nothing: no reply names the field it left out. That is the
+  // whole of #16, and it is still open.
+  const noField = await ask({ type: 'forced_settlement' }, 'error', 2500);
+  check('G14', '缺必要欄位的 frame 得不到逐欄位的錯誤指引（#16）', 'known-open',
+    !noField || !/receipt|missing|required/i.test(noField.why || ''),
+    noField ? `Hub 只回「${String(noField.why).slice(0, 60)}」`
+            : 'Hub 完全不回應，送出方無從知道少了哪個欄位');
+
   // G15: equal-price tie-break by arrival order — #23
   const strat = require('node:fs').readFileSync(path.join(__dirname, 'agent.js'), 'utf8');
   // Source-level, and knowingly weaker than it should be: selection now
@@ -402,6 +509,35 @@ async function main() {
 
   const finalEx = await exportLedger();
   const violations = finalEx ? inv.checkLedger(finalEx) : ['無法取得匯出'];
+  // G3 — #34. The hub has no async handlers; the *agent* does, because
+  // executing a contract awaits the adapter. So the target is agent A, and
+  // the trigger is a contract whose sealed payload cannot be opened: the
+  // throw happens inside an async handler, where an unhandled rejection used
+  // to take the process down mid-contract.
+  let aDid = null;
+  try {
+    aDid = (await (await fetch(`http://127.0.0.1:${47301 + OFF}/status`)).json()).did;
+  } catch { /* no console; case reports itself as untested */ }
+  let aliveAfter = null;
+  if (aDid) {
+    await ask({ type: 'contract', to: aDid, contract: {
+      contract_id: 'c-rt-poison', requester: evil.did, provider: aDid,
+      price_cc: 1, units: 1, acceptance_method: 'dsl-local', asserts: SHA_OK,
+      verifier_pool: [], panel_seed_cp: 0,
+      payload_box: { eph_pub: 'AAAA', ct: 'AAAA', tag: 'AAAA', nonce: 'AAAA' },
+    }, sig: sign(evil.privateKey, { x: 1 }), pub: evil.pub }, null, 1500);
+    await sleep(1200);
+    try {
+      aliveAfter = await (await fetch(`http://127.0.0.1:${47301 + OFF}/status`)).json();
+    } catch { aliveAfter = null; }
+  }
+  check('G3', 'async handler 內拋例外（不得殺掉進程）', 'block',
+    !aDid || !aliveAfter,
+    aDid ? (aliveAfter
+      ? `A 收下開不了的 payload_box 後仍在服務（餘額 ${aliveAfter.balance_cc} CC）`
+      : 'A 的 Console 不再回應——進程可能已死')
+      : '取不到 A 的 DID，本案未測到');
+
   check('INV', '所有攻擊之後，六項不變式仍然成立', 'block', violations.length > 0,
     violations.length ? violations.slice(0, 2).join(' | ') : `${finalEx.receipts.length} 筆收據下全數通過`);
 

@@ -92,9 +92,9 @@
 | F1 | #15 | 重放已結算收據 | block | `settledIds` 冪等鍵 | 自動 |
 | F2 | #15 | 跨重啟製造 contract_id 碰撞 | block | id 併入 DID 標籤 | 自動 |
 | F3 | 威脅 8 | 把 bid 重放到另一個 task | block | bid 簽章含 `task_id` | 自動 |
-| F4 | 威脅 8 | 重放一份**很舊**的 bid／pre_auth | known-open | **協議物件完全沒有時效欄位**（無 `issued_at`／`expires_at`／deadline），見 §4 新開口 (a) | 自動 |
+| F4 | 威脅 8 | 重放一份**很舊**的 bid／pre_auth | ~~known-open~~ **block** | 已修：`bid`／`contract`／`pre_auth` 都帶 `issued_at`／`expires_at`，Hub 以 `expired()`＋`CLOCK_SKEW_MS` 擋下（§4 新開口 (a) 已關）| 自動 |
 | F5 | #11 | 兩筆支出同時吃光同一份額度（雙花）| block | 負餘額支出走 Hub 序列化＋`clOf` 上限檢查 | 自動 |
-| F6 | #11 | equivocation：對兩方出具互斥的簽署歷史 | block | per-account hash chain＋checkpoint，分叉可離線偵測 | 自動 |
+| F6 | #11 | equivocation：對兩方出具互斥的簽署歷史 | block | ~~per-account hash chain＋checkpoint，分叉可離線偵測~~ — **這句是錯的，寫測試才發現**（#69）。修法見下；(c) 仍開 | 自動 |
 | F7 | #10 | 竄改匯出檔讓第二排序器重建出假帳 | block | 逐筆驗簽、鏈重算、checkpoint 驗章；竄改即拒絕啟動 | 自動 |
 | F8 | #10 | 偽造 checkpoint 簽章 | block | 以 `hub_pub` 驗章 | 自動 |
 
@@ -116,7 +116,7 @@
 | G12 | 威脅 14 | 協議升級被少數人控制／全網凍結 | n/a | 協議層不存在全網凍結（A 案立場），但原型也沒有治理機制可打 | 不可達 |
 | G13 | 威脅 15 | 模型供應商封鎖疑似轉售流量 | n/a | 外部行為，原型無從模擬；屬 §6「仍然不知道的事」| 不可達 |
 | G14 | #16 | 對缺必要欄位的 frame 逐欄位驗證 | known-open | 目前靠 frame 層 try/catch 接住，錯誤訊息對送出方無指引性 | 自動 |
-| G15 | #23 | 同價時以到達順序決勝，先啟動者系統性勝出 | known-open | 未修；建議改 `sha256(contract_id + did)` 決勝 | 自動 |
+| G15 | #23 | 同價時以到達順序決勝，先啟動者系統性勝出 | ~~known-open~~ **block** | 已修：同價同信譽時以 `sha256(task_id + provider)` 決勝 | 自動 |
 
 ---
 
@@ -143,7 +143,7 @@
 
 ## 4. 盤點過程發現的新開口（建議進登記簿）
 
-**(a) 協議物件完全沒有時效欄位** — `task`／`bid`／`contract`／`pre_authorization` 都沒有 `issued_at`、`expires_at` 或 deadline。SDD §16 威脅 8 明文列「過期 Bid 重放」，而目前唯一的重放防線是 `settledIds`（只管已結算的 contract_id）。連帶：final-architecture §2.3 第 3 點要求 Reservation 的 TTL「綁合約 deadline＋緩衝」，但原型裡合約沒有 deadline 可綁；`pre_auth` 沒有效期，provider 可以無限期後才強制結算。建議 P1。
+**(a) 協議物件完全沒有時效欄位** ~~建議 P1~~ — **已修並已關**（F4 現為 `block`）。 — `task`／`bid`／`contract`／`pre_authorization` 都沒有 `issued_at`、`expires_at` 或 deadline。SDD §16 威脅 8 明文列「過期 Bid 重放」，而目前唯一的重放防線是 `settledIds`（只管已結算的 contract_id）。連帶：final-architecture §2.3 第 3 點要求 Reservation 的 TTL「綁合約 deadline＋緩衝」，但原型裡合約沒有 deadline 可綁；`pre_auth` 沒有效期，provider 可以無限期後才強制結算。建議 P1。
 
 **(b) Hub 隱藏報價無任何偵測手段** — 威脅 11。`broadcast()` 丟掉某個 bid 或某個 task，受害者看不出差別：沒有已發布任務的公開清單、bid 沒有回執、agent 也不知道自己的 bid 有沒有被轉達。§2.1 允許撮合中央化的條件是「狀態可由公開簽署事件重建」，但**未成交的報價從來不進帳本**，所以這一層的審計完全空白。建議 P1，最小修法是 Hub 對每個 task 週期性簽發「已收到的 bid 摘要」，讓遺漏可事後對質。
 
@@ -189,6 +189,25 @@
 **第一次執行就找到 #60**：75 步全部不一致，差距恆為 25.00 CC——掙來的部分兩邊完全相同，分歧 100% 來自年齡斜坡。修正後 **75/75 完全一致**。
 
 這一案的價值不只是找到分歧，而是它**推翻了我五小時前對 #1 的裁決**：§2.2 的「25 CC」講的是 t=0 的有效額度，GATE-0 的「50」講的是參數，兩者都對。讀兩份程式碼不會發現這件事，因為兩邊各自都自洽——只有把同一組輸入餵進去、逐步比對輸出才會現形。
+
+## 4e. 第三批已交付（2026-09-18）
+
+`node/redteam.js` 38 案、`node/redteam-agents.js` 13 案，全過。這一批挑的是**盤點表上寫了防禦但從來沒被打過**的案例，而挑選標準就是「我不知道答案」。
+
+| 案 | 組 | 結果 |
+|---|---|---|
+| **F6a／F6b** | 排序器 | **兩案第一次執行都失敗** → #69（P0）。盤點表寫「分叉可離線偵測」是錯的；修 `prev_root`＋`receipts_count` 對照後轉 block |
+| F6c | 排序器 | known-open：分叉偵測得到、但協議裡沒有任何東西會讓誰持有雙邊產物 |
+| F3 | 重放 | block：bid 簽章涵蓋 `task_id`，requester 也以**簽署內容**的 task_id 索引，搬不過去 |
+| G3 | 基礎設施 | block：餵 agent 一份開不了的 `payload_box`，例外落在 async handler 內，進程仍在服務（#34 的修法確實生效）|
+| G14 | 基礎設施 | known-open（#16）：Hub 完全不回應，送出方無從知道少了哪個欄位 |
+| B4 | provider | block：2u 額度的 provider 掛全場最低價，對 4-5u 的任務**一次都沒出價**（#22）|
+| B7 | provider | block：未聲明上游條款者不得上膛（#67／#68；原標 B3，與盤點表的 B3 撞名故改名）|
+| D3 | verifier | block：承諾誠實票、揭示相反票 → 揭示不被計入、零報酬，結算仍以 2-of-3 完成 |
+
+**這一批最重要的產出是 F6，而它的價值在於「為什麼之前沒發現」**：鏈與 checkpoint 都確實存在，讀程式讀不出少了一環——checkpoint 之間沒有連結、`receipts_count` 沒人對照。與 #60（跨語言逐步比對推翻我自己的裁決）同型：**自洽的程式不會告訴你它少了什麼**。
+
+另外兩件記帳上的修正：**F4 與 G15 早已修好但盤點表還寫 known-open**，已改；**C7 不需要單獨寫**——S 組的 `submit` 走的就是雙簽路徑，額度守門（S2）已經在那條路上測過了。
 
 ## 5. 交付順序建議
 

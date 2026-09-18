@@ -253,10 +253,34 @@ function rebuild(ex, opts = {}) {
     if (expectHubDid && didOf(ex.hub_pub) !== expectHubDid) {
       fail(`export is from hub ${didOf(ex.hub_pub)}, expected ${expectHubDid}`);
     }
+    let prevStored = null;
     for (const entry of cps) {
       if (!verify(ex.hub_pub, entry.cp, entry.sig)) {
         fail(`checkpoint #${entry.cp && entry.cp.seq} signature invalid`);
       }
+      // §4 #69a — a truncated history. Every artefact in such an export is
+      // genuine and hub-signed; what gives it away is that a checkpoint
+      // counts more settlements than the export contains. Found by F6a,
+      // which rebuilt a history one settlement short and was accepted.
+      // `<=` not `===`: checkpoints are minted on a timer, so the newest one
+      // legitimately lags a settlement that has not been checkpointed yet.
+      if (entry.cp && typeof entry.cp.receipts_count === 'number'
+          && entry.cp.receipts_count > ex.receipts.length) {
+        fail(`checkpoint #${entry.cp.seq} counts ${entry.cp.receipts_count} ` +
+          `receipts but the export carries ${ex.receipts.length} — history ` +
+          'is truncated');
+      }
+      // §4 #69b — the checkpoint chain. Absent on exports written before
+      // prev_root existed, so a missing field is not an error (same
+      // compatibility rule as checkpoint_seq below).
+      if (entry.cp && prevStored && typeof entry.cp.prev_root === 'string'
+          && entry.cp.prev_root !== prevStored.cp.root) {
+        fail(`checkpoint #${entry.cp.seq} links to root ` +
+          `${entry.cp.prev_root.slice(0, 12)} but the preceding stored ` +
+          `checkpoint #${prevStored.cp.seq} has root ` +
+          `${prevStored.cp.root.slice(0, 12)} — checkpoint chain forked`);
+      }
+      prevStored = entry;
     }
   } else if (cps.length) {
     fail('checkpoints present but no hub_pub to verify them against');

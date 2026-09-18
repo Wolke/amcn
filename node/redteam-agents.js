@@ -16,6 +16,7 @@ const OFF = Number((process.argv.find((a) => a.startsWith('--offset=')) || '').s
 const PORT = 47180 + OFF;
 const SHA_OK = [{ op: 'sha256_eq' }, { op: 'max_len', arg: 64 }];
 const PROVIDER_KEY = 'sk-redteam-PROVIDER-SECRET-9f3a';
+const PORT2 = 47181 + OFF;   // second round: D3 needs its own verifier pool
 const FAKE_PORT = 47320 + OFF;
 const FAKE_KEY = 'sk-redteam-UPSTREAM';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -44,9 +45,13 @@ const cfg = (o, extra) => ({
   AGENT_CONFIG: JSON.stringify({ hubPort: PORT, adapter: null, posts: [], ...o }),
   ...extra,
 });
-const exportLedger = () => new Promise((resolve) => {
+const cfg2 = (o, extra) => ({
+  AGENT_CONFIG: JSON.stringify({ hubPort: PORT2, adapter: null, posts: [], ...o }),
+  ...extra,
+});
+const exportLedger = (port = PORT) => new Promise((resolve) => {
   const t = setTimeout(() => { try { c.close(); } catch {} resolve(null); }, 5000);
-  const c = transport.dial({ port: PORT });
+  const c = transport.dial({ port });
   c.onMessage((m) => {
     if (m.type !== 'ledger_export') return;
     clearTimeout(t); c.close(); resolve(m);
@@ -102,6 +107,19 @@ async function main() {
     adapter: { baseUrl: `http://127.0.0.1:${FAKE_PORT}`, key: { env: 'UKEY' } },
     provide: { afterMs: 0, pricePerUnit: 0.2 },
   }, { UKEY: FAKE_KEY }));
+  // W: cheapest in the market (0.3 CC/unit) but holds only 2 units of
+  // capacity, while every task on offer is 4-5 units. Selling what you do not
+  // have is the provider-side twin of a double spend (#22), and the simulator
+  // has always gated offers on remaining quota while this side did not.
+  // meanUnits 0 keeps W's own demand loop silent so it only ever sells —
+  // otherwise its auto-posts would add noise to B2's market check.
+  spawnProc('W', 'agent.js', cfg({
+    name: 'W', seed: 'rt2-W', consolePort: 47315 + OFF,
+    adapter: { baseUrl: null, key: { env: 'WKEY' } },
+    provide: { afterMs: 0, pricePerUnit: 0.3 },
+    policy: { demand: { meanUnits: 0, burstProb: 0, tickMs: 1000 },
+              quota: { capacityUnits: 2, cycleMs: 3600000 } },
+  }, { WKEY: 'sk-redteam-W' }));
   // Q: takes awards and delivers nothing, and corrupts what it does deliver.
   spawnProc('Q', 'agent.js', cfg({
     name: 'Q', seed: 'rt2-Q', consolePort: 47313 + OFF,
@@ -116,6 +134,7 @@ async function main() {
   const rCon = await status(47311 + OFF);
   const qCon = await status(47313 + OFF);
   const uCon = await status(47314 + OFF);
+  const wCon = await status(47315 + OFF);
   let upstream = { authOk: 0 };
   try {
     upstream = await (await fetch(`http://127.0.0.1:${FAKE_PORT}/stats`)).json();
@@ -159,12 +178,19 @@ async function main() {
     ex.receipts.length === 0,
     `${ex.receipts.length} 筆結算由誠實 provider 完成`);
 
+  check('B4', '賣出超過自身剩餘額度的算力（#22）', 'block',
+    (wCon && ex.receipts.some((r) => r.receipt.provider === wCon.did)) ||
+    /bid [\d.]+ CC/.test(logs.W || ''),
+    `W 有 ${wCon ? wCon.quota.remaining_units : '?'}u 額度、掛全場最低 ` +
+    `0.3 CC/unit，對 4-5u 的任務 ${/bid [\d.]+ CC/.test(logs.W || '')
+      ? '仍出價' : '一次都沒出價'}`);
+
   // The gate has to hold at *arming*, not at execution: a refusal after the
   // contract is dual-signed leaves the requester force-settling against a
   // provider that was never allowed to do the work. Two independent
   // witnesses, because "did not win" could also mean "lost on price" — the
   // upstream's own request count is what proves nothing ran.
-  check('B3', '未聲明上游條款的 provider 不得接單（P-10，§4 #67）', 'block',
+  check('B7', '未聲明上游條款的 provider 不得接單（P-10，§4 #67）', 'block',
     (uCon && ex.receipts.some((r) => r.receipt.provider === uCon.did)) ||
     upstream.authOk > 0,
     `U 以 0.2 CC/unit 最低價掛著卻 ${
@@ -193,6 +219,54 @@ async function main() {
   const violations = inv.checkLedger(ex);
   check('INV', '惡意參與者跑完後六項不變式仍成立', 'block', violations.length > 0,
     violations.length ? violations.slice(0, 2).join(' | ') : `${ex.receipts.length} 筆收據下全數通過`);
+
+  // --- 第二輪：抄多數的 verifier（D3）------------------------------------
+  // Its own topology because a pool of 3 puts every verifier on every panel
+  // (PANEL_SIZE 3), so one V3 cannot be both silent for D2 and a copier for
+  // D3. Adding a fourth verifier instead would make D2/D2b depend on which
+  // three the panel happened to draw — a flaky test is worse than a slow one.
+  console.log('\n-- 第二輪拓撲：抄多數的 verifier（18s）--');
+  procs.length = 0;
+  spawnProc('hub2', 'hub.js', { HUB_PORT: String(PORT2), HUB_AGE_RAMP_MS: '1',
+                                HUB_BEACON: '0', HUB_SEED: 'rt2b' });
+  await sleep(600);
+  spawnProc('W1', 'verifier.js', cfg2({ name: 'W1', seed: 'rt2b-W1' }));
+  spawnProc('W2', 'verifier.js', cfg2({ name: 'W2', seed: 'rt2b-W2' }));
+  // Commits its honest verdict, then reveals the opposite — the shape of
+  // "wait and see where the majority went".
+  spawnProc('W3', 'verifier.js', cfg2({ name: 'W3', seed: 'rt2b-W3',
+                                        copyVerdict: true }));
+  await sleep(300);
+  spawnProc('R2', 'agent.js', cfg2({
+    name: 'R2', seed: 'rt2b-R', consolePort: 47316 + OFF,
+    adapter: null, provide: null,
+    posts: [{ atMs: 1500, units: 5, maxPriceCC: 7,
+              acceptance: 'judge-quorum', asserts: SHA_OK,
+              payload: 'round two work item' }],
+  }));
+  spawnProc('P2', 'agent.js', cfg2({
+    name: 'P2', seed: 'rt2b-P', consolePort: 47317 + OFF,
+    adapter: { baseUrl: null, key: { env: 'PKEY' } },
+    provide: { afterMs: 0, pricePerUnit: 1.0 },
+  }, { PKEY: PROVIDER_KEY }));
+  await sleep(18000);
+  const ex2 = await exportLedger(PORT2);
+  procs.forEach((p) => { try { p.kill(); } catch { /* gone */ } });
+
+  const w3Did = ((logs.W3 || '').match(/did:demo:[0-9a-f]{16}/) || [])[0];
+  const w3Paid = w3Did && ex2 ? ex2.receipts.reduce((sum, r) =>
+    sum + r.receipt.postings.filter((p) => p.account === w3Did)
+      .reduce((t, p) => t + p.amount_cc, 0), 0) : 0;
+  const revealedOpposite = /ADVERSARY: committed/.test(logs.W3 || '');
+  check('D3', '揭示與承諾不符（看完多數再改票）', 'block',
+    w3Paid > 1e-9,
+    `${revealedOpposite ? 'W3 確實改了票' : 'W3 沒有觸發改票（本案未測到）'}；` +
+    `${ex2 ? ex2.receipts.length : 0} 筆結算，W3 收到 ${w3Paid.toFixed(4)} CC`);
+
+  const inv2 = ex2 ? inv.checkLedger(ex2) : ['no export'];
+  check('INV2', '改票攻擊後不變式仍成立', 'block', inv2.length > 0,
+    inv2.length ? inv2.slice(0, 2).join(' | ')
+                : `${ex2.receipts.length} 筆收據下全數通過`);
 
   // Every child's output on disk — #49 was only findable because chaos-run
   // does this, and a red team that loses its evidence is no better than the

@@ -105,13 +105,27 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
           break;
         }
         if (!verify(msg.pub, { contract_id: msg.contract_id, reveal: true }, msg.sig)) break;
-        const sig = sign(id.privateKey, p.attestation);
+        // The verifier that waits to see where the majority is going and
+        // reveals that instead of what it committed to (D3). Commit-reveal
+        // exists for exactly this, so what should happen is that the revealed
+        // attestation no longer opens the commitment and the vote is not
+        // counted. Adversary scaffolding, like alwaysPass/silentReveal.
+        const attest = cfg.copyVerdict
+          ? { ...p.attestation,
+              verdict: p.attestation.verdict === 'PASS' ? 'FAIL' : 'PASS',
+              failures: [] }
+          : p.attestation;
+        if (cfg.copyVerdict) {
+          log(`ADVERSARY: committed ${p.attestation.verdict} on ` +
+              `${msg.contract_id}, revealing ${attest.verdict} instead`);
+        }
+        const sig = sign(id.privateKey, attest);
         for (const to of [msg.requester, msg.provider]) {
-          hub.send({ type: 'attestation', to, attestation: p.attestation, sig,
+          hub.send({ type: 'attestation', to, attestation: attest, sig,
                      nonce: p.nonce, commitment: p.commitment,
                      commit_sig: p.commitSig, pub: id.pub });
         }
-        log(`revealed ${msg.contract_id}: ${p.attestation.verdict}`);
+        log(`revealed ${msg.contract_id}: ${attest.verdict}`);
         break;
       }
     }

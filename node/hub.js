@@ -226,18 +226,31 @@ function chainAppend(account, receiptIdx, delta) {
 function makeCheckpoint() {
   const heads = {};
   for (const [acct, chain] of chains) heads[acct] = chain.at(-1).hash;
+  // prev_root chains the checkpoints to each other (§4 #69). Without it two
+  // validly-signed checkpoints at the same seq with different roots are
+  // indistinguishable from each other — threat 8's equivocation — and the
+  // only way to notice was to be holding the colliding pair. With it, any
+  // later checkpoint from the other branch exposes the fork, because its
+  // prev_root will not match.
+  //
+  // It chains over *stored* checkpoints, not minted ones: sparse storage
+  // (§4 #41) drops unchanged roots, so a link to a root that was never
+  // retained would be unverifiable by the observer who received the export.
+  // The chain therefore covers exactly what anyone can actually check.
+  const prevEntry = checkpoints.at(-1);
   const cp = {
     seq: cpSeq++,
     heads,
     root: sha256(canon(heads)),
     receipts_count: receipts.length,
+    prev_root: prevEntry ? prevEntry.cp.root : null,
   };
   const entry = { cp, sig: sign(hubId.privateKey, cp) };
   // Store root changes always; store an unchanged one only as a heartbeat
   // (§4 #41). Minting is still unconditional: #24 deadlocked a fresh network
   // when checkpoints only appeared on settlement, and a pinned future seed
   // needs the sequence to keep advancing even in a silent hour.
-  const prev = checkpoints.at(-1);
+  const prev = prevEntry;
   const moved = !prev || prev.cp.root !== cp.root ||
     prev.cp.receipts_count !== cp.receipts_count;
   const now = Date.now();
