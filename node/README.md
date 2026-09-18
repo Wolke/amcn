@@ -40,7 +40,7 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 |---|---|
 | `hub.js` | 第一個排序器非信任根：只中繼簽署訊息；結算需雙簽＋Σ=0＋符合費率表＋不超過動態信用額度，缺一即拒；全帳可 export 重建 |
 | `agent.js` | Owner 裝置進程：Ed25519 身分＋X25519 box key；payload E2E 封裝給得標者；驗收 deterministic-first |
-| `adapter.js` | FR-031 OpenAI-compatible HTTP client；key 只在進程記憶體，無 baseUrl 時退回確定性 mock |
+| `adapter.js` | FR-031 OpenAI-compatible HTTP client；key 只在進程記憶體，無 baseUrl 時退回確定性 mock。代他人執行時把 requester DID 當 end-user 識別送上游，且要求 `terms.attested`（§4 #68）|
 | `lib/keystore.js` | P-02 金鑰解析：macOS Keychain（`AMCN_USE_KEYCHAIN=1`）→ env fallback |
 | `lib/e2e.js` | NFR-005：X25519 ECDH（ephemeral）＋HKDF＋AES-256-GCM |
 | `lib/eeff.js` | 與 `sim/amcn_sim` 同構的 E_eff 信用公式（starter 50、風險費 6%/2%——GATE-0 掃描定案參數）＋保險池 |
@@ -96,6 +96,20 @@ W9／W10 加進來的斷言（commit-reveal、押注託管、未來 checkpoint �
 ## 接真實模型
 
 把 agent config 的 `adapter.baseUrl` 指向任何 OpenAI-compatible 端點（如 `https://api.openai.com`、本機 Ollama `http://localhost:11434`），`key.service` 設 Keychain service name 並 `AMCN_USE_KEYCHAIN=1`。注意：真模型輸出非確定性，驗收要換成提案 B 的 DSL（schema assert / test-suite），這是下一步。
+
+**要對外供給（`provide` 非 null）並接真實上游時，adapter 還有兩個欄位（§4 #68，P-10）**：
+
+```json
+"adapter": {
+  "baseUrl": "https://api.openai.com",
+  "key": { "service": "amcn-provider" },
+  "terms": { "attested": true, "note": "查證日期與依據" },
+  "attribution": "openai"
+}
+```
+
+- `terms.attested` — **沒有它就不會上膛供給**。它聲明的是「你與這家供應商的協議允許你替第三方請求執行推理」。這是**聲明而非驗證**：沒有東西能確認你讀過合約，它的作用是把 P-10 的責任變成設定檔裡有紀錄、可稽核的事實。接本機模型（Ollama 等）也需要設，因為程式看不出 `baseUrl` 後面是誰——若那確實是自己的硬體，就沒有上游協議要遵守，設 `true` 即可。
+- `attribution` — 代他人執行時，requester 的 DID 會放進 `user` 欄位送上游。`"openai"` 另加 `safety_identifier`；`"none"` 關閉（給會拒收未知欄位的嚴格伺服器，或本機模型）。**方向是把流量標示清楚而不是混進去**：條款預設客戶會有終端使用者，禁的是共用憑證與轉售，所以讓第三方工作帶著身分抵達才是合規的姿態。詳見 `docs/evaluation/key-lending-verification.md`。
 
 ## 誠實簡化清單（正式版要補的）
 

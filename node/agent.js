@@ -48,6 +48,10 @@ const log = (m) => console.log(`[${cfg.name} ${id.did}] ${m}`);
 const adapterCfg = cfg.adapter ? {
   baseUrl: cfg.adapter.baseUrl, model: cfg.adapter.model,
   apiKey: keystore.getKey(cfg.adapter.key),
+  // Carried through to the adapter, which refuses third-party work on a real
+  // upstream without an attested declaration (§4 #67).
+  terms: cfg.adapter.terms || null,
+  attribution: cfg.adapter.attribution || 'user',
 } : null;
 
 let providing = false;
@@ -456,7 +460,11 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
             (soldUnits ? `, ${soldUnits}u quota spent` : ''));
         let output;
         try {
-          output = await adapter.complete(adapterCfg, payload);
+          // The requester's DID is the end-user identifier upstream: this
+          // call is not our own work, and a provider's abuse report has to be
+          // traceable back to a contract in our own ledger (§4 #67).
+          output = await adapter.complete(adapterCfg, payload,
+            { endUser: c.requester, contractId: c.contract_id });
         } catch (err) {
           // This handler is async, so a throw here escapes as an unhandled
           // rejection and kills the process mid-contract — a real provider
@@ -943,11 +951,23 @@ if (cfg.consolePort) {
 // the agent bids, wins, and fails at execution after the contract is signed.
 // Seen in demo-rebuild.js, where the provider's key env var was unset and it
 // kept winning work it could not do.
-const canExecute = !!(adapterCfg && adapterCfg.apiKey);
+// The same argument covers the P-10 terms declaration (§4 #67): the adapter
+// refuses another agent's request on a real upstream without it, and that
+// refusal at execution time is precisely the after-the-contract failure this
+// guard exists to prevent. Mock mode and a local model are exempt — there is
+// no upstream agreement to comply with.
+const termsOk = !!(adapterCfg
+  && (!adapterCfg.baseUrl
+      || (adapterCfg.terms && adapterCfg.terms.attested === true)));
+const canExecute = !!(adapterCfg && adapterCfg.apiKey && termsOk);
 if (cfg.provide && !canExecute) {
-  log('supply NOT armed: ' + (adapterCfg
-    ? 'the adapter key did not resolve (check the env var or keystore)'
-    : 'provide is set but no adapter is configured') +
+  log('supply NOT armed: ' + (!adapterCfg
+    ? 'provide is set but no adapter is configured'
+    : !adapterCfg.apiKey
+      ? 'the adapter key did not resolve (check the env var or keystore)'
+      : 'adapter.terms.attested is not set, so this node may not run other ' +
+        'agents\' requests on this upstream (P-10, §4 #67 — see ' +
+        'docs/evaluation/key-lending-verification.md)') +
     ' — an agent that cannot execute must not bid');
 }
 if (cfg.provide && canExecute) {

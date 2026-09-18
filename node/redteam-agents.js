@@ -16,6 +16,8 @@ const OFF = Number((process.argv.find((a) => a.startsWith('--offset=')) || '').s
 const PORT = 47180 + OFF;
 const SHA_OK = [{ op: 'sha256_eq' }, { op: 'max_len', arg: 64 }];
 const PROVIDER_KEY = 'sk-redteam-PROVIDER-SECRET-9f3a';
+const FAKE_PORT = 47320 + OFF;
+const FAKE_KEY = 'sk-redteam-UPSTREAM';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const results = [];
@@ -90,6 +92,16 @@ async function main() {
     adapter: { baseUrl: null, key: { env: 'PKEY' } },
     provide: { afterMs: 0, pricePerUnit: 1.0 },
   }, { PKEY: PROVIDER_KEY }));
+  // U: would happily serve other agents' work on a real upstream, but its
+  // owner never declared that the upstream's terms allow it (§4 #67, P-10).
+  // Priced below everyone so it wins every task it bids on — if it bids.
+  spawnProc('fake', 'fake-provider.js',
+    { FAKE_PORT: String(FAKE_PORT), FAKE_KEY });
+  spawnProc('U', 'agent.js', cfg({
+    name: 'U', seed: 'rt2-U', consolePort: 47314 + OFF,
+    adapter: { baseUrl: `http://127.0.0.1:${FAKE_PORT}`, key: { env: 'UKEY' } },
+    provide: { afterMs: 0, pricePerUnit: 0.2 },
+  }, { UKEY: FAKE_KEY }));
   // Q: takes awards and delivers nothing, and corrupts what it does deliver.
   spawnProc('Q', 'agent.js', cfg({
     name: 'Q', seed: 'rt2-Q', consolePort: 47313 + OFF,
@@ -103,6 +115,11 @@ async function main() {
   const ex = await exportLedger();
   const rCon = await status(47311 + OFF);
   const qCon = await status(47313 + OFF);
+  const uCon = await status(47314 + OFF);
+  let upstream = { authOk: 0 };
+  try {
+    upstream = await (await fetch(`http://127.0.0.1:${FAKE_PORT}/stats`)).json();
+  } catch { /* fake provider gone; authOk 0 is the safe reading */ }
   procs.forEach((p) => { try { p.kill(); } catch { /* gone */ } });
 
   console.log('\n== A 組：payload 驅動的攻擊 ==');
@@ -141,6 +158,19 @@ async function main() {
   check('B2', '低價搶單者無法靠不交付獲利（市場仍成交）', 'block',
     ex.receipts.length === 0,
     `${ex.receipts.length} 筆結算由誠實 provider 完成`);
+
+  // The gate has to hold at *arming*, not at execution: a refusal after the
+  // contract is dual-signed leaves the requester force-settling against a
+  // provider that was never allowed to do the work. Two independent
+  // witnesses, because "did not win" could also mean "lost on price" — the
+  // upstream's own request count is what proves nothing ran.
+  check('B3', '未聲明上游條款的 provider 不得接單（P-10，§4 #67）', 'block',
+    (uCon && ex.receipts.some((r) => r.receipt.provider === uCon.did)) ||
+    upstream.authOk > 0,
+    `U 以 0.2 CC/unit 最低價掛著卻 ${
+      uCon && ex.receipts.some((r) => r.receipt.provider === uCon.did)
+        ? '仍得標' : '一單未得'}，上游收到 ${upstream.authOk} 次呼叫；` +
+    `log：${(logs.U || '').includes('supply NOT armed') ? '拒絕上膛' : '已上膛'}`);
 
   console.log('\n== D 組：verifier 側 ==');
 

@@ -103,7 +103,8 @@ async function main() {
   // A: borrows (T1), then provides; exposes an Owner Console
   procs.push(spawnProc('agent.js', agentCfg({
     name: 'A', consolePort: CONSOLE_A_PORT,
-    adapter: { baseUrl: `http://127.0.0.1:${FAKE_A_PORT}`, key: { env: 'A_PROVIDER_KEY', service: 'amcn-demo-a' } },
+    adapter: { baseUrl: `http://127.0.0.1:${FAKE_A_PORT}`, key: { env: 'A_PROVIDER_KEY', service: 'amcn-demo-a' },
+               terms: { attested: true, note: 'demo upstream is local fake-provider.js' } },
     provide: { afterMs: 2200, pricePerUnit: 0.95, repayment: true },
     posts: [
       { atMs: 600, units: 40, maxPriceCC: 45, payload: PAYLOAD_1,
@@ -119,7 +120,8 @@ async function main() {
   // B: provider; later a MALICIOUS requester who refuses to settle (T3)
   procs.push(spawnProc('agent.js', agentCfg({
     name: 'B', refuseToSettle: true,
-    adapter: { baseUrl: `http://127.0.0.1:${FAKE_B_PORT}`, key: { env: 'B_PROVIDER_KEY', service: 'amcn-demo-b' } },
+    adapter: { baseUrl: `http://127.0.0.1:${FAKE_B_PORT}`, key: { env: 'B_PROVIDER_KEY', service: 'amcn-demo-b' },
+               terms: { attested: true, note: 'demo upstream is local fake-provider.js' } },
     provide: { afterMs: 0, pricePerUnit: 1.0 },
     posts: [{ atMs: 5200, units: 30, maxPriceCC: 35, payload: PAYLOAD_3,
               acceptance: 'judge-quorum', asserts: SHA_OK }],
@@ -227,6 +229,18 @@ async function main() {
       `http://127.0.0.1:${CONSOLE_A_PORT}/status`)).json();
   } catch (err) {
     console.log(`  !! collateral probe failed: ${err.message}`);
+  }
+
+  // §4 #67: what did the upstreams actually see? A node serving another
+  // agent's request must name that agent to its provider, so this reads the
+  // attribution back from the receiving end rather than trusting the caller.
+  // Same placement reason as the collateral probe above — before the kill.
+  let upstream = [];
+  try {
+    upstream = await Promise.all([FAKE_A_PORT, FAKE_B_PORT].map(async (pt) =>
+      (await fetch(`http://127.0.0.1:${pt}/stats`)).json()));
+  } catch (err) {
+    console.log(`  !! upstream stats failed: ${err.message}`);
   }
 
   procs.forEach((p) => p.kill());
@@ -457,6 +471,22 @@ async function main() {
       ? `鎖入 ${LOCK_CC} CC → 額度 ${clBefore.toFixed(2)} → ` +
         `${afterLock.credit_line_cc.toFixed(2)}（期望 ${expectedCl.toFixed(2)}）`
       : 'Console 無回應');
+
+  // Not "attribution is configured" but "the provider received it": the
+  // point of the mechanism is that third-party traffic arrives declared, and
+  // only the receiving end can testify to that.
+  const served = upstream.reduce((t, u) => t + (u.authOk || 0), 0);
+  const attributedUsers = upstream.flatMap((u) => u.users || []);
+  const anonCalls = upstream.reduce((t, u) => t + (u.unattributed || 0), 0);
+  const requesters = new Set(receipts.map((r) => r.receipt.requester));
+  check('§4 #67 P-10 歸因：代他人執行的上游呼叫全部帶終端使用者 DID，' +
+        '且該 DID 就是帳上的 requester',
+    served > 0 && anonCalls === 0 &&
+    attributedUsers.length === served &&
+    attributedUsers.every((u) => requesters.has(u)),
+    `${served} 次上游呼叫、${attributedUsers.length} 次帶歸因、` +
+    `${anonCalls} 次未標示；DID ${[...new Set(attributedUsers)]
+      .map((u) => u.slice(0, 18)).join('、') || '—'}`);
 
   const m = ex.metrics || {};
   check('§20-9 tx_class：每筆結算都標明種類，未標示者被拒',
