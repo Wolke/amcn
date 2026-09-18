@@ -427,6 +427,10 @@ function validateSchedule(receipt, chan, ref, attestations) {
   const { fee, risk, verifierTotal, verifierShares } =
     feeTerms(receipt.requester, price, payees.length);
   const expect = {
+    // requester 也要列進來，否則下面的白名單會把付款方本人擋掉。它的金額是
+    // 恆等式（price 就是從這一筆導出來的），列出它的作用是讓「允許的帳戶集合」
+    // 完整——白名單只有在完整時才是白名單。
+    [receipt.requester]: +(-price).toFixed(4),
     [receipt.provider]: +(price - fee - risk - verifierTotal).toFixed(4),
     [TREASURY]: fee, [INSURANCE]: risk,
   };
@@ -439,6 +443,28 @@ function validateSchedule(receipt, chan, ref, attestations) {
     fail(chan, `verifier postings ${namedVerifiers.length} != accountable ` +
       `attesters ${payees.length}`, ref);
     return false;
+  }
+  // 分錄集合必須**恰好**等於費率表算出來的集合（紅隊 S17／S18，登記簿 #73）。
+  //
+  // 原本只做「該有的都在且金額對」，沒有人問「有沒有多的」——而 `find()` 只取
+  // 第一筆，所以同一帳戶的第二筆完全不受約束。兩個串謀身分因此可以在自己簽的
+  // 收據裡多塞一筆把**未參與的第三方**抽走，Σ=0 仍然成立、雙方簽章全部有效，
+  // 而受害者從未簽署任何東西。實測旁觀者餘額 −3 CC。
+  //
+  // 這是 #53 那一類的最惡形態：**簽章有效，但授權的是別的東西**。守門的正確
+  // 形狀是白名單而不是逐項比對——逐項比對永遠只能證明「至少有這些」。
+  const seen = new Set();
+  for (const p of receipt.postings) {
+    if (seen.has(p.account)) {
+      fail(chan, `duplicate account in postings: ${p.account.slice(0, 18)}`, ref);
+      return false;
+    }
+    seen.add(p.account);
+    if (!(p.account in expect)) {
+      fail(chan, `unexpected posting to ${p.account.slice(0, 18)} — the ` +
+        'posting set must equal the fee schedule exactly', ref);
+      return false;
+    }
   }
   for (const [acct, amt] of Object.entries(expect)) {
     const p = receipt.postings.find((x) => x.account === acct);

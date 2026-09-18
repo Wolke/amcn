@@ -486,6 +486,34 @@ async function main() {
   check('S15', '取回從未鎖入的抵押品', 'block',
     !c3 || !/cannot release/.test(c3.why || ''), c3 ? c3.why : '無回應');
 
+  // S17／S18 — 收據裡**多出來**的分錄。`expect` 是逐項檢查「該有的都在且金額
+  // 對」，但沒有人檢查「有沒有多的」；而且 `postings.find()` 只取第一筆，所以
+  // 同一帳戶的第二筆完全不受約束。Σ=0 仍然成立，兩個串謀身分只要自己吸收另一
+  // 半就行——而受害者從未簽署任何東西。這是 #53 那一類：**簽章有效，但授權的
+  // 是別的東西**。
+  const bystander = (before.receipts[0] || {}).receipt.requester;
+  const s17 = await submit({ fix: (r) => {
+    r.postings.push({ account: bystander, amount_cc: -3 });
+    r.postings.push({ account: Y.did, amount_cc: 3 });
+  } });
+  const afterS17 = await exportLedger();
+  const bystanderDelta = afterS17
+    ? +((afterS17.balances[bystander] || 0) - (before.balances[bystander] || 0)).toFixed(4)
+    : null;
+  check('S17', '收據多塞一筆把未參與的第三方抽走 3 CC（Σ 仍為 0）', 'block',
+    !s17 || !/unexpected posting|fee schedule|postings sum/.test(s17.why || ''),
+    (s17 ? s17.why : '無回應') +
+    `；旁觀者餘額變化 ${bystanderDelta === null ? '?' : bystanderDelta} CC` +
+    (bystanderDelta ? '（它從未簽署任何東西）' : ''));
+
+  const s18 = await submit({ fix: (r) => {
+    r.postings.push({ account: Y.did, amount_cc: 5 });
+    r.postings.push({ account: X.did, amount_cc: -5 });
+  } });
+  check('S18', '同一帳戶第二筆分錄（find() 只看第一筆）', 'block',
+    !s18 || !/unexpected posting|duplicate account|fee schedule/.test(s18.why || ''),
+    s18 ? s18.why : '無回應');
+
   // S16 — 把自己放進自己合約的 verifier pool。這是 #62 合併角色的前提守門：
   // 今天 Hub 的 role 互斥所以不可能發生，但 pool 是 requester 在合約時自己釘
   // 的、Hub 只比對雜湊是否自洽，所以角色一旦重疊就只差一個設定檔。S 組的做法

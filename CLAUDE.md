@@ -69,8 +69,8 @@ cd node && node chaos-run.js scenarios/hub-equivocates-panel.json
 cd node && node chaos-run.js scenarios/panel-blackhole.json
 cd node && node chaos-run.js scenarios/*.json
 
-# W11 紅隊第一批（約 40 秒，38 案：協議層攻擊＋串謀結算、排序器 equivocation）
-#   目前 block 37、known-open 1（僅 #16 逐欄位驗證）
+# W11 紅隊第一批（約 40 秒，41 案：協議層攻擊＋串謀結算、排序器 equivocation）
+#   目前 block 40、known-open 1（僅 #16 逐欄位驗證）
 cd node && node redteam.js
 
 # W11 紅隊第二批（約 40 秒，13 案：惡意參與者——不交付的 provider、沉默/改票的 verifier、超賣額度、未聲明上游條款者）
