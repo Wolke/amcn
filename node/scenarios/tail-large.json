@@ -1,0 +1,24 @@
+{
+  "name": "tail-large",
+  "what": "#74 的預算旋鈕與它帶來的新風險。4 小時後匯出檔約 50MB，100 KB/s 的預算會把快照間隔拉到約 8 分鐘——而那意味著尾檔會累積 8 分鐘的歷史。尾檔重播從未在那個規模被測過。這裡用 HUB_SNAPSHOT_KBPS=10 把間隔壓到同一個量級（3.5MB ÷ 10 KB/s ≈ 350s），在 20 分鐘內產生「快照很舊、尾檔很大」的狀態，然後在最後殺掉 Hub。要問三件事：間隔是否真的被拉長、大尾檔重播是否正確、RSS 成長是否再降。這不能證明 50MB 時的行為，只能證明機制在同量級的間隔下成立",
+  "portOffset": 1840,
+  "seed": 41,
+  "agents": 6,
+  "verifiers": 0,
+  "dualRole": true,
+  "durationS": 1200,
+  "sampleS": 60,
+  "maxOpenS": 200,
+  "hubEnv": { "HUB_SNAPSHOT_KBPS": "10" },
+  "profile": { "mode": "latency", "latencyMs": 80, "jitterMs": 40 },
+  "timeline": [
+    { "atS": 900, "action": "killHub" },
+    { "atS": 930, "action": "startHub", "import": true }
+  ],
+  "expect": [
+    { "kind": "invariantsHold" },
+    { "kind": "settlesBefore", "atS": 300 },
+    { "kind": "settlementResumesWithin", "afterS": 930, "withinS": 180 },
+    { "kind": "noHistoryLoss" }
+  ]
+}

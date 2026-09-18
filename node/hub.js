@@ -227,6 +227,42 @@ const hasRole = (a, r) =>
 function broadcast(obj, exceptDid) {
   for (const [did, a] of agents) if (did !== exceptDid && a.chan) a.chan.send(obj);
 }
+// 每個型別裡「handler 會直接解參照、缺了就會拋例外」的欄位。刻意只列這些：
+// 多列會變成在錯的層做語意檢查，少列則回到靜默丟棄。
+const REQUIRED = {
+  register: ['did', 'pub', 'box_pub', 'sig'],
+  register_ack: ['did'],
+  // task 是廣播，沒有 `to`——第一版把它列成必填，於是所有任務被拒、市場整個
+  // 停掉，紅隊連真實收據都拿不到。列必填欄位本身就是一次規格宣告，寫錯的
+  // 代價是把合法流量當成畸形流量。
+  task: ['task'],
+  bid: ['to', 'bid'],
+  contract: ['to', 'contract'],
+  contract_ack: ['to', 'contract_id'],
+  delivery: ['to', 'delivery'],
+  delivery_request: ['to', 'contract_id'],
+  verify_request: ['to', 'request'],
+  attestation: ['to', 'attestation'],
+  attestation_commit: ['to', 'commit'],
+  reveal_request: ['to', 'contract_id'],
+  receipt_half: ['to'],
+  receipt: ['receipt', 'sigs'],
+  forced_settlement: ['receipt', 'provider_sig', 'evidence'],
+  canary_result: ['report', 'sig'],
+  checkpoint_request: ['seq'],
+  collateral_post: ['did', 'amount_cc', 'sig'],
+  collateral_release: ['did', 'amount_cc', 'sig'],
+  fee_quote: ['contract_id', 'requester', 'price'],
+};
+function missingFields(msg) {
+  const need = REQUIRED[msg && msg.type];
+  if (!need) return null;
+  const missing = need.filter((k) => msg[k] === undefined || msg[k] === null);
+  if (!missing.length) return null;
+  return `${msg.type}: missing required field(s) ` +
+    missing.map((k) => `"${k}"`).join(', ');
+}
+
 function fail(chan, why, ref) {
   chan.send({ type: 'error', why, ref });
   console.log(`[hub] REJECT ${ref || ''}: ${why}`);
@@ -1163,6 +1199,15 @@ transport.listen({
     });
     chan.onRaw(recordRaw);
     chan.onMessage((msg) => {
+      // 逐欄位驗證（登記簿 #16，紅隊 G14）。原本靠 frame 層的 try/catch 接住
+      // 例外——進程不會死（G1／G3 驗過），但**送出方什麼都學不到**：Hub 完全
+      // 不回應，所以一個少打一個欄位的設定檔跟一個網路問題長得一模一樣。
+      //
+      // 只檢查「handler 會直接解參照」的欄位，不做完整 schema：目標是把
+      // 「靜默丟棄」換成「指名缺什麼」，不是在這一層重做簽章與語意檢查——
+      // 那些仍然在各自的 handler 裡，而且應該留在那裡。
+      const why = missingFields(msg);
+      if (why) { fail(chan, why, msg.ref || msg.contract_id); return; }
       switch (msg.type) {
         case 'register': {
           const body = { did: msg.did, pub: msg.pub, box_pub: msg.box_pub };

@@ -545,11 +545,17 @@ async function main() {
   // G14 — #16. The frame layer catches the throw (G1/G3 prove that), but the
   // sender learns nothing: no reply names the field it left out. That is the
   // whole of #16, and it is still open.
+  // G14 was the last known-open: the frame layer caught the throw (G1/G3
+  // prove the process survives) but the sender learnt nothing, so a config
+  // with one field missing looked exactly like a network problem.
   const noField = await ask({ type: 'forced_settlement' }, 'error', 2500);
-  check('G14', '缺必要欄位的 frame 得不到逐欄位的錯誤指引（#16）', 'known-open',
-    !noField || !/receipt|missing|required/i.test(noField.why || ''),
-    noField ? `Hub 只回「${String(noField.why).slice(0, 60)}」`
-            : 'Hub 完全不回應，送出方無從知道少了哪個欄位');
+  const partial = await ask({ type: 'collateral_post', did: 'did:demo:x' },
+                            'error', 2500);
+  check('G14', '缺必要欄位的 frame 得到逐欄位的錯誤指引（#16）', 'block',
+    !noField || !/missing required field/.test(noField.why || '') ||
+    !partial || !/amount_cc/.test(partial.why || ''),
+    `空的 forced_settlement → 「${String(noField && noField.why).slice(0, 72)}」；` +
+    `只帶 did 的 collateral_post → 「${String(partial && partial.why).slice(0, 60)}」`);
 
   // G15: equal-price tie-break by arrival order — #23
   const strat = require('node:fs').readFileSync(path.join(__dirname, 'agent.js'), 'utf8');
