@@ -373,6 +373,7 @@ const hub = stampPeerSends(transport.dialLazy(() => discovery.resolveHubTarget(c
         // The hub cannot tell a healthy client from one that only
         // talks unless the client proves it heard the reply (#49).
         hub.send({ type: 'register_ack', did: id.did });  // proof we can hear (#49)
+        if (msg.hub_pub) cpw.setHubPub(msg.hub_pub);
         console_.creditLine = msg.credit_line;
         // Adopt the hub's view rather than assuming a fresh start: a seeded
         // identity that restarts still owes what it owed (§4 #17).
@@ -402,10 +403,14 @@ const hub = stampPeerSends(transport.dialLazy(() => discovery.resolveHubTarget(c
       case 'verifiers': verifierDir = msg; break;
 
       case 'checkpoint': {
-        cpRoots.set(msg.cp.seq, msg.cp.root);
         // 廣播沒有 for_seq；有 for_seq 的是 checkpoint_request 的回答，
         // 那個 root 可能屬於更早的條目，不可拿來跨節點比對（#69c）。
-        cpw.observe(msg.cp.seq, msg.cp.root, typeof msg.for_seq !== 'number');
+        // 驗簽在 cpwatch 裡做（#72 的前提）：panel 的種子就是這個 root，
+        // 所以一個驗不過的 checkpoint 比沒有 checkpoint 更糟。
+        const ok = cpw.observeEntry({ cp: msg.cp, sig: msg.sig },
+                                    typeof msg.for_seq !== 'number');
+        if (!ok) break;
+        cpRoots.set(msg.cp.seq, msg.cp.root);
         // The hub stores checkpoints sparsely (#41): a root requested for
         // seq N may arrive as the entry at or before N, so record it under
         // the seq that was asked for as well.
@@ -945,6 +950,11 @@ if (cfg.consolePort) {
       // 非 0 表示排序器對不同節點講了不同的故事——Owner 必須看得到。
       checkpoint_forks: cpw.forkCount(),
       checkpoint_fork_detail: cpw.forks().slice(-3),
+      // #75：驗不過的 checkpoint 被丟掉的次數，以及這個節點目前真的採信的
+      // (seq, root)。兩者要一起看——只報拒絕次數看不出「拒絕之後還剩什麼」，
+      // 而 panel 種子（#6）正是從 checkpoint_latest 這一側長出來的。
+      checkpoint_bad_sigs: cpw.badSignatures(),
+      checkpoint_latest: cpw.stamp(),
       // FR-055 strategy state + §20-10 平均還債時間
       strategy: {
         mode,

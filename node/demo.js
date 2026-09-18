@@ -491,9 +491,14 @@ async function main() {
   // #69c 的假陽性閘門。這條比「抓得到」更容易出錯：稀疏儲存（#41）讓
   // checkpoint_request 的回答帶著更早條目的 root，而 agent 會把它記在被問的
   // seq 上——如果拿那種 root 跨節點比對，健康的網路會不停報假分叉。
-  check('§4 #69c 跨節點 checkpoint 比對在健康網路上零誤報',
-    consoleA.checkpoint_forks === 0,
-    `A 回報 ${consoleA.checkpoint_forks} 次分叉（期望 0）` +
+  // 同一條也守 #75 的驗章：誤拒一份真 checkpoint 的後果不是少一個稽核訊號，
+  // 而是 panel 種子（#6）整條斷掉，所以健康網路上兩個計數都必須是 0。
+  check('§4 #69c／#75 健康網路上零誤報、零誤拒，且種子確實採信到 root',
+    consoleA.checkpoint_forks === 0 && consoleA.checkpoint_bad_sigs === 0 &&
+    !!consoleA.checkpoint_latest,
+    `A 回報 ${consoleA.checkpoint_forks} 次分叉、` +
+    `${consoleA.checkpoint_bad_sigs} 份驗不過（期望 0／0），` +
+    `採信到 #${(consoleA.checkpoint_latest || {}).seq}` +
     (consoleA.checkpoint_fork_detail || []).map((f) => `，#${f.seq}`).join(''));
 
   const m = ex.metrics || {};

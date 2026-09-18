@@ -68,13 +68,14 @@ const hub = stampPeerSends(transport.dialLazy(() => discovery.resolveHubTarget(c
     }
     switch (msg.type) {
       case 'checkpoint':
-        cpw.observe(msg.cp.seq, msg.cp.root,
-                    typeof msg.for_seq !== 'number');
+        cpw.observeEntry({ cp: msg.cp, sig: msg.sig },
+                         typeof msg.for_seq !== 'number');
         break;
       case 'registered':
         // The hub cannot tell a healthy client from one that only
         // talks unless the client proves it heard the reply (#49).
         hub.send({ type: 'register_ack', did: id.did });  // proof we can hear (#49)
+        if (msg.hub_pub) cpw.setHubPub(msg.hub_pub);
         log('registered as verifier');
         break;
       case 'verify_request': kernel.onVerifyRequest(msg); break;

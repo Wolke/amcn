@@ -531,6 +531,80 @@ async function main() {
   check('S9', '十一次攻擊之後帳本完全沒動', 'block', !(await unchanged(before)));
   pair.close();
 
+  // --- 第二拓撲：簽章不是這個 Hub 簽的 checkpoint（F9，#75）-------------
+  //
+  // F8 只證明了**離線**驗證抓得到偽造的 checkpoint 簽章——它拿匯出檔跑
+  // `verify(hub_pub, …)`。活著的節點走的是完全另一條路：`checkpoint` 廣播
+  // 直接進 `cpRoots`，而 `cpRoots` 就是 panel 種子（#6）的來源。#75 之前那條
+  // 路上**沒有驗章**，因為節點根本拿不到 Hub 的公鑰（它只存在於匯出檔裡）。
+  // 所以這一案問的不是「能不能驗」而是「有沒有驗」，只有行為測得出來：
+  // 一個真的 Hub、真的 cp 內容、只有簽章換成冒充者的鑰匙。
+  //
+  // 也刻意量了拒絕之後**剩下什麼**：驗不過就不採信，於是 judge-quorum 的種子
+  // 永遠等不到，合約開著不結——與 #72 同一個形狀（偵測／拒絕不等於緩解）。
+  const PORT2 = 47182 + OFF;
+  const CONSOLE3 = 47303 + OFF;
+  const cfg2 = (o, extra) => ({
+    AGENT_CONFIG: JSON.stringify({ hubPort: PORT2, adapter: null, posts: [], ...o }),
+    ...extra,
+  });
+  console.log('\n-- 第二拓撲：簽章不是 Hub 的 checkpoint（12s）--');
+  spawnProc('hub.js', { HUB_PORT: String(PORT2), HUB_AGE_RAMP_MS: '1',
+                        HUB_BEACON: '0', HUB_SEED: 'rt-forge',
+                        // 一致說謊：推播與 checkpoint_request 的回答都偽造。
+                        // 只偽造推播的那一檔會被拉取路徑救回來（見 #75 登記），
+                        // 所以它測不到「驗章之後還剩什麼」。
+                        HUB_CP_FORGE: 'all' });
+  await sleep(600);
+  for (const v of ['W1', 'W2', 'W3']) {
+    spawnProc('verifier.js', cfg2({ name: v, seed: `rtf-${v}` }));
+  }
+  await sleep(300);
+  spawnProc('agent.js', cfg2({
+    name: 'F', seed: 'rtf-F', consolePort: CONSOLE3,
+    adapter: { baseUrl: null, key: { env: 'KF' } },
+    posts: [{ atMs: 2000, units: 4, maxPriceCC: 8, payload: 'rtf-1',
+              acceptance: 'judge-quorum', asserts: SHA_OK }],
+  }, { KF: 'sk-rtf-F' }));
+  spawnProc('agent.js', cfg2({
+    name: 'G', seed: 'rtf-G',
+    adapter: { baseUrl: null, key: { env: 'KG' } },
+    provide: { afterMs: 0, pricePerUnit: 1.0 },
+  }, { KG: 'sk-rtf-G' }));
+  await sleep(11000);
+  let forgeView = null;
+  try {
+    forgeView = await (await fetch(`http://127.0.0.1:${CONSOLE3}/status`)).json();
+  } catch { /* 無 Console：下面自報未測到 */ }
+  // `ask` 綁在第一個 Hub 上，所以這裡向第二個 Hub 自己要一份匯出。
+  const forgeEx = await new Promise((resolve) => {
+    const c = transport.dial({ port: PORT2 });
+    const t = setTimeout(() => { try { c.close(); } catch {} resolve(null); }, 4000);
+    c.onMessage((m) => {
+      if (m.type !== 'ledger_export') return;
+      clearTimeout(t); c.close(); resolve(m);
+    });
+    c.send({ type: 'export' });
+  });
+  // 攻擊成功 = 節點採信了驗不過的 root（checkpoint_latest 非空），或它一次都
+  // 沒拒絕過（表示那條路上仍然沒有驗章）。
+  const adopted = forgeView && forgeView.checkpoint_latest;
+  const rejected = forgeView ? forgeView.checkpoint_bad_sigs : 0;
+  check('F9', '活著的節點採信簽章不是 Hub 簽的 checkpoint（#75）', 'block',
+    !forgeView || !!adopted || rejected === 0,
+    forgeView
+      ? `拒絕 ${rejected} 份、採信 ${adopted ? `#${adopted.seq}` : '0'} 份；` +
+        `分叉誤報 ${forgeView.checkpoint_forks} 次（驗不過的 root 不該進比對）；` +
+        `代價：${(forgeEx && forgeEx.receipts.length) || 0} 筆結算、` +
+        `${(forgeView.contracts || {}).open || 0} 筆合約開著（最久 ` +
+        `${Math.round(((forgeView.contracts || {}).oldest_open_ms || 0) / 1000)}s）` +
+        `——種子等不到（同 #72：拒絕不是緩解）`
+      : '取不到 F 的 Console，本案未測到');
+  const forgeInv = forgeEx ? inv.checkLedger(forgeEx) : ['無法取得匯出'];
+  check('F9b', '偽章 checkpoint 之下帳本不變式被打壞', 'block',
+    forgeInv.length > 0,
+    forgeInv.length ? forgeInv.join('；').slice(0, 120) : '七項不變式全數通過');
+
   console.log('\n== 已知開口（攻擊成功才是 PASS）==');
 
   // F4 used to be a known-open: nothing carried a time, so nothing expired.

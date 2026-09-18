@@ -65,6 +65,21 @@ const DEFAULT_AFTER_MS = Number(process.env.HUB_DEFAULT_AFTER_MS || 14 * 24 * 36
 const REBATE_ON = process.env.HUB_REBATE !== '0';
 // 對抗腳架（#69c 的完整攻擊面）：對一半的節點供應分叉的 checkpoint。
 const EQUIVOCATE = process.env.HUB_EQUIVOCATE === '1';
+// 對抗腳架（#75）：cp 內容全部真實，只有簽章不是這個 Hub 簽的。模擬線上注入
+// 者（信封 metadata 無加密，#44）或冒充的排序器。註冊回應裡的 `hub_pub` 仍是
+// 真鑰，所以這一案問的就是節點到底有沒有驗章——而不是它能不能被騙到別的 Hub。
+//
+// 分兩檔，因為兩檔的後果完全不同：`broadcast`（`1` 亦同）只偽造推播，而
+// `checkpoint_request` 的回答仍用真章——實測那條拉取路徑（#41 為了稀疏儲存
+// 而加的）會自己把節點救回來，代價只是延遲。`all` 才是一致說謊的排序器：
+// 兩條路都偽造，於是驗章的節點什麼都不採信，種子永遠等不到（後果同 #72）。
+const CP_FORGE = process.env.HUB_CP_FORGE === '1' ? 'broadcast'
+  : (process.env.HUB_CP_FORGE || '');
+const forgeId = CP_FORGE ? identityFromSeed('cp-forge-impostor') : null;
+// path 是 'broadcast' 或 'answer'（checkpoint_request 的回覆）。
+const cpSig = (cp, realSig, path) =>
+  (CP_FORGE === 'all' || (CP_FORGE && path === 'broadcast'))
+    ? sign(forgeId.privateKey, cp) : realSig;
 const INSURANCE_TARGET_FRAC = Number(
   process.env.HUB_INSURANCE_TARGET_FRAC != null
     ? process.env.HUB_INSURANCE_TARGET_FRAC : 0.06);
@@ -350,6 +365,11 @@ function makeCheckpoint() {
         ? { type: 'checkpoint', cp: forked, sig: forkedSig }
         : { type: 'checkpoint', cp, sig: entry.sig });
     }
+    tailAppend();
+    return cp;
+  }
+  if (CP_FORGE) {
+    broadcast({ type: 'checkpoint', cp, sig: cpSig(cp, entry.sig, 'broadcast') });
     tailAppend();
     return cp;
   }
@@ -1248,6 +1268,13 @@ transport.listen({
           // was at zero, skip repayment mode, and overestimate what it can
           // spend until the hub refused it.
           chan.send({ type: 'registered', did: msg.did,
+                           // 節點原本完全不知道 Hub 的公鑰——`hub_pub` 只在
+                           // 匯出檔裡——所以它收到 checkpoint 時**沒有驗簽**，
+                           // 卻拿 cp.root 去推導 panel（#6 的種子）。交出公鑰
+                           // 不是信任宣告：DID 是公鑰的雜湊，所以釘了 DID 的
+                           // 節點可以自己核對，而 #69c 的分叉指控也因此變成
+                           // 可證明的（否則未簽署的戳記會變成阻斷攻擊的入口）。
+                           hub_pub: hubId.pub,
                            credit_line: clOf(msg.did), fee_rate: eeff.FEE_RATE,
                            balance_cc: bal(msg.did),
                            stake_cc: stakes.get(msg.did) || 0,
@@ -1389,7 +1416,8 @@ transport.listen({
           // to ask for it.
           const e = typeof msg.seq === 'number' && msg.seq < cpSeq
             ? panel.checkpointAt(checkpoints, msg.seq) : null;
-          if (e) chan.send({ type: 'checkpoint', cp: e.cp, sig: e.sig,
+          if (e) chan.send({ type: 'checkpoint', cp: e.cp,
+                             sig: cpSig(e.cp, e.sig, 'answer'),
                              for_seq: msg.seq });
           break;
         }
