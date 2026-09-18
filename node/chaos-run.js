@@ -83,6 +83,9 @@ async function runScenario(file) {
         HUB_DEFAULT_SWEEP_MS: '2000',
       } : {}),
       ...(sc.rendezvous ? { HUB_RENDEZVOUS: rvPath, HUB_RENDEZVOUS_MS: '5000' } : {}),
+      // 情境可以直接設 Hub 的環境變數，這樣「同一個情境開/關某個機制」就是
+      // 兩個檔案的差別而不是兩份程式（#71 的回流路徑需要這種對照）。
+      ...(sc.hubEnv || {}),
       ...(withImport && fs.existsSync(dumpPath) ? { HUB_IMPORT: dumpPath } : {}),
     });
   };
@@ -312,7 +315,7 @@ async function runScenario(file) {
     switch (e.kind) {
       case 'invariantsHold':
         check('不變式全程未被破壞', violations.length === 0,
-          violations.length ? violations.slice(0, 3).join(' | ') : `${lastReceipts} 筆結算下 6 項不變式持續通過`);
+          violations.length ? violations.slice(0, 3).join(' | ') : `${lastReceipts} 筆結算下 7 項不變式持續通過`);
         break;
       case 'settlesBefore':
         check(`故障前有成交（T+${e.atS}s 之前）`,
@@ -335,6 +338,20 @@ async function runScenario(file) {
         const ok = after.length > 0 && after[0] - e.afterS <= e.withinS;
         check(`恢復後 ${e.withinS}s 內交易恢復`, ok,
           after.length ? `第一筆於 T+${after[0]}s，共 ${after.length} 筆` : '恢復後無成交');
+        break;
+      }
+      case 'rebateReturns': {
+        // 毛吸收 vs 淨吸收：protocol 帳戶收了多少 vs 真正留下多少。這條路徑
+        // 的全部主張就是這兩個數字要能分開（#71）。
+        const m = (lastExport && lastExport.metrics) || {};
+        const rebated = m.rebated_cc || 0;
+        const held = (m.insurance_cc || 0) + (m.treasury_cc || 0);
+        check(`protocol 帳戶的收入有回流（≥ ${e.minCc} CC）`,
+          rebated >= e.minCc,
+          `退還 ${rebated.toFixed(2)} CC（保險 ` +
+          `${((m.rebated_by_source || {}).insurance || 0).toFixed(2)}、Treasury ` +
+          `${((m.rebated_by_source || {}).treasury || 0).toFixed(2)}），` +
+          `期末仍持有 ${held.toFixed(2)} CC`);
         break;
       }
       case 'tradingContinues': {

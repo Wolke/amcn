@@ -538,7 +538,7 @@ async function main() {
       : 'A 的 Console 不再回應——進程可能已死')
       : '取不到 A 的 DID，本案未測到');
 
-  check('INV', '所有攻擊之後，六項不變式仍然成立', 'block', violations.length > 0,
+  check('INV', '所有攻擊之後，七項不變式仍然成立', 'block', violations.length > 0,
     violations.length ? violations.slice(0, 2).join(' | ') : `${finalEx.receipts.length} 筆收據下全數通過`);
 
   procs.forEach((p) => { try { p.kill(); } catch { /* gone */ } });

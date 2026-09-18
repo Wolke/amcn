@@ -217,7 +217,7 @@ async function main() {
     quorum.length ? `每筆付 ${paidCounts.join('／')} 位（panel 3 位，其中 1 位沉默）` : '無 quorum 結算');
 
   const violations = inv.checkLedger(ex);
-  check('INV', '惡意參與者跑完後六項不變式仍成立', 'block', violations.length > 0,
+  check('INV', '惡意參與者跑完後七項不變式仍成立', 'block', violations.length > 0,
     violations.length ? violations.slice(0, 2).join(' | ') : `${ex.receipts.length} 筆收據下全數通過`);
 
   // --- 第二輪：抄多數的 verifier（D3）------------------------------------

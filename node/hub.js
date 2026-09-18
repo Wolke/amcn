@@ -45,6 +45,30 @@ const LOSS = 'protocol:loss';
 // 離線多久且仍為負餘額就視為違約。預設 14 天，與模擬器的 write-off 條件同；
 // demo 與情境會壓縮它，否則沒有任何測試跑得到這條路徑。
 const DEFAULT_AFTER_MS = Number(process.env.HUB_DEFAULT_AFTER_MS || 14 * 24 * 3600 * 1000);
+// 回流路徑（登記簿 #71）。protocol 帳戶只進不出，所以它們持有的每一塊 CC
+// 都是永久借出去的信用——40 分鐘 soak 的結局就是三人全部貼牆、122.53 CC
+// 卡在 protocol 帳戶裡。§2.2「Treasury 啟動」把回流列為設計的一部分。
+//
+// 兩個來源、兩種規則，因為兩個帳戶的性質不同：
+//   保險池是**準備金**，所以目標綁曝險（未償負餘額總額）× 預期損失率。
+//     0.06 來自 #65 的壞帳率量測（0.08–2.11%）乘 3 倍安全係數。
+//   Treasury 是**收入**，所以只保留一筆準備金供金絲雀與 L_boot 補貼使用，
+//     其餘退還——把 Treasury 退到零會讓 §2.2 設計的另外兩條支出路徑停擺。
+//
+// 為什麼這不需要預簽 Grant：§2.2 對 demurrage 那類非雙簽分錄要求引用 Owner
+// 預簽的費率表，因為那種分錄會**拿走**價值。退費只會 credit 非 protocol
+// 帳戶，方向相反，收款方無從受害——需要守的是不變式與準備金充足性，不是同意。
+// 明確的總開關。第一版用 `HUB_INSURANCE_TARGET_FRAC=0` 當「關閉」，而那個值
+// 的語意是「準備金目標為零」——也就是**把保險池全部退還**，比預設更激進。
+// 於是 #71 的對照組跑了 23 分鐘才發現它根本不是對照組。0 是一個合法的政策，
+// 不能同時當關閉的意思。
+const REBATE_ON = process.env.HUB_REBATE !== '0';
+const INSURANCE_TARGET_FRAC = Number(
+  process.env.HUB_INSURANCE_TARGET_FRAC != null
+    ? process.env.HUB_INSURANCE_TARGET_FRAC : 0.06);
+const TREASURY_RESERVE_CC = Number(process.env.HUB_TREASURY_RESERVE_CC || 5);
+const REBATE_MS = Number(process.env.HUB_REBATE_MS || 60000);
+const REBATE_MIN_CC = Number(process.env.HUB_REBATE_MIN_CC || 0.05);
 const DEFAULT_SWEEP_MS = Number(process.env.HUB_DEFAULT_SWEEP_MS || 60000);
 // FR-083 / §20-9. `market` is the only class that counts as real trade;
 // `test` is a rehearsal, `subsidy` is Treasury-funded (canary decoys,
@@ -126,6 +150,7 @@ function applyPostings(kind, ref, postings) {
 }
 const agents = new Map();    // did -> {pub, boxPub, chan, stats, role}
 const balances = new Map();
+const outVolume = new Map();  // did -> 本退費週期內的支出額（#71）
 const receipts = [];         // {kind:'dual'|'forced', receipt, sigs, evidence?}
 const chains = new Map();    // account -> [{seq,prev_hash,receipt_idx,delta_cc,balance_after,hash}]
 // Sparse: root changes plus a CHECKPOINT_KEEP_MS heartbeat. cpSeq is the
@@ -405,6 +430,15 @@ function applySettlement(kind, receipt, sigs, evidence) {
   receipts.push({ kind, receipt, sigs, evidence });
   events.push({ kind: 'settlement', ref: receipt.contract_id,
                 postings: receipt.postings, receipt_idx: idx });
+  // 本期流出量，供退費加權（#71）。用**支出**而非任何分錄：#66 的第一版把
+  // 「閒置」定義成「最近沒有分錄」，而 verifier 每收一筆費用就算有動——儘管
+  // 餘額只增不減。獎勵累積者正是這條路徑要修的東西。記在這裡而不是
+  // applyPostings 裡，因為結算是直接 push events 的、不經過那個函式。
+  for (const p of receipt.postings) {
+    if (p.amount_cc < 0 && !p.account.startsWith('protocol:')) {
+      outVolume.set(p.account, (outVolume.get(p.account) || 0) - p.amount_cc);
+    }
+  }
   settledIds.add(receipt.contract_id);
   const cp = makeCheckpoint();
   console.log(`[hub] SETTLED(${kind}) ${receipt.contract_id}: ` +
@@ -596,6 +630,17 @@ function handleForced(msg, chan) {
 // The class split is the point (§20-9): a figure that mixes subsidised
 // decoys and rehearsal traffic into "market volume" is not a market figure.
 function buildMetrics() {
+  // 由事件導出而不是累加計數器：§20-4 要求指標可由簽署狀態重建，一個只存在
+  // 於記憶體計數器裡的數字可能與產生它的分錄不一致（同 #65 抵押品的理由）。
+  const rebated = { insurance: 0, treasury: 0 };
+  for (const ev of events) {
+    if (ev.kind !== 'rebate') continue;
+    const which = String(ev.ref).split(':')[1];
+    if (which in rebated) {
+      rebated[which] += ev.postings.filter((p) => p.amount_cc > 0)
+        .reduce((t, p) => t + p.amount_cc, 0);
+    }
+  }
   const byClass = {};
   const bump = (cls, field, n = 1) => {
     byClass[cls] = byClass[cls] || { settlements: 0, volume_cc: 0 };
@@ -659,7 +704,15 @@ function buildMetrics() {
       return vol > 0 ? +(off / vol).toFixed(4) : 0;
     })(),
     insurance_cc: +bal(INSURANCE).toFixed(4),
+    treasury_cc: +bal(TREASURY).toFixed(4),
     loss_cc: +bal(LOSS).toFixed(4),
+    // 回流（#71）。protocol 帳戶**淨**吸收多少才是真正離開流通的金額，
+    // 而毛額會高估——這個區別就是這條路徑要證明的東西。
+    rebated_cc: +(rebated.insurance + rebated.treasury).toFixed(4),
+    rebated_by_source: {
+      insurance: +rebated.insurance.toFixed(4),
+      treasury: +rebated.treasury.toFixed(4),
+    },
     avg_repayment_ms: avgRepay,
     repayment_episodes: episodes.length,
     by_class: byClass,
@@ -817,6 +870,40 @@ setInterval(() => {
     a.offlineSince = now;        // 不要每個 sweep 都重算同一個帳戶
   }
 }, DEFAULT_SWEEP_MS).unref();
+
+// 回流（#71）。加權用本期支出，所以只收不付的帳戶拿不到——#62 量到 verifier
+// 是最大的吸收端，而平均分配會把錢送回給它們。
+function rebateFrom(source, amount, label) {
+  const movers = [...outVolume].filter(([did, v]) => v > 1e-9 && agents.has(did));
+  const wsum = movers.reduce((t, [, v]) => t + v, 0);
+  if (!movers.length || wsum <= 1e-9) return 0;
+  const give = Math.min(amount, Math.max(0, bal(source)));
+  if (give < REBATE_MIN_CC) return 0;
+  // 逐筆四捨五入後再由來源帳戶吸收餘數，否則 Σ=0 會因為分配誤差而不成立，
+  // 而 applyPostings 會（正確地）拒絕整筆。
+  const shares = movers.map(([did, v]) => [did, +(give * v / wsum).toFixed(4)])
+    .filter(([, amt]) => amt > 1e-9);
+  if (!shares.length) return 0;
+  const total = +shares.reduce((t, [, amt]) => t + amt, 0).toFixed(4);
+  const postings = [{ account: source, amount_cc: -total }]
+    .concat(shares.map(([did, amt]) => ({ account: did, amount_cc: amt })));
+  if (!applyPostings('rebate', `rebate:${label}:${Date.now()}`, postings)) return 0;
+  console.log(`[hub] REBATE ${label}: ${total.toFixed(2)} CC → ` +
+    shares.map(([d, a]) => `${d.slice(0, 18)}=${a.toFixed(2)}`).join(' '));
+  return total;
+}
+
+if (REBATE_ON) setInterval(() => {
+  // 曝險 = 現在的未償負餘額總額，也就是「可能違約的金額」。保險池的目標綁
+  // 它而不是綁成交量，因為池子存在是為了吸收違約。
+  let exposure = 0;
+  for (const did of agents.keys()) exposure += Math.max(0, -bal(did));
+  const insSurplus = bal(INSURANCE) - exposure * INSURANCE_TARGET_FRAC;
+  if (insSurplus > REBATE_MIN_CC) rebateFrom(INSURANCE, insSurplus, 'insurance');
+  const trSurplus = bal(TREASURY) - TREASURY_RESERVE_CC;
+  if (trSurplus > REBATE_MIN_CC) rebateFrom(TREASURY, trSurplus, 'treasury');
+  outVolume.clear();   // 權重要反映「最近」而不是全期
+}, REBATE_MS).unref();
 
 // --- server ---------------------------------------------------------------
 transport.listen({

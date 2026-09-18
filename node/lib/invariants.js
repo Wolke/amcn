@@ -152,9 +152,45 @@ function uniqueContractIds(ex) {
   return new Set(ids).size === ids.length ? [] : ['duplicate contract_id in receipts'];
 }
 
+// 瀑布必須真的分層（#65 的抵押→保險→損失）。原本的情境期望只檢查**順序**，
+// 所以一個幾乎空的保險池加上 −36 CC 的 protocol:loss 照樣 PASS——期望寫在
+// 它能通過的地方，而不是在會痛的地方（同 #62 的「只看交易 agent 不看
+// verifier」）。這裡檢查的是真正的分層條件：**只有在保險池被榨乾之後才允許
+// 動用 protocol:loss**。
+//
+// 放在不變式而不是情境期望裡，是因為它對每一筆沖銷都成立，與情境無關。
+// 做法是重放事件到該筆沖銷之前，拿當時的保險池餘額與這筆用掉的金額比對。
+function writeOffWaterfall(ex) {
+  const bad = [];
+  const running = new Map();
+  const balOf = (a) => running.get(a) || 0;
+  for (const ev of ex.events || []) {
+    if (ev.kind === 'write_off') {
+      const used = -(ev.postings.find((p) => p.account === 'protocol:insurance')
+        || { amount_cc: 0 }).amount_cc;
+      const loss = -(ev.postings.find((p) => p.account === 'protocol:loss')
+        || { amount_cc: 0 }).amount_cc;
+      const had = balOf('protocol:insurance');
+      // 動了 loss，就必須先把保險池用到見底（容許 1e-6 的浮點誤差）。
+      if (loss > 1e-9 && used < had - 1e-6) {
+        bad.push(`${ev.ref}: took ${loss.toFixed(2)} from protocol:loss while ` +
+          `${(had - used).toFixed(2)} remained in insurance`);
+      }
+      if (used > had + 1e-6) {
+        bad.push(`${ev.ref}: drew ${used.toFixed(2)} from insurance which ` +
+          `only held ${had.toFixed(2)}`);
+      }
+    }
+    for (const p of ev.postings || []) {
+      running.set(p.account, balOf(p.account) + p.amount_cc);
+    }
+  }
+  return bad;
+}
+
 const LEDGER_CHECKS = {
   conservation, chains, receiptSignatures, quorumBacked, creditLimits,
-  uniqueContractIds,
+  uniqueContractIds, writeOffWaterfall,
 };
 
 function checkLedger(ex, only = null) {

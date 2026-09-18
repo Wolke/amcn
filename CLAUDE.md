@@ -57,6 +57,10 @@ cd node && node demo-reconnect.js
 # 每支 demo 都可用 DEMO_PORT_OFFSET=100 與跑中的試點並存；
 # AMCN_TRANSPORT=http 可把整個 stack 換到第二個傳輸實作（預設 tcp）
 
+# 回流對照（#71，各 40 分鐘，可並行）：同一個長跑開/關 protocol 帳戶回流
+cd node && node chaos-run.js scenarios/soak-rebate.json
+cd node && node chaos-run.js scenarios/soak-norebate.json
+
 # 故障注入情境（10 個，約 35 分鐘；單跑一個約 3 分鐘）
 cd node && node chaos-run.js scenarios/panel-blackhole.json
 cd node && node chaos-run.js scenarios/*.json

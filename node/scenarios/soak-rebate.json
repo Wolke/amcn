@@ -1,0 +1,36 @@
+{
+  "name": "soak-rebate",
+  "what": "與 soak 完全相同的 40 分鐘長跑，唯一差別是開啟 protocol 帳戶的回流（#71）。對照組就是 soak 本身——那一輪的結局是 292 筆結算後最後 12 分鐘零成交、三人全部貼上信用上限、122.53 CC 卡在 protocol 帳戶裡。要回答的是：把那些錢按支出加權退還出去，市場會不會繼續走。模擬器量不到這件事（sim N=3 在池子累積起來之前就鎖死，見 #71），所以閘門只能在這裡",
+  "portOffset": 1120,
+  "seed": 41,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 2400,
+  "sampleS": 60,
+  "maxOpenS": 150,
+  "hubEnv": {
+    "HUB_REBATE_MS": "30000",
+    "HUB_INSURANCE_TARGET_FRAC": "0.06",
+    "HUB_TREASURY_RESERVE_CC": "2"
+  },
+  "profile": {
+    "mode": "latency",
+    "latencyMs": 80,
+    "jitterMs": 40
+  },
+  "timeline": [
+    { "atS": 600, "target": "panel", "fault": { "mode": "blackhole", "direction": "both" } },
+    { "atS": 700, "target": "panel", "fault": "profile" },
+    { "atS": 1200, "action": "killHub" },
+    { "atS": 1260, "action": "startHub", "import": true },
+    { "atS": 1800, "target": "agents", "fault": { "mode": "loss", "lossPct": 2, "latencyMs": 80, "jitterMs": 40 } },
+    { "atS": 2100, "target": "agents", "fault": "profile" }
+  ],
+  "expect": [
+    { "kind": "invariantsHold" },
+    { "kind": "settlesBefore", "atS": 300 },
+    { "kind": "settlementResumesWithin", "afterS": 1260, "withinS": 180 },
+    { "kind": "rebateReturns", "minCc": 20 },
+    { "kind": "tradingContinues", "fromS": 300, "maxGapS": 300 }
+  ]
+}

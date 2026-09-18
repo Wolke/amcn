@@ -16,7 +16,7 @@
 | 1 | 三個獨立節點在不知道彼此 API Key 下完成任務 | `node demo.js` 斷言「§20-1/6 Key 隔離＋NFR-005」（掃描 Hub 全量流量，三個 payload 明文與 key 皆不出現）；**真實三台機器**試點完成 14 筆跨機結算，帳本存於 `node/out/pilot-final-*.json` | ✅ 自動＋真機 |
 | 2 | Requester 從 0 CC 開始、在信用額度內完成借用 | `node demo.js`「§20-2/3 閉環」：A 由 0 → −40 → +2.14 CC | ✅ 自動 |
 | 3 | 之後替第三方完成任務並回補負餘額 | 同上；`node demo-autonomous.js`「§20-3／UC-02 閉環真正閉合」（無人介入版）| ✅ 自動 |
-| 4 | 全部餘額變動可由簽署事件重建且守恆 | `node demo.js`「§20-4 Σ=0 且收據重建 = Hub 帳」；`node demo-rebuild.js`（**另一個進程、另一個埠**從匯出重建並偵測竄改）；`lib/invariants.js` 在每個故障情境中**持續**檢查六項不變式，10 個情境零違反 | ✅ 自動，且已強化為連續檢查 |
+| 4 | 全部餘額變動可由簽署事件重建且守恆 | `node demo.js`「§20-4 Σ=0 且收據重建 = Hub 帳」；`node demo-rebuild.js`（**另一個進程、另一個埠**從匯出重建並偵測竄改）；`lib/invariants.js` 在每個故障情境中**持續**檢查七項不變式，10 個情境零違反 | ✅ 自動，且已強化為連續檢查 |
 | 5 | 官方 Indexer 停止後仍可恢復或轉用其他 Indexer | `node demo-reconnect.js`（殺掉 Hub → 全網自行重連）；`chaos-run.js scenarios/hub-kill-takeover.json`（SIGKILL → 同 seed 從自動匯出重建接手）；`scenarios/hub-moves.json`（**Hub 換位址**，client 憑簽署的 rendezvous 記錄自行跟上，無人改設定）；`demo-transport.js`（三種傳輸實作產生同一本帳）| ✅ 自動，四種角度 |
 | 6 | 惡意 Task 無法讀 Provider Key 或掛載私人目錄 | `node demo.js` key 掃描；`node redteam-agents.js` A1（payload 明文要求回傳 API key）、A2（payload 是否經過 Hub）。**掛載私人目錄未測**——原型沒有 sandbox，見盤點 §3 不可達清單 | ⚠️ Key 有證據；sandbox 面**無控制** |
 | 7 | 至少一種任務能以 deterministic verification 自動結算 | `node demo.js`「§20-7 DSL 驗收＋真 HTTP 路徑」（assert 集在 TaskSpec 簽章時鎖 hash）| ✅ 自動 |

@@ -1,0 +1,77 @@
+{
+  "name": "soak-norebate",
+  "what": "#71 的對照組：與 soak-rebate 完全相同的 40 分鐘長跑，只是把回流關掉（HUB_REBATE=0）。回流已改為預設開啟，所以對照必須明確關掉它——否則就沒有對照了。**第一版用 HUB_INSURANCE_TARGET_FRAC=0 當關閉，而那個值的語意是「準備金目標為零」，也就是把保險池全部退還，比預設更激進**；那一輪跑了 23 分鐘才發現它不是對照組，因此加了明確的總開關。不放 rebateReturns 期望，並刻意保留 tradingContinues：這一輪**應該**在末段停下來，而那個失敗就是這條路徑要修的東西。若對照也通過，說明這個機制沒有被證明有用",
+  "portOffset": 1200,
+  "seed": 41,
+  "agents": 3,
+  "verifiers": 3,
+  "durationS": 2400,
+  "sampleS": 60,
+  "maxOpenS": 150,
+  "hubEnv": {
+    "HUB_REBATE": "0"
+  },
+  "profile": {
+    "mode": "latency",
+    "latencyMs": 80,
+    "jitterMs": 40
+  },
+  "timeline": [
+    {
+      "atS": 600,
+      "target": "panel",
+      "fault": {
+        "mode": "blackhole",
+        "direction": "both"
+      }
+    },
+    {
+      "atS": 700,
+      "target": "panel",
+      "fault": "profile"
+    },
+    {
+      "atS": 1200,
+      "action": "killHub"
+    },
+    {
+      "atS": 1260,
+      "action": "startHub",
+      "import": true
+    },
+    {
+      "atS": 1800,
+      "target": "agents",
+      "fault": {
+        "mode": "loss",
+        "lossPct": 2,
+        "latencyMs": 80,
+        "jitterMs": 40
+      }
+    },
+    {
+      "atS": 2100,
+      "target": "agents",
+      "fault": "profile"
+    }
+  ],
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 300
+    },
+    {
+      "kind": "settlementResumesWithin",
+      "afterS": 1260,
+      "withinS": 180
+    },
+    {
+      "kind": "tradingContinues",
+      "fromS": 300,
+      "maxGapS": 300
+    }
+  ]
+}
