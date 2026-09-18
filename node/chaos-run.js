@@ -450,10 +450,120 @@ async function runScenario(file) {
           during.length ? `有 ${during.length} 筆` : '0 筆');
         break;
       }
+      case 'marketMetrics': {
+        // §20-10 的四項指標。原型在 N=3 由 demo.js 斷言，而 W12 問的是同一組
+        // 定義在試點規模上還成不成立，所以這裡讀的是匯出裡的 `metrics`——
+        // 它由簽署狀態導出（FR-083 要求模擬與生產共用定義），Console 不參與。
+        const mm = (lastExport && lastExport.metrics) || {};
+        const bad = [];
+        // 先檢查**值域**再檢查界限。第一版只設了下界，於是 N=20 那一輪的
+        // 成交率 2.242 與違約代理 −1.242 直接 PASS——一個比率跑出 [0,1] 表示
+        // 分子與分母來自不同的生命期（#77：`market` 計數器不隨匯入還原），
+        // 而只設下界的期望永遠看不到這件事。
+        if (!(mm.fill_rate >= 0 && mm.fill_rate <= 1)) {
+          bad.push(`成交率 ${mm.fill_rate} 不在 [0,1]——分子分母不同生命期（#77）`);
+        }
+        if (!(mm.default_proxy_rate >= 0)) {
+          bad.push(`違約代理 ${mm.default_proxy_rate} < 0（同上）`);
+        }
+        if (e.minFillRate != null && !(mm.fill_rate >= e.minFillRate)) {
+          bad.push(`成交率 ${mm.fill_rate} < ${e.minFillRate}`);
+        }
+        if (e.minDepth != null && !(mm.avg_bids_per_task >= e.minDepth)) {
+          bad.push(`供需深度 ${mm.avg_bids_per_task} < ${e.minDepth}`);
+        }
+        if (e.maxDefaultRate != null && !(mm.default_rate <= e.maxDefaultRate)) {
+          bad.push(`違約率 ${mm.default_rate} > ${e.maxDefaultRate}`);
+        }
+        // 還債時間是四項裡唯一可能**無值**的：它需要有帳戶真的穿越零點。
+        // null 不是「很好」而是「這一輪沒有量到」，所以它算缺一項。
+        if (mm.avg_repayment_ms == null) {
+          bad.push('還債時間無值——本輪沒有任何帳戶從負餘額回到零以上');
+        }
+        check('§20-10 四項指標齊備且在界內', bad.length === 0,
+          bad.length ? bad.join('；')
+            : `成交率 ${mm.fill_rate}（${mm.contracts_awarded} 得標／` +
+              `${(lastExport.receipts || []).length} 結算）、供需深度 ` +
+              `${mm.avg_bids_per_task} 個出價/任務、違約率 ${mm.default_rate}` +
+              `（代理 ${mm.default_proxy_rate}）、還債 ` +
+              `${mm.avg_repayment_ms}ms（${mm.repayment_episodes} 次）`);
+        break;
+      }
       default:
         check(`未知期望 ${e.kind}`, false);
     }
   }
+  // --- 人口報表（#61／#62／#64）------------------------------------------
+  // soak-n6 的「信用使用率 36.0%、貼上限 1/6、verifier 佔正餘額 97.5%」是逐
+  // 帳戶手算出來的，所以下一輪無法自動重現同一組數字——而 #61 的主張正是
+  // 「這些數字隨 N 移動」。改由匯出計算：`credit_lines`、`balances` 與
+  // `chains` 都是簽署狀態的一部分，Console 只用來把 DID 換回名字。
+  if (lastExport && lastExport.credit_lines) {
+    const bals = lastExport.balances || {};
+    const nameOf = {};
+    for (const [nm, c] of Object.entries(lastConsoles)) {
+      if (c && c.did) nameOf[c.did] = nm;
+    }
+    // 峰值負債取 hash chain 的 `balance_after` 最小值：期末餘額看不出誰**曾經**
+    // 貼到上限，而「貼上限」問的就是曾經——一個還完債的 agent 期末是 0，
+    // 期間卻可能整輪貼牆。
+    const troughOf = (did) => ((lastExport.chains || {})[did] || [])
+      .reduce((lo, en) => Math.min(lo, en.balance_after), 0);
+    let sumCl = 0, sumDebt = 0, sumPeak = 0;
+    // 兩個門檻都報。#61 手算那兩點用的是 ≥90%，而第一版這裡寫 0.99——
+    // 同一輪 N=20 在 90% 是 9/20、在 99% 是 0/20，也就是說**門檻的選擇會
+    // 直接翻轉「貼上限隨 N 上升還是下降」這個結論**（峰值使用率密集落在
+    // 93–98%，沒有人真的碰到天花板）。一個會翻轉結論的常數不該藏在程式裡。
+    const pinned = { p90: 0, p99: 0 };
+    const agentRows = [];
+    for (const [did, cl] of Object.entries(lastExport.credit_lines)) {
+      const b = bals[did] || 0;
+      const peak = -troughOf(did);
+      sumCl += cl; sumDebt += Math.max(0, -b); sumPeak += peak;
+      // 分母是**期末**額度。額度在跑的過程中隨年齡與 E_eff 成長，所以早期
+      // 貼牆的峰值會被一個更大的期末額度除——這個偏誤讓比率偏低，不偏高。
+      if (cl > 0 && peak >= cl * 0.9) pinned.p90 += 1;
+      if (cl > 0 && peak >= cl * 0.99) pinned.p99 += 1;
+      agentRows.push({ name: nameOf[did] || did.slice(0, 14), cl, b, peak });
+    }
+    const isProtocol = (a) => a.startsWith('protocol:');
+    let posAgents = 0, posOthers = 0;
+    const otherRows = [];
+    for (const [did, b] of Object.entries(bals)) {
+      if (isProtocol(did) || b <= 0) continue;
+      if (did in lastExport.credit_lines) posAgents += b;
+      else { posOthers += b; otherRows.push({ name: nameOf[did] || did.slice(0, 14), b }); }
+    }
+    const pos = posAgents + posOthers;
+    const pct = (x, of) => (of > 0 ? ((100 * x) / of).toFixed(1) : '—');
+    console.log(`\n-- 人口（${agentRows.length} 交易 agent、` +
+      `${otherRows.length} 個只收不付的帳戶）--`);
+    console.log(`   信用使用率  期末 ${pct(sumDebt, sumCl)}%｜` +
+      `峰值 ${pct(sumPeak, sumCl)}%（額度總計 ${sumCl.toFixed(1)} CC）`);
+    // 總量使用率會被結構性順差者**沒用到的**額度稀釋（#64：一個 +673 CC 的
+    // 順差者帶著 500 CC 額度幾乎沒借過），所以它不是「網路會不會鎖死」的
+    // 指標；逐帳戶的峰值分佈才是。
+    console.log(`   曾貼上限    ≥90% ${pinned.p90}/${agentRows.length}｜` +
+      `≥99% ${pinned.p99}/${agentRows.length}｜峰值使用率 ` +
+      `${[...agentRows].sort((x, y) => y.peak / y.cl - x.peak / x.cl)
+        .slice(0, 5).map((r) => `${(100 * r.peak / r.cl).toFixed(0)}%`).join(' ')} …`);
+    // #62 的形狀：不是「誰賺得多」，是「正餘額集中在不花錢的角色手上」。
+    console.log(`   正餘額     共 ${pos.toFixed(2)} CC｜` +
+      `交易 agent ${posAgents.toFixed(2)}（${pct(posAgents, pos)}%）｜` +
+      `非交易角色 ${posOthers.toFixed(2)}（${pct(posOthers, pos)}%）`);
+    const top = [...agentRows].sort((x, y) => y.b - x.b);
+    const fmt = (r) => `${r.name} ${r.b >= 0 ? '+' : ''}${r.b.toFixed(2)}` +
+      `（峰值負債 ${r.peak.toFixed(1)}/${r.cl.toFixed(1)}）`;
+    console.log(`   最高       ${top.slice(0, 3).map(fmt).join('、')}`);
+    // N≤6 時前三與後三會是同一批，印兩次只是噪音。
+    if (top.length > 6) {
+      console.log(`   最低       ${top.slice(-3).map(fmt).join('、')}`);
+    }
+    const mp = lastExport.metrics || {};
+    console.log(`   protocol   保險 ${mp.insurance_cc}｜Treasury ` +
+      `${mp.treasury_cc}｜損失 ${mp.loss_cc}｜已退還 ${mp.rebated_cc} CC`);
+  }
+
   if (growth.length >= 4 && sc.durationS >= 600) {
     const a = growth[1], z = growth.at(-1);
     const mins = (z.t - a.t) / 60 || 1;

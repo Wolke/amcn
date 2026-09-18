@@ -827,8 +827,9 @@ function buildMetrics() {
     // 成交率: awarded contracts that reached settlement.
     fill_rate: awarded ? +(receipts.length / awarded).toFixed(3) : 0,
     // 違約率 proxy: awarded and never settled. Not the same as a written-off
-    // default — the prototype has no write-off path, so this is the closest
-    // honest measure and is named as a proxy rather than dressed up.
+    // default, which is `default_rate` below and has been real since the
+    // waterfall shipped (#65); this one stays because it also catches
+    // contracts that simply never completed, and is named as a proxy.
     unsettled_awarded: Math.max(0, awarded - receipts.length),
     default_proxy_rate: awarded
       ? +((awarded - receipts.length) / awarded).toFixed(3) : 0,

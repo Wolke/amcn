@@ -61,6 +61,11 @@ cd node && node demo-reconnect.js
 cd node && node chaos-run.js scenarios/soak-rebate.json
 cd node && node chaos-run.js scenarios/soak-norebate.json
 
+# 規模第三點（#61／#62，40 分鐘）：與 soak-rebate（N=3）、soak-n6（N=6）同種子同時間軸，
+#   只把交易者換成 20 個——W12 封閉試點的下緣。目前 4/6：tradingContinues 的 FAIL 是
+#   #76（取樣端在匯出越過 16MB 之後讀不到帳）造成的假警報，結論請讀 Hub 的期末快照
+cd node && node chaos-run.js scenarios/soak-n20.json
+
 # 快照＋尾檔恢復（#74）：歷史只存在尾檔時殺掉 Hub，驗證重播完整
 cd node && node chaos-run.js scenarios/tail-recover.json
 

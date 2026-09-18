@@ -1,0 +1,88 @@
+{
+  "name": "soak-n20",
+  "what": "#61／#62 的第三個點：與 soak-rebate（N=3）、soak-n6（N=6）同種子、同故障時間軸、同回流設定，唯一的差別是交易者 6 → 20——也就是 W12 封閉試點的下緣規模。要比的是掃描預測隨 N 移動的那三個量：信用使用率（52.0% @ N=3 → 36.0% @ N=6）、曾貼上限比例（0/3 → 1/6）、最長空窗（183s → 131s）；以及 #62 那個反方向的量：verifier 佔正餘額 97.5% 會不會隨 N 更嚴重。同時第一次在試點規模上輸出 §20-10 的四項指標。",
+  "portOffset": 1900,
+  "seed": 41,
+  "agents": 20,
+  "verifiers": 3,
+  "durationS": 2400,
+  "sampleS": 60,
+  "maxOpenS": 150,
+  "hubEnv": {
+    "HUB_REBATE_MS": "30000",
+    "HUB_INSURANCE_TARGET_FRAC": "0.06",
+    "HUB_TREASURY_RESERVE_CC": "2"
+  },
+  "profile": {
+    "mode": "latency",
+    "latencyMs": 80,
+    "jitterMs": 40
+  },
+  "timeline": [
+    {
+      "atS": 600,
+      "target": "panel",
+      "fault": {
+        "mode": "blackhole",
+        "direction": "both"
+      }
+    },
+    {
+      "atS": 700,
+      "target": "panel",
+      "fault": "profile"
+    },
+    {
+      "atS": 1200,
+      "action": "killHub"
+    },
+    {
+      "atS": 1260,
+      "action": "startHub",
+      "import": true
+    },
+    {
+      "atS": 1800,
+      "target": "agents",
+      "fault": {
+        "mode": "loss",
+        "lossPct": 2,
+        "latencyMs": 80,
+        "jitterMs": 40
+      }
+    },
+    {
+      "atS": 2100,
+      "target": "agents",
+      "fault": "profile"
+    }
+  ],
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 300
+    },
+    {
+      "kind": "settlementResumesWithin",
+      "afterS": 1260,
+      "withinS": 180
+    },
+    {
+      "kind": "rebateReturns",
+      "minCc": 20
+    },
+    {
+      "kind": "tradingContinues",
+      "fromS": 300,
+      "maxGapS": 300
+    },
+    {
+      "kind": "marketMetrics",
+      "minFillRate": 0.9,
+      "minDepth": 1.0
+    }
+  ]
+}
