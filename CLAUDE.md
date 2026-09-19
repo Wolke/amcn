@@ -69,6 +69,10 @@ cd node && node chaos-run.js scenarios/soak-norebate.json
 #   （Hub 重啟後成交率 >1，指標本身未修；閘門刻意讓它紅）
 cd node && node chaos-run.js scenarios/soak-n20.json
 
+# 分頁匯出 × 排序器重啟（#41／#81，約 3 分鐘）：兩個單獨都乾淨，只有合起來
+#   才抓得到「凍結的快照其實是淺拷貝」
+cd node && node chaos-run.js scenarios/page-kill.json
+
 # 取樣的第二條路（#76）：強制不走 wire、改讀 Hub 的磁碟快照。任何情境都可加。
 #   這條路只有在匯出超過 16MB 時才會自己跑到，所以得有辦法主動測它
 AMCN_SAMPLE_DISK=1 node chaos-run.js scenarios/baseline.json

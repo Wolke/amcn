@@ -256,6 +256,7 @@ async function runScenario(file) {
   let maxLag = 0;           // 快照落後尾檔最多幾筆收據
   let fromDiskSamples = 0;  // 有幾輪是靠磁碟讀到的（wire 拿不到）
   let hubDownSamples = 0;   // 有幾輪根本沒有帳可讀（Hub 當時是死的）
+  let violationDumps = 0;   // 已保存幾份「違反當下的帳」
   let receiptsAtKill = 0;   // #74：殺掉 Hub 當下的收據數，供 noHistoryLoss 用
   let idAtKill = null;      // 同上，但記具體的 contract_id——數量會說謊
   const console_ = async () => {
@@ -345,8 +346,18 @@ async function runScenario(file) {
       readsSinceStart += 1;
       maxLag = Math.max(maxLag, led.pending.receipts || 0);
       if (led.from !== 'wire') fromDiskSamples += 1;
-      for (const v of inv.checkLedger(ex)) {
-        violations.push(`T+${t}s  ${v}`);
+      const found = inv.checkLedger(ex);
+      for (const v of found) violations.push(`T+${t}s  ${v}`);
+      // 違反的那一份帳要留下來，否則只剩一行訊息可以看。前三次就夠了——
+      // 一份 N=20 的匯出十幾 MB，而同一個成因不會因為多存十份更清楚。
+      if (found.length && violationDumps < 3) {
+        violationDumps += 1;
+        const f = path.join(dir, `${sc.name}-violation-${t}s.json`);
+        try {
+          fs.writeFileSync(f, JSON.stringify({ at_s: Number(t), from: led.from,
+            violations: found, export: ex }));
+          console.log(`   （違反的匯出已存：${path.relative(__dirname, f)}）`);
+        } catch (err) { console.log(`   （存不下違反的匯出：${err.message}）`); }
       }
       // 快照的收據數，加上尾檔裡還沒被收進去的那些。走磁碟時這個加法是
       // 必要的：#74 的預算旋鈕可以把快照間隔拉到幾分鐘，只數快照會把
@@ -403,7 +414,7 @@ async function runScenario(file) {
       // 讀不到帳本必須印在取樣行上。#76 的證據當時就在同一行（`合約開啟`
       // 還在跳），只是沒有任何東西說「這一輪的帳我沒讀到」。
       (led ? (led.from === 'wire' ? '' : `  ${led.from}`)
-           : '  **帳本讀不到，本輪未受檢**') +
+           : (hubAlive ? '  **帳本讀不到，本輪未受檢**' : '  （Hub 停機，無帳可讀）')) +
       (violations.length ? `  違反 ${violations.length}` : '');
     console.log(`   ${line}`);
     timeline.push(line);

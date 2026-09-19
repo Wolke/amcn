@@ -1522,9 +1522,26 @@ transport.listen({
             let cur = msg.cursor;
             if (!cur) {
               const token = sha256(`${Date.now()}:${cpSeq}:${Math.random()}`).slice(0, 16);
+              // **真的凍結**。`buildExport()` 只做淺拷貝：`checkpoints` 是
+              // Hub 那個陣列本身，`chains` 的每條鏈也是同一個陣列參照。
+              // 單頁匯出在同一個 tick 就序列化完，看不出差別；分頁會跨好
+              // 幾個來回，於是第 1 頁的 receipts 序列化於 t1、第 3 頁的
+              // chains 序列化於 t3，而 t3 的鏈已經長過 t2 送出去的
+              // checkpoint——收方重算出的 head root 因此對不上任何一個
+              // checkpoint。實測就是這樣：`pagekill`（分頁＋重啟）必紅，
+              // 而單獨分頁或單獨重啟都不紅。
+              //
+              // 各陣列複製一層就夠：收據、事件、checkpoint、鏈分錄一旦
+              // push 進去就不再被原地修改，所以複製指標即可，不必深拷貝
+              // 整份十幾 MB。
               const frozen = buildExport();
+              frozen.receipts = [...(frozen.receipts || [])];
+              frozen.events = [...(frozen.events || [])];
+              frozen.checkpoints = [...(frozen.checkpoints || [])];
+              frozen.chains = Object.fromEntries(
+                Object.entries(frozen.chains || {}).map(([a, c]) => [a, [...c]]));
               pagedExports.set(token, { ex: frozen,
-                accounts: Object.keys(frozen.chains || {}), at: Date.now() });
+                accounts: Object.keys(frozen.chains), at: Date.now() });
               cur = { token, r: 0, e: 0, c: 0, ch: 0 };
             }
             const sess = pagedExports.get(cur.token);
