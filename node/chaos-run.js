@@ -73,10 +73,13 @@ async function runScenario(file) {
   let hubProc = null;
   let hubPort = PORT;            // a scenario can move the hub (#45)
   let hubAlive = true;
+  // `startHub` 會用到它，所以宣告必須在這裡而不是取樣狀態那一段。
+  let readsSinceStart = 0;  // 最近一次 startHub 之後讀到幾次帳
   const startHub = (withImport, port = hubPort) => {
     hubPort = port;
     hubAlive = true;
-    hubProc = spawnProc('hub', 'hub.js', {
+    readsSinceStart = 0;
+    const started = spawnProc('hub', 'hub.js', {
       ...chaosEnv('hub'),
       HUB_PORT: String(port), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0', HUB_SEED: `chaos-${sc.name}`,
       // 快照慢、尾檔即時（#74）。原本 2 秒重寫整份歷史，而那個成本是
@@ -94,6 +97,12 @@ async function runScenario(file) {
       ...(sc.hubEnv || {}),
       ...(withImport && fs.existsSync(dumpPath) ? { HUB_IMPORT: dumpPath } : {}),
     });
+    hubProc = started;
+    // 一個**拒絕啟動**的 Hub 和一個活著的 Hub，在取樣端看起來一樣：
+    // `startHub` 已經把 hubAlive 設回 true。少了這一行，取樣會把磁碟上
+    // 那份（沒有尾檔的）快照當成活著的帳，`noHistoryLoss` 因此報出根本
+    // 沒發生的「歷史不見了」——#78 的負向對照第一次跑就是這樣紅的。
+    started.on('exit', () => { if (hubProc === started) hubAlive = false; });
   };
   // 取樣要分得出「讀不到」與「沒有東西可讀」（#76）：Hub 被殺掉的那段時間
   // 磁碟上的檔案是**崩潰當下**的中間狀態，拿它去跑活著的帳才該滿足的不變式
@@ -323,6 +332,7 @@ async function runScenario(file) {
     if (advertised.length && !panelDids.length) panelDids = advertised.slice();
     if (led) {
       lastExport = ex;
+      readsSinceStart += 1;
       maxLag = Math.max(maxLag, led.pending.receipts || 0);
       if (led.from !== 'wire') fromDiskSamples += 1;
       for (const v of inv.checkLedger(ex)) {
@@ -460,10 +470,16 @@ async function runScenario(file) {
         const end = lastReceipts;
         const kept = idAtKill && (lastExport.receipts || [])
           .some((r) => r.receipt.contract_id === idAtKill);
+        // `readsSinceStart` 是這一案的前提：如果重啟之後一次都沒讀到帳，
+        // 那麼「歷史沒有倒退」比對的是**重啟之前**那份匯出，恆真而無意義
+        // （同 #74 的教訓）。一個拒絕啟動的 Hub 必須讓這一案紅，而不是讓
+        // 它用舊資料通過。
         check('重啟後歷史沒有倒退（快照＋尾檔重播完整）',
-          receiptsAtKill > 0 && end >= receiptsAtKill && !!kept,
+          receiptsAtKill > 0 && readsSinceStart > 0 && end >= receiptsAtKill && !!kept,
           receiptsAtKill === 0
             ? '本輪沒有殺掉 Hub，本案未測到'
+            : readsSinceStart === 0
+            ? '重啟之後一次都沒讀到帳——Hub 沒有回來（見 hub.log）'
             : `殺掉當下 ${receiptsAtKill} 筆、期末 ${end} 筆；` +
               `殺掉前的 ${idAtKill ? idAtKill.slice(0, 22) : '?'} ` +
               (kept ? '仍在帳上' : '**不見了**'));

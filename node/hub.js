@@ -922,7 +922,12 @@ function buildExport({ includeRawLog = true } = {}) {
 // 匯入時只在「剛好是下一筆」時套用，重播因此是幂等的。寫到一半被截斷的
 // 最後一行由 JSON.parse 的守衛跳過。
 const dumpTail = { file: null,
-  written: { events: 0, receipts: 0, checkpoints: 0, pubkeys: 0 } };
+  written: { events: 0, receipts: 0, checkpoints: 0, pubkeys: 0, chains: {} } };
+// 鏈分錄要不要進尾檔（#78 的負向對照）。關掉就回到只帶 events/receipts 的
+// 舊行為，而那正是讓恢復後的雜湊全部改變的那個版本——`rebuild` 現在會因此
+// 拒絕啟動，所以這個旋鈕測的是「那條防線真的會紅」。
+const TAIL_CHAINS = process.env.HUB_TAIL_CHAINS !== '0';
+const chainLens = () => Object.fromEntries([...chains].map(([a, c]) => [a, c.length]));
 function tailAppend() {
   if (!dumpTail.file) return;
   const lines = [];
@@ -941,6 +946,17 @@ function tailAppend() {
   for (let i = dumpTail.written.receipts; i < receipts.length; i++) {
     lines.push(JSON.stringify({ r: i, rc: receipts[i] }));
   }
+  // 鏈分錄（#78）。它們是**衍生**的，但 `at` 只存在於這裡——events 沒有任何
+  // 時間欄位，所以尾檔不帶的話，恢復時每一筆的 `at` 會變成 0、全部雜湊改變，
+  // 重算出的 head root 對不上任何一個已簽署的 checkpoint，而 `rebuild` 從前
+  // 不會注意到。寫在 checkpoint **之前**：checkpoint 承諾的就是這些 head。
+  if (TAIL_CHAINS) {
+    for (const [acct, chain] of chains) {
+      for (let i = dumpTail.written.chains[acct] || 0; i < chain.length; i++) {
+        lines.push(JSON.stringify({ a: acct, ce: chain[i] }));
+      }
+    }
+  }
   for (let i = dumpTail.written.checkpoints; i < checkpoints.length; i++) {
     lines.push(JSON.stringify({ c: i, cp: checkpoints[i] }));
   }
@@ -949,7 +965,7 @@ function tailAppend() {
     require('node:fs').appendFileSync(dumpTail.file, lines.join('\n') + '\n');
     dumpTail.written = { events: events.length, receipts: receipts.length,
                          checkpoints: checkpoints.length,
-                         pubkeys: pubkeys.size };
+                         pubkeys: pubkeys.size, chains: chainLens() };
   } catch (err) {
     console.error(`[hub] tail append failed: ${err.message}`);
   }
@@ -987,7 +1003,8 @@ function startAutoDump() {
       dumpTail.written = { events: snap.events.length,
                            receipts: snap.receipts.length,
                            checkpoints: (snap.checkpoints || []).length,
-                           pubkeys: Object.keys(snap.pubkeys || {}).length };
+                           pubkeys: Object.keys(snap.pubkeys || {}).length,
+                           chains: chainLens() };
       return body.length;
     } catch (err) {
       console.error(`[hub] snapshot failed: ${err.message}`);

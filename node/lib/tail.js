@@ -25,7 +25,7 @@ function* records(tailFile) {
 // 東西一樣要過 rebuild 的簽章、鏈、checkpoint 與 #69 的檢查——附加檔案
 // 不是信任邊界的破口。
 function merge(ex, tailFile) {
-  let applied = 0, skipped = 0, torn = 0;
+  let applied = 0, skipped = 0, torn = 0, chainEntries = 0;
   for (const rec of records(tailFile)) {
     if (rec.torn) { torn += 1; continue; }
     if (rec.ev !== undefined && rec.e === ex.events.length) {
@@ -34,6 +34,14 @@ function merge(ex, tailFile) {
       ex.receipts.push(rec.rc); applied += 1;
     } else if (rec.cp !== undefined && rec.c === (ex.checkpoints || []).length) {
       (ex.checkpoints = ex.checkpoints || []).push(rec.cp); applied += 1;
+    } else if (rec.ce !== undefined && typeof rec.a === 'string') {
+      // 鏈分錄（#78）。幂等條件用分錄自己的 `seq`，它就是該帳戶鏈上的位置。
+      ex.chains = ex.chains || {};
+      const chain = ex.chains[rec.a] || [];
+      if (rec.ce.seq === chain.length) {
+        chain.push(rec.ce); ex.chains[rec.a] = chain;
+        applied += 1; chainEntries += 1;
+      } else { skipped += 1; }
     } else if (rec.pub !== undefined && rec.k === Object.keys(ex.pubkeys || {}).length) {
       ex.pubkeys = ex.pubkeys || {};
       ex.pubkeys[rec.did] = rec.pub;
@@ -44,13 +52,19 @@ function merge(ex, tailFile) {
     }
   }
   if (applied) {
-    // 快照裡的**衍生**欄位現在都過期了。刪掉它們讓 rebuild 從事件重算——
-    // 留著 collateral 會直接讓驗證失敗（rebuild 會拿它跟重播結果對照），
-    // 而留著 balances／chains 只是把過期的數字帶進來。
-    delete ex.balances; delete ex.chains; delete ex.collateral;
+    // 快照裡的**衍生**欄位過期了。刪掉它們讓 rebuild 從事件重算——留著
+    // collateral 會直接讓驗證失敗（rebuild 會拿它跟重播結果對照），留著
+    // balances 只是把過期的數字帶進來。
+    delete ex.balances; delete ex.collateral;
     delete ex.credit_lines; delete ex.metrics; delete ex.checkpoint_seq;
+    // **`chains` 是例外，而這一點就是 #78**：`at` 只存在於鏈分錄裡，events
+    // 沒有時間欄位，所以丟掉 chains 之後 rebuild 只能把 `at` 填成 0——
+    // 全部雜湊改變，重算出的 root 對不上任何一個被簽過的 checkpoint。
+    // 尾檔現在帶鏈分錄，所以帶了就留著；沒帶（舊格式）才丟，而丟掉之後
+    // rebuild 的 root 對照會拒絕啟動，那是正確的結果而不是回歸。
+    if (!chainEntries) delete ex.chains;
   }
-  return { applied, skipped, torn };
+  return { applied, skipped, torn, chainEntries };
 }
 
 // 快照之後還有多少筆沒被收進去（取樣端用）。**不動 `ex`**：取樣要的是一份
@@ -63,6 +77,7 @@ function pending(ex, tailFile) {
                 checkpoints: (ex.checkpoints || []).length };
   for (const rec of records(tailFile)) {
     if (rec.torn) { out.torn += 1; continue; }
+    if (rec.ce !== undefined) continue;   // 鏈分錄不計入「落後幾筆」
     if (rec.rc !== undefined && rec.r >= len.receipts) out.receipts += 1;
     else if (rec.ev !== undefined && rec.e >= len.events) out.events += 1;
     else if (rec.cp !== undefined && rec.c >= len.checkpoints) out.checkpoints += 1;

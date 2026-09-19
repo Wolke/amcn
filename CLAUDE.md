@@ -73,8 +73,12 @@ AMCN_SAMPLE_DISK=1 node chaos-run.js scenarios/baseline.json
 # 快照＋尾檔恢復（#74）：歷史只存在尾檔時殺掉 Hub，驗證重播完整
 cd node && node chaos-run.js scenarios/tail-recover.json
 
-# 大尾檔（#74）：把快照預算調緊使間隔拉到 ~394s，測大尾檔重播（約 20 分鐘）
+# 大尾檔（#74／#78）：把快照預算調緊使間隔拉到 ~400s，測大尾檔重播（約 20 分鐘）
 cd node && node chaos-run.js scenarios/tail-large.json
+
+# 恢復的負向對照（#78）：尾檔不帶鏈分錄＝舊行為，Hub 必須拒絕啟動
+#   （tail-recover 會從 4/4 掉到 2/4，且紅在「恢復後無成交」與「重啟後讀不到帳」）
+HUB_TAIL_CHAINS=0 node chaos-run.js scenarios/tail-recover.json
 
 # 說謊的排序器（#69c／#72）：Hub 對一半節點供應分叉 checkpoint，看誰說出來
 cd node && node chaos-run.js scenarios/hub-equivocates.json

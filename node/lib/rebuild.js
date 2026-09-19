@@ -286,6 +286,29 @@ function rebuild(ex, opts = {}) {
     fail('checkpoints present but no hub_pub to verify them against');
   }
 
+  // #78：checkpoint 的 root 必須真的概括**這本重建出來的帳**的 chain heads。
+  // 上面驗的是簽章與 `prev_root` 的鏈接——兩者都不會注意到「重算出來的鏈
+  // 根本不是被簽的那一條」。尾檔恢復就是這樣：`at` 只存在於鏈分錄裡，
+  // 一旦遺失，每一筆的 `at` 變成 0、全部雜湊改變，而 `rebuild` 從前照樣回報
+  // ok，於是一份還原後的帳與它自己已簽署的歷史悄悄分岔（§20-4 在 root 這一
+  // 層失效，而 root 正是 #6 的 panel 種子與 #69c 分叉指控的依據）。
+  //
+  // 只對**最後一個保留的** checkpoint 比對：root 一動就會被保留（見 hub 的
+  // `moved || heartbeat`），所以最後那個必然對應當下的 heads。
+  const lastKept = cps.at(-1);
+  if (lastKept && lastKept.cp && chains.size) {
+    const heads = {};
+    for (const [acct, chain] of chains) heads[acct] = chain.at(-1).hash;
+    const root = sha256(canon(heads));
+    if (root !== lastKept.cp.root) {
+      fail(`checkpoint #${lastKept.cp.seq} commits to root ` +
+        `${lastKept.cp.root.slice(0, 12)} but the chains rebuilt from the ` +
+        `signed history hash to ${root.slice(0, 12)} — the reconstruction is ` +
+        'not the ledger that was signed (§4 #78; a tail without chain ' +
+        'entries loses every `at` and changes every hash)');
+    }
+  }
+
   if (errors.length) return { ok: false, errors };
   return {
     ok: true,
