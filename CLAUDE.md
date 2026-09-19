@@ -54,8 +54,8 @@ cd node && node demo-transport.js
 # W10 拔線預演（約 40 秒，8 項斷言：殺掉 Hub 後全網自行重連、帳延續）
 cd node && node demo-reconnect.js
 
-# 注意：demo 之間請**逐支跑**。並行時 demo-reconnect 會把「接手的 Hub 還沒
-# listen」報成「0/6 個 client 自行重連」（#80，單獨跑 8/8、並行穩定 5/8）
+# demo 並行是支持的（#80 已修：重連窗從「Hub 真的在 listen」算起，
+# 起不來時會印出 hub 自己的 log）。仍建議逐支跑以免時序噪音。
 #
 # 每支 demo 都可用 DEMO_PORT_OFFSET=100 與跑中的試點並存；
 # AMCN_TRANSPORT=http 可把整個 stack 換到第二個傳輸實作（預設 tcp）

@@ -59,6 +59,28 @@ const hubEnv = (extra) => ({
   HUB_DUMP_PATH: DUMP, HUB_DUMP_MS: '1000', ...extra,
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// 等 Hub **真的在 listen**（#80）。從前 spawn 之後固定睡 14 秒就開始量，
+// 於是負載高時「Hub 還在啟動」會被報成「0/6 個 client 自行重連」——一個
+// 啟動延遲被讀成協定失敗，與 #76 同型。並行跑時穩定 5/8、單獨跑 8/8，
+// 而三個 FAIL 裡最誠實的線索是「新增 −2 筆」：接手的 Hub 回報的收據比
+// 斷線前還少，也就是它根本還沒把帳載起來。
+const waitForHub = async (port, timeoutMs) => {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    const up = await new Promise((resolve) => {
+      const c = transport.dial({ port });
+      const t = setTimeout(() => { try { c.close(); } catch {} resolve(false); }, 800);
+      c.onMessage((m) => {
+        if (m.type !== 'verifiers') return;
+        clearTimeout(t); try { c.close(); } catch {} resolve(true);
+      });
+      try { c.send({ type: 'list_verifiers' }); } catch { /* not up yet */ }
+    });
+    if (up) return Date.now();
+    await sleep(400);
+  }
+  return null;
+};
 const status = async (port) => {
   try { return await (await fetch(`http://127.0.0.1:${port}/status`)).json(); }
   catch { return null; }
@@ -137,6 +159,8 @@ async function main() {
   hub = spawnProc('hub2', 'hub.js', hubEnv({ HUB_IMPORT: DUMP }));
   procs.push(hub);
   const restartedAt = Date.now();
+  // 重連窗從「Hub 開始 listen」算起，不是從「行程被 spawn」算起（#80）。
+  const hubUpAt = await waitForHub(PORT, 25000);
   // 沒有人重啟 agent、沒有人改設定、沒有人呼叫 Console。
   await sleep(14000);
   const after = await exportLedger();
@@ -162,6 +186,17 @@ async function main() {
     !!downA && !!afterA,
     downA ? 'A 的 Console 在 Hub 死亡期間仍然回應' : 'A 已死亡');
 
+  // 「Hub 沒起來」與「client 沒重連」必須分開講，否則下一個人會像我一樣
+  // 連續兩次把前者診斷成後者（#80）。
+  if (hubUpAt === null) {
+    // 「沒起來」還要說**為什麼**，否則下一個人只是換一個謎題。Hub 自己會把
+    // EADDRINUSE、匯入驗證失敗等原因印出來，那些行就是答案。
+    const why = (logs.hub2 || '').split('\n').filter((x) => x.trim()).slice(-3);
+    console.log('  註：接手的 Hub 在 25s 內沒有開始 listen——' +
+      '以下重連相關的斷言量的是啟動延遲，不是協定行為（#80）');
+    console.log(why.length ? why.map((x) => `       hub2: ${x}`).join('\n')
+                           : '       hub2 沒有輸出任何一行');
+  }
   check('無人介入即自行重連（沒有重啟 agent、沒有改設定、沒有呼叫 Console）',
     reconnected.length >= 5,
     `${reconnected.length}/6 個 client 自行重連：${reconnected.join(', ')}`);

@@ -26,12 +26,15 @@ function* records(tailFile) {
 // 不是信任邊界的破口。
 function merge(ex, tailFile) {
   let applied = 0, skipped = 0, torn = 0, chainEntries = 0;
+  // 會動到帳（因而會長出鏈分錄）的記錄數。公鑰與得標記錄不算——它們不改
+  // 任何一條鏈，所以「套用了它們卻沒有鏈分錄」是完全正常的。
+  let ledgerRecords = 0;
   for (const rec of records(tailFile)) {
     if (rec.torn) { torn += 1; continue; }
     if (rec.ev !== undefined && rec.e === ex.events.length) {
-      ex.events.push(rec.ev); applied += 1;
+      ex.events.push(rec.ev); applied += 1; ledgerRecords += 1;
     } else if (rec.rc !== undefined && rec.r === ex.receipts.length) {
-      ex.receipts.push(rec.rc); applied += 1;
+      ex.receipts.push(rec.rc); applied += 1; ledgerRecords += 1;
     } else if (rec.cp !== undefined && rec.c === (ex.checkpoints || []).length) {
       (ex.checkpoints = ex.checkpoints || []).push(rec.cp); applied += 1;
     } else if (rec.aw !== undefined && rec.w === (ex.awarded || []).length) {
@@ -63,9 +66,15 @@ function merge(ex, tailFile) {
     // **`chains` 是例外，而這一點就是 #78**：`at` 只存在於鏈分錄裡，events
     // 沒有時間欄位，所以丟掉 chains 之後 rebuild 只能把 `at` 填成 0——
     // 全部雜湊改變，重算出的 root 對不上任何一個被簽過的 checkpoint。
-    // 尾檔現在帶鏈分錄，所以帶了就留著；沒帶（舊格式）才丟，而丟掉之後
-    // rebuild 的 root 對照會拒絕啟動，那是正確的結果而不是回歸。
-    if (!chainEntries) delete ex.chains;
+    // 尾檔現在帶鏈分錄，所以帶了就留著；**只有在該帶而沒帶時才丟**。
+    //
+    // 第一版寫成 `if (!chainEntries)`，而那是錯的：只套用了公鑰或得標記錄
+    // 的尾檔（例如恢復前最後發生的是一次註冊）一筆鏈分錄也不會有，鏈根本
+    // 沒動，快照裡的 chains 仍然正確——丟掉它等於讓 rebuild 把 `at` 全部
+    // 填成 0，於是**一個健康的恢復被 #78 自己的 root 閘門擋下來**，Hub 拒絕
+    // 啟動。實測就是這樣：`tail replay: 2 applied` 之後 REFUSING to start。
+    // 條件因此是「有事件或收據被套用，卻一筆鏈分錄都沒有」＝舊格式尾檔。
+    if (ledgerRecords > 0 && chainEntries === 0) delete ex.chains;
   }
   return { applied, skipped, torn, chainEntries };
 }
