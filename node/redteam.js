@@ -229,8 +229,7 @@ async function main() {
   const realEntry = before.checkpoints[cpi];
   const nextEntry = before.checkpoints[cpi + 1];
   const forkCp = { ...realEntry.cp,
-    heads: { ...realEntry.cp.heads, 'protocol:treasury': sha256('fork') } };
-  forkCp.root = sha256(canon(forkCp.heads));
+    root: sha256(realEntry.cp.root + 'fork') };   // cp 不再帶 heads（#41）
   const forkEntry = { cp: forkCp, sig: sign(hubId.privateKey, forkCp) };
   const bothVerify = verify(before.hub_pub, realEntry.cp, realEntry.sig)
     && verify(before.hub_pub, forkCp, forkEntry.sig);

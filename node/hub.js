@@ -321,9 +321,17 @@ function makeCheckpoint() {
   // retained would be unverifiable by the observer who received the export.
   // The chain therefore covers exactly what anyone can actually check.
   const prevEntry = checkpoints.at(-1);
+  // `heads` **不進 cp**（#41）。它與 `root` 完全冗餘——root 就是
+  // `sha256(canon(heads))`——而實測它佔每個 checkpoint 2496／2782 bytes，
+  // 也就是 N=20 四十分鐘那份 18.74MB 匯出裡的 **43.8%**。而且沒有任何
+  // 消費端讀它：`demo.js`、`lib/invariants.js`、`lib/rebuild.js` 全都是
+  // **自己從 chains 重算 heads** 再跟 root 對照（#78 新增的那條也是），
+  // 簽章覆蓋 root 就已經覆蓋了它們。歷史 checkpoint 的 per-account heads
+  // 仍可從匯出的 chains 回推（每筆分錄帶 `receipt_idx`，對照
+  // `cp.receipts_count` 即得當時的前綴），所以 equivocation 的逐帳戶
+  // 取證能力沒有消失，只是要算。
   const cp = {
     seq: cpSeq++,
-    heads,
     root: sha256(canon(heads)),
     receipts_count: receipts.length,
     prev_root: prevEntry ? prevEntry.cp.root : null,
@@ -353,9 +361,9 @@ function makeCheckpoint() {
     // 分支的分法是「註冊順序的奇偶」而不是隨機：要讓兩邊各自內部一致，否則
     // 每個節點都看到一堆互相矛盾的 root，那不是 equivocation 而是雜訊，而且
     // 會讓「偵測到了」變得毫無資訊量。
-    const forked = { ...cp, heads: { ...cp.heads, 'protocol:treasury':
-      sha256(canon(cp.heads) + 'branch-B') } };
-    forked.root = sha256(canon(forked.heads));
+    // cp 不再帶 heads（#41），所以分支直接改 root——對這個腳架來說要的就是
+    // 「同一個 seq、兩個都驗得過的 root」，heads 從來不是它測的東西。
+    const forked = { ...cp, root: sha256(cp.root + 'branch-B') };
     const forkedSig = sign(hubId.privateKey, forked);
     let i = 0;
     for (const [, a] of agents) {

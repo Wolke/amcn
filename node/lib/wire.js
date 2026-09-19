@@ -97,7 +97,7 @@ const hmac = (key, s) =>
 // v5: collateral_post / collateral_release, and the credit line takes a
 // collateral term with a haircut (#65). A v4 hub would ignore the messages
 // entirely and the client would wait for an answer that never comes.
-const PROTOCOL_VERSION = 5;
+const PROTOCOL_VERSION = 6;   // v6：checkpoint 不再攜帶 heads（#41）
 
 module.exports = {
   genIdentity, identityFromSeed, canon, sign, verify, sha256, hmac,
