@@ -18,6 +18,7 @@ const { identityFromSeed } = require('./lib/wire');
 const { didOf } = require('./lib/discovery');
 const inv = require('./lib/invariants');
 const tailLib = require('./lib/tail');   // wire 拿不到時的第二條路（#76）
+const { fetchLedger } = require('./lib/ledgerfetch');  // 分頁取帳（#41）
 
 const SHA_OK = [{ op: 'sha256_eq' }, { op: 'max_len', arg: 64 }];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -231,12 +232,21 @@ async function runScenario(file) {
     // 進行」不會被快照間隔誤判成停擺。
     return { ex, pending: tailLib.pending(ex, `${dumpPath}.tail`), from: 'snap' };
   };
+  // 取樣的 wire 路徑改走 `lib/ledgerfetch`：匯出超過一個 frame 時它會自動
+  // 分頁，而不是靜默斷線（#41／#76）。磁碟那條仍然留著——Hub 死著、或
+  // 分頁中途失敗時還是要有東西可讀。
+  const askLedger = () => new Promise((resolve) => {
+    const c = transport.dial({ port: hubPort });
+    const bail = setTimeout(() => { try { c.close(); } catch {} resolve(null); }, 9000);
+    fetchLedger(c, { timeoutMs: 8000 })
+      .then((m) => { clearTimeout(bail); try { c.close(); } catch {} resolve(m); })
+      .catch(() => { clearTimeout(bail); try { c.close(); } catch {} resolve(null); });
+  });
   const readLedger = async () => {
     // 對抗腳架：強制走第二條路。一條只在 16MB 之後才會跑到的後備路徑，
     // 等於一條沒有人測過的路徑（同 #74 的 `HUB_TAIL=0`）——而它正是為了
     // 「量測失效」而存在的，自己失效就沒有人會發現。
-    const live = process.env.AMCN_SAMPLE_DISK === '1'
-      ? null : await ask('export', 'ledger_export');
+    const live = process.env.AMCN_SAMPLE_DISK === '1' ? null : await askLedger();
     if (live) return { ex: live, pending: { receipts: 0 }, from: 'wire' };
     // Hub 死著的時候磁碟上只有崩潰當下的中間狀態，不是一本該通過檢查的帳。
     return hubAlive ? fromDisk() : null;

@@ -13,18 +13,20 @@ const host = process.argv[3] || '127.0.0.1';
 const port = Number(process.argv[4] || 47180);
 
 const c = transport.dial({ host, port });
-c.onMessage((m) => {
-  if (m.type !== 'ledger_export') return;
-  fs.mkdirSync(require('node:path').dirname(out), { recursive: true });
-  fs.writeFileSync(out, JSON.stringify(m, null, 2));
-  const kb = (fs.statSync(out).size / 1024).toFixed(1);
-  console.log(`匯出 ${m.receipts.length} 筆收據、${(m.events || []).length} 個帳務事件、` +
-    `${(m.checkpoints || []).length} 個 checkpoint → ${out} (${kb} KB)`);
-  console.log(`hub 身分：${m.hub_pub ? require('./lib/rebuild').didOf(m.hub_pub) : '(無)'}`);
-  process.exit(0);
-});
-c.send({ type: 'export' });
-setTimeout(() => {
-  console.error(`沒有從 ${host}:${port} 收到匯出——Hub 在跑嗎？`);
-  process.exit(1);
-}, 10000);
+// 走 `lib/ledgerfetch`：這是災難恢復用的工具，而它從前在匯出超過 16MB 時
+// 會**什麼都拿不到**（靜默斷線，#76）——偏偏那正是最需要它的時候。
+require('./lib/ledgerfetch').fetchLedger(c, { timeoutMs: 120000,
+  onNote: (n) => console.log(`  ${n}`) })
+  .then((m) => {
+    fs.mkdirSync(require('node:path').dirname(out), { recursive: true });
+    fs.writeFileSync(out, JSON.stringify(m, null, 2));
+    const kb = (fs.statSync(out).size / 1024).toFixed(1);
+    console.log(`匯出 ${m.receipts.length} 筆收據、${(m.events || []).length} 個帳務事件、` +
+      `${(m.checkpoints || []).length} 個 checkpoint → ${out} (${kb} KB)`);
+    console.log(`hub 身分：${m.hub_pub ? require('./lib/rebuild').didOf(m.hub_pub) : '(無)'}`);
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error(`沒有從 ${host}:${port} 取得完整匯出：${err.message}`);
+    process.exit(1);
+  });

@@ -898,6 +898,59 @@ function buildMetrics() {
 // events, chains, checkpoints and pubkeys, and lib/rebuild.js verifies from
 // exactly those. Carrying the audit log as well made the dump 4x larger than
 // the ledger it exists to protect, rewritten on every interval.
+// --- 分頁匯出（#41 的另一半 / #76 殘留）---------------------------------
+// 一份匯出遲早超過 `MAX_LINE`（16MB），而超過的後果從前是**靜默丟連線**——
+// 取樣端因此瞎了 590 秒而沒有任何人知道（#76）。兩件事一起修：
+// (1) 沒帶游標而匯出過大時，回一個**指名的拒絕**，不是一個送不出去的 frame；
+// (2) 帶游標時分頁供應。
+//
+// 分頁必須來自**凍結的快照**。逐頁現算會讓第 1 頁的 receipts 與第 3 頁的
+// chains 來自不同的帳，重建出來的東西不對應任何一個真的存在過的狀態——
+// 那正是這本登記簿反覆抓到的形態（#76／#78 都是）。所以第一頁建立一份快照
+// 並發一個 token，之後每一頁都從同一份切。
+const EXPORT_PAGE_BYTES = Number(process.env.HUB_EXPORT_PAGE_BYTES || 4 * 1024 * 1024);
+const EXPORT_PAGE_TTL_MS = Number(process.env.HUB_EXPORT_PAGE_TTL_MS || 120000);
+const pagedExports = new Map();   // token -> { ex, accounts, at }
+const BIG_ARRAYS = ['receipts', 'events', 'checkpoints', 'chains'];
+
+function exportScalars(ex) {
+  const out = {};
+  for (const [k, v] of Object.entries(ex)) {
+    if (!BIG_ARRAYS.includes(k)) out[k] = v;
+  }
+  return out;
+}
+
+function exportPage(sess, cur) {
+  const ex = sess.ex;
+  const out = { receipts: [], events: [], checkpoints: [], chains: {} };
+  let used = 0;
+  const take = (arr, from, into) => {
+    let i = from;
+    while (i < arr.length && used < EXPORT_PAGE_BYTES) {
+      used += JSON.stringify(arr[i]).length + 1;
+      into.push(arr[i]); i += 1;
+    }
+    return i;
+  };
+  const r = take(ex.receipts || [], cur.r, out.receipts);
+  const e = take(ex.events || [], cur.e, out.events);
+  const c = take(ex.checkpoints || [], cur.c, out.checkpoints);
+  // chains 逐帳戶整條給：一條鏈遠小於一頁（N=20 四十分鐘平均 242KB），
+  // 而切一半會讓收方無法驗雜湊鏈結。真有超大帳戶時那一頁會超出預算——
+  // 記在 #79，不在這一輪處理。
+  let ch = cur.ch;
+  while (ch < sess.accounts.length && used < EXPORT_PAGE_BYTES) {
+    const acct = sess.accounts[ch];
+    out.chains[acct] = (ex.chains || {})[acct];
+    used += JSON.stringify(out.chains[acct]).length;
+    ch += 1;
+  }
+  const more = r < (ex.receipts || []).length || e < (ex.events || []).length ||
+    c < (ex.checkpoints || []).length || ch < sess.accounts.length;
+  return { out, next: more ? { token: cur.token, r, e, c, ch } : null };
+}
+
 function buildExport({ includeRawLog = true } = {}) {
   return {
     receipts,
@@ -1460,7 +1513,45 @@ transport.listen({
           break;
         }
         case 'export': {
-          chan.send({ type: 'ledger_export', ...buildExport() });
+          if (msg.paged || msg.cursor) {
+            // 過期的 session 先清掉，否則一個中途離開的客戶端會讓 Hub
+            // 一直抱著一份完整匯出。
+            for (const [t, sv] of pagedExports) {
+              if (Date.now() - sv.at > EXPORT_PAGE_TTL_MS) pagedExports.delete(t);
+            }
+            let cur = msg.cursor;
+            if (!cur) {
+              const token = sha256(`${Date.now()}:${cpSeq}:${Math.random()}`).slice(0, 16);
+              const frozen = buildExport();
+              pagedExports.set(token, { ex: frozen,
+                accounts: Object.keys(frozen.chains || {}), at: Date.now() });
+              cur = { token, r: 0, e: 0, c: 0, ch: 0 };
+            }
+            const sess = pagedExports.get(cur.token);
+            if (!sess) {
+              // 指名的失敗。過期之後靜默回空頁會讓客戶端以為帳就是這麼短。
+              chan.send({ type: 'ledger_export_expired', token: cur.token,
+                          ttl_ms: EXPORT_PAGE_TTL_MS });
+              break;
+            }
+            const { out, next } = exportPage(sess, cur);
+            const first = !cur.r && !cur.e && !cur.c && !cur.ch;
+            chan.send({ type: 'ledger_export_page', ...out, cursor: next,
+                        ...(first ? exportScalars(sess.ex) : {}) });
+            if (!next) pagedExports.delete(cur.token);
+            break;
+          }
+          const whole = buildExport();
+          const body = JSON.stringify(whole);
+          if (body.length > EXPORT_PAGE_BYTES) {
+            // 從前這裡會送出一個超過 `MAX_LINE` 的 frame，收方靜默丟連線
+            // 而且不知道為什麼（#76）。指名它。
+            chan.send({ type: 'ledger_export_too_large', bytes: body.length,
+              max: EXPORT_PAGE_BYTES,
+              hint: '改送 {type:"export", paged:true} 並跟著回覆裡的 cursor（#41）' });
+            break;
+          }
+          chan.send({ type: 'ledger_export', ...whole });
           break;
         }
       }

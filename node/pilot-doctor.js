@@ -90,6 +90,14 @@ async function main() {
       const t = setTimeout(() => resolve(null), 6000);
       const c = transport.dial({ host: HOST, port: PORT });
       c.onMessage((m) => {
+        // 分頁的第一頁就帶純量欄位，而這項檢查只要知道「Hub 回應了」與
+        // 三個規模數字，不必把整本帳拉完（#41）。
+        if (m.type === 'ledger_export_too_large') {
+          clearTimeout(t); c.close();
+          resolve({ tooLarge: m.bytes, receipts: null, accounts: null,
+                    checkpoints: null });
+          return;
+        }
         if (m.type !== 'ledger_export') return;
         clearTimeout(t); c.close();
         resolve({ receipts: m.receipts.length, accounts: Object.keys(m.balances).length,
@@ -100,7 +108,11 @@ async function main() {
   }
   say(!!answered, 'AMCN 協議層可達（Hub 回應了 export）',
     answered
-      ? `${answered.receipts} 筆收據、${answered.accounts} 個帳戶、${answered.checkpoints} 個 checkpoint`
+      ? (answered.tooLarge
+          ? `Hub 回應了，但整份匯出 ${(answered.tooLarge / 1048576).toFixed(1)}MB ` +
+            '超過單一 frame——要用 ledger-dump.js（會自動分頁，#41）'
+          : `${answered.receipts} 筆收據、${answered.accounts} 個帳戶、` +
+            `${answered.checkpoints} 個 checkpoint`)
       : reachable ? '埠開著但沒有 AMCN 回應：transport 實作不同（AMCN_TRANSPORT）或協議版本不符'
                   : '前一項已失敗，略過');
 
