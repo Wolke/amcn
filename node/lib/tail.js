@@ -34,6 +34,9 @@ function merge(ex, tailFile) {
       ex.receipts.push(rec.rc); applied += 1;
     } else if (rec.cp !== undefined && rec.c === (ex.checkpoints || []).length) {
       (ex.checkpoints = ex.checkpoints || []).push(rec.cp); applied += 1;
+    } else if (rec.aw !== undefined && rec.w === (ex.awarded || []).length) {
+      // 得標的合約 id（#77）。同一個索引幂等規則。
+      (ex.awarded = ex.awarded || []).push(rec.aw); applied += 1;
     } else if (rec.ce !== undefined && typeof rec.a === 'string') {
       // 鏈分錄（#78）。幂等條件用分錄自己的 `seq`，它就是該帳戶鏈上的位置。
       ex.chains = ex.chains || {};

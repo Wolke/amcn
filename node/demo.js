@@ -509,13 +509,23 @@ async function main() {
     `分類：${Object.entries(m.by_class || {})
       .map(([k, v]) => `${k} ${v.settlements} 筆／${v.volume_cc.toFixed(2)} CC`).join('，')}`);
 
-  check('§20-10 四項市場指標可由簽署狀態導出',
+  // 標題原本寫「四項市場指標可**由簽署狀態導出**」，而那對供需深度是過度
+  // 宣稱：只有排序器看得到所有出價（#77）。改成各自說清楚它站得住什麼——
+  // 成交率的分母是一組雙方簽署的合約 id，所以「每一筆收據都在得標集合裡」
+  // 可由第三方對照；深度是排序器的觀測值。匯出自己也帶 `provenance`。
+  const awardedSet = new Set(ex.awarded || []);
+  const orphanReceipts = receipts
+    .filter((r) => !awardedSet.has(r.receipt.contract_id));
+  check('§20-10 四項指標齊備，且成交率的分母可被第三方對照（#77）',
     m.tasks_broadcast > 0 && m.avg_bids_per_task > 0 &&
-    m.fill_rate > 0 && m.avg_repayment_ms !== null,
+    m.fill_rate > 0 && m.fill_rate <= 1 && m.avg_repayment_ms !== null &&
+    awardedSet.size > 0 && orphanReceipts.length === 0 &&
+    (m.provenance || {}).sequencer_observed.includes('avg_bids_per_task'),
     `成交率 ${m.fill_rate}（${receipts.length}/${m.contracts_awarded}）、` +
-    `供需深度 ${m.avg_bids_per_task} 個出價/任務、` +
+    `供需深度 ${m.avg_bids_per_task} 個出價/任務（排序器觀測）、` +
     `違約代理 ${m.default_proxy_rate}、還債 ${m.avg_repayment_ms}ms ` +
-    `（${m.repayment_episodes} 次）`);
+    `（${m.repayment_episodes} 次）；得標集合 ${awardedSet.size} 筆，` +
+    `孤兒收據 ${orphanReceipts.length}`);
 
   check('畸形 frame 不能打掉 Hub（§16 區網可用性回歸閘門）', hubSurvived,
     `${JUNK_FRAMES.length} 類畸形 frame 後 Hub 仍正常回應 export`);

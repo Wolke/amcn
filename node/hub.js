@@ -866,6 +866,20 @@ function buildMetrics() {
     },
     avg_repayment_ms: avgRepay,
     repayment_episodes: episodes.length,
+    // 哪幾個數字站得住什麼樣的腳（#77）。寫進匯出而不是只寫進文件——
+    // 讀匯出的人不會去讀文件，而 §20-10 原本一句「全部由簽署狀態導出」
+    // 對供需深度是**過度宣稱**：只有排序器看得到所有出價。
+    provenance: {
+      // 收據與 hash chain 算得出來，任何人可自行重算。
+      signed: ['default_rate', 'written_off_cc', 'avg_repayment_ms', 'by_class'],
+      // 分母是一組**雙方簽署的合約 id**，所以「每一筆收據都在得標集合裡」
+      // 可被第三方檢查；但集合的**完整性**是排序器的主張（漏報會讓成交率
+      // 偏高），所以它不是純粹的簽署導出。
+      sequencer_set: ['fill_rate', 'contracts_awarded', 'unsettled_awarded',
+                      'default_proxy_rate'],
+      // 純粹的排序器觀測值，且跟著快照走——崩潰最多損失一個快照間隔。
+      sequencer_observed: ['tasks_broadcast', 'bids_seen', 'avg_bids_per_task'],
+    },
     by_class: byClass,
   };
 }
@@ -891,6 +905,17 @@ function buildExport({ includeRawLog = true } = {}) {
     checkpoints,
     // The sequence position, which the sparse array no longer implies.
     checkpoint_seq: cpSeq,
+    // #77：得標的合約 id，與 `tasks`/`bids` 兩個計數器。§20-10 的成交率是
+    // 「已結算 ÷ 得標」，而得標**只有排序器看得見**（它是中繼）。原本這三個
+    // 數字只活在記憶體裡，於是 Hub 一重啟，分子（已還原的全部收據）與分母
+    // （重啟後才開始數）就來自不同的生命期——實測成交率 2.242、違約代理
+    // −1.242。合約本身是雙方簽署的物件，所以持久化 id 之後，任何人拿著匯出
+    // 都能檢查「每一筆收據的 contract_id 都在得標集合裡」。
+    awarded: AWARDED_PERSIST ? [...market.contracts] : [],
+    // 這兩個是**排序器自報的觀測值**，不是簽署狀態：只有 Hub 看得到所有
+    // 出價。它們跟著快照走，所以崩潰最多損失一個快照間隔——供需深度因此
+    // 是「近似的累計值」，這一點必須寫在證據包裡而不是假裝它可驗證。
+    market_counters: { tasks: market.tasks, bids: market.bids },
     stakes: Object.fromEntries(stakes),
     canary_stats: Object.fromEntries(canaryStats),
     canary_scored: [...canarySeen],
@@ -922,11 +947,16 @@ function buildExport({ includeRawLog = true } = {}) {
 // 匯入時只在「剛好是下一筆」時套用，重播因此是幂等的。寫到一半被截斷的
 // 最後一行由 JSON.parse 的守衛跳過。
 const dumpTail = { file: null,
-  written: { events: 0, receipts: 0, checkpoints: 0, pubkeys: 0, chains: {} } };
+  written: { events: 0, receipts: 0, checkpoints: 0, pubkeys: 0, chains: {},
+             awarded: 0 } };
 // 鏈分錄要不要進尾檔（#78 的負向對照）。關掉就回到只帶 events/receipts 的
 // 舊行為，而那正是讓恢復後的雜湊全部改變的那個版本——`rebuild` 現在會因此
 // 拒絕啟動，所以這個旋鈕測的是「那條防線真的會紅」。
 const TAIL_CHAINS = process.env.HUB_TAIL_CHAINS !== '0';
+// #77 的負向對照：不持久化得標集合＝舊行為。重啟之後分子是已還原的全部
+// 收據、分母從零開始，成交率因此 >1（實測 2.242）。旋鈕存在的理由與
+// `HUB_TAIL_CHAINS` 相同——一條「修好了」的路必須有辦法證明它會壞。
+const AWARDED_PERSIST = process.env.HUB_AWARDED_PERSIST !== '0';
 const chainLens = () => Object.fromEntries([...chains].map(([a, c]) => [a, c.length]));
 function tailAppend() {
   if (!dumpTail.file) return;
@@ -950,6 +980,14 @@ function tailAppend() {
   // 時間欄位，所以尾檔不帶的話，恢復時每一筆的 `at` 會變成 0、全部雜湊改變，
   // 重算出的 head root 對不上任何一個已簽署的 checkpoint，而 `rebuild` 從前
   // 不會注意到。寫在 checkpoint **之前**：checkpoint 承諾的就是這些 head。
+  // 得標 id（#77）。只放在快照裡不夠：崩潰之後收據會從尾檔回來、得標不會，
+  // 成交率就再一次 >1——那正是 #78 剛教過的形狀。
+  if (AWARDED_PERSIST) {
+    const aw = [...market.contracts];
+    for (let i = dumpTail.written.awarded || 0; i < aw.length; i++) {
+      lines.push(JSON.stringify({ w: i, aw: aw[i] }));
+    }
+  }
   if (TAIL_CHAINS) {
     for (const [acct, chain] of chains) {
       for (let i = dumpTail.written.chains[acct] || 0; i < chain.length; i++) {
@@ -965,7 +1003,8 @@ function tailAppend() {
     require('node:fs').appendFileSync(dumpTail.file, lines.join('\n') + '\n');
     dumpTail.written = { events: events.length, receipts: receipts.length,
                          checkpoints: checkpoints.length,
-                         pubkeys: pubkeys.size, chains: chainLens() };
+                         pubkeys: pubkeys.size, chains: chainLens(),
+                         awarded: market.contracts.size };
   } catch (err) {
     console.error(`[hub] tail append failed: ${err.message}`);
   }
@@ -1004,7 +1043,8 @@ function startAutoDump() {
                            receipts: snap.receipts.length,
                            checkpoints: (snap.checkpoints || []).length,
                            pubkeys: Object.keys(snap.pubkeys || {}).length,
-                           chains: chainLens() };
+                           chains: chainLens(),
+                           awarded: (snap.awarded || []).length };
       return body.length;
     } catch (err) {
       console.error(`[hub] snapshot failed: ${err.message}`);
@@ -1081,6 +1121,10 @@ if (process.env.HUB_IMPORT) {
   for (const [k, v] of r.canaryStats) canaryStats.set(k, v);
   for (const c of r.canaryScored) canarySeen.add(c);
   for (const c of r.settledIds) settledIds.add(c);
+  // #77：得標集合與觀測計數器要跟著回來，否則成交率的分子分母不同生命期。
+  for (const c of (ex.awarded || [])) market.contracts.add(c);
+  market.tasks += (ex.market_counters || {}).tasks || 0;
+  market.bids += (ex.market_counters || {}).bids || 0;
   receipts.push(...r.receipts);
   events.push(...r.events);
   checkpoints.push(...r.checkpoints);

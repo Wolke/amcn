@@ -582,6 +582,18 @@ async function runScenario(file) {
         if (e.maxDefaultRate != null && !(mm.default_rate <= e.maxDefaultRate)) {
           bad.push(`違約率 ${mm.default_rate} > ${e.maxDefaultRate}`);
         }
+        // #77 的可檢查部分：成交率的分母是持久化的得標集合，所以「每一筆
+        // 收據的 contract_id 都在裡面」是第三方也能做的對照。漏掉一個就表示
+        // 分母不完整——那正是重啟之後成交率跑出 [0,1] 的成因。
+        const aw = new Set(lastExport.awarded || []);
+        const orphan = (lastExport.receipts || [])
+          .filter((r) => !aw.has(r.receipt.contract_id));
+        if (aw.size === 0 && (lastExport.receipts || []).length) {
+          bad.push('匯出沒有得標集合——成交率的分母無從對照（#77）');
+        } else if (orphan.length) {
+          bad.push(`${orphan.length} 筆收據的 contract_id 不在得標集合裡` +
+            `（例：${orphan[0].receipt.contract_id.slice(0, 22)}）`);
+        }
         // 還債時間是四項裡唯一可能**無值**的：它需要有帳戶真的穿越零點。
         // null 不是「很好」而是「這一輪沒有量到」，所以它算缺一項。
         if (mm.avg_repayment_ms == null) {

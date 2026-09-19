@@ -1,6 +1,6 @@
 {
   "name": "hub-kill-takeover",
-  "what": "W10 拔線演練的自動版：SIGKILL 掉 Hub，30 秒後同一個 seed 從自己的自動匯出重建接手。沒有人重啟 agent、沒有人改設定——帳要延續、交易要恢復",
+  "what": "W10 拔線演練的自動版：SIGKILL 掉 Hub，30 秒後同一個 seed 從自己的自動匯出重建接手。沒有人重啟 agent、沒有人改設定——帳要延續、交易要恢復 另外守 #77：重啟之後成交率必須仍落在 [0,1] 且每一筆收據都在得標集合裡——這個情境正是當初讓成交率跑到 2.242 的那條路。",
   "portOffset": 1040,
   "seed": 31,
   "agents": 3,
@@ -8,15 +8,44 @@
   "durationS": 200,
   "sampleS": 10,
   "maxOpenS": 150,
-  "profile": { "mode": "latency", "latencyMs": 80, "jitterMs": 40 },
+  "profile": {
+    "mode": "latency",
+    "latencyMs": 80,
+    "jitterMs": 40
+  },
   "timeline": [
-    { "atS": 50, "action": "killHub" },
-    { "atS": 80, "action": "startHub", "import": true }
+    {
+      "atS": 50,
+      "action": "killHub"
+    },
+    {
+      "atS": 80,
+      "action": "startHub",
+      "import": true
+    }
   ],
   "expect": [
-    { "kind": "invariantsHold" },
-    { "kind": "settlesBefore", "atS": 50 },
-    { "kind": "noSettlementDuring", "fromS": 55, "toS": 78 },
-    { "kind": "settlementResumesWithin", "afterS": 80, "withinS": 70 }
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 50
+    },
+    {
+      "kind": "noSettlementDuring",
+      "fromS": 55,
+      "toS": 78
+    },
+    {
+      "kind": "settlementResumesWithin",
+      "afterS": 80,
+      "withinS": 70
+    },
+    {
+      "kind": "marketMetrics",
+      "minFillRate": 0.5,
+      "minDepth": 1.0
+    }
   ]
 }
