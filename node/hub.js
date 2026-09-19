@@ -1028,48 +1028,16 @@ function startAutoDump() {
 // trusted — see lib/rebuild.js. A refusal to start is the correct outcome
 // when the export does not check out; carrying on with an unverified ledger
 // would make the sequencer exactly the trust root §2.2 says it is not.
-// 尾檔重播（#74）。合併發生在**驗證之前**，所以尾檔裡的東西一樣要過
-// rebuild 的簽章、鏈、checkpoint 與 #69 的截短／分叉檢查——附加檔案不是
-// 信任邊界的破口。
+// 尾檔重播（#74）搬到 `lib/tail.js`：取樣端（#76）需要同一個格式來算
+// 「快照落後多少」，而一條規則兩個實作會分岔（#60 的形狀）。
+const tail = require('./lib/tail');
 function mergeTail(ex, tailFile) {
-  const fs = require('node:fs');
-  if (!fs.existsSync(tailFile)) return 0;
-  let applied = 0, skipped = 0, torn = 0;
-  for (const line of fs.readFileSync(tailFile, 'utf8').split('\n')) {
-    if (!line.trim()) continue;
-    let rec;
-    // 寫到一半被截斷的最後一行：跳過而不是中止。它代表崩潰發生在 append
-    // 的中途，而那一筆本來就還沒落盤。
-    try { rec = JSON.parse(line); } catch { torn += 1; continue; }
-    // 只在「剛好是下一筆」時套用。快照 rename 與清空尾檔之間的崩潰會留下
-    // 已在快照裡的記錄，這個條件讓重播變成幂等的。
-    if (rec.ev !== undefined && rec.e === ex.events.length) {
-      ex.events.push(rec.ev); applied += 1;
-    } else if (rec.rc !== undefined && rec.r === ex.receipts.length) {
-      ex.receipts.push(rec.rc); applied += 1;
-    } else if (rec.cp !== undefined && rec.c === (ex.checkpoints || []).length) {
-      (ex.checkpoints = ex.checkpoints || []).push(rec.cp); applied += 1;
-    } else if (rec.pub !== undefined && rec.k === Object.keys(ex.pubkeys || {}).length) {
-      ex.pubkeys = ex.pubkeys || {};
-      ex.pubkeys[rec.did] = rec.pub;
-      if (rec.joined) { (ex.joined_at = ex.joined_at || {})[rec.did] = rec.joined; }
-      applied += 1;
-    } else {
-      skipped += 1;
-    }
+  const r = tail.merge(ex, tailFile);
+  if (r.applied || r.skipped || r.torn) {
+    console.log(`[hub] tail replay: ${r.applied} applied, ${r.skipped} already in ` +
+      `snapshot, ${r.torn} torn`);
   }
-  if (applied || skipped || torn) {
-    console.log(`[hub] tail replay: ${applied} applied, ${skipped} already in ` +
-      `snapshot, ${torn} torn`);
-  }
-  if (applied) {
-    // 快照裡的**衍生**欄位現在都過期了。刪掉它們讓 rebuild 從事件重算——
-    // 留著 collateral 會直接讓驗證失敗（rebuild 會拿它跟重播結果對照），
-    // 而留著 balances／chains 只是把過期的數字帶進來。
-    delete ex.balances; delete ex.chains; delete ex.collateral;
-    delete ex.credit_lines; delete ex.metrics; delete ex.checkpoint_seq;
-  }
-  return applied;
+  return r.applied;
 }
 
 if (process.env.HUB_IMPORT) {

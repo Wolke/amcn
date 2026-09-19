@@ -17,6 +17,7 @@ const transport = require('./lib/transport').get('tcp'); // sampling is never fa
 const { identityFromSeed } = require('./lib/wire');
 const { didOf } = require('./lib/discovery');
 const inv = require('./lib/invariants');
+const tailLib = require('./lib/tail');   // wire 拿不到時的第二條路（#76）
 
 const SHA_OK = [{ op: 'sha256_eq' }, { op: 'max_len', arg: 64 }];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -71,8 +72,10 @@ async function runScenario(file) {
   const hubDid = didOf(hubId.pub);
   let hubProc = null;
   let hubPort = PORT;            // a scenario can move the hub (#45)
+  let hubAlive = true;
   const startHub = (withImport, port = hubPort) => {
     hubPort = port;
+    hubAlive = true;
     hubProc = spawnProc('hub', 'hub.js', {
       ...chaosEnv('hub'),
       HUB_PORT: String(port), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0', HUB_SEED: `chaos-${sc.name}`,
@@ -92,7 +95,13 @@ async function runScenario(file) {
       ...(withImport && fs.existsSync(dumpPath) ? { HUB_IMPORT: dumpPath } : {}),
     });
   };
-  const killHub = () => { try { hubProc.kill('SIGKILL'); } catch { /* gone */ } };
+  // 取樣要分得出「讀不到」與「沒有東西可讀」（#76）：Hub 被殺掉的那段時間
+  // 磁碟上的檔案是**崩潰當下**的中間狀態，拿它去跑活著的帳才該滿足的不變式
+  // 是錯的——tail-recover 的 T+160s 就是這樣報出一次 checkpoint root mismatch。
+  const killHub = () => {
+    hubAlive = false;
+    try { hubProc.kill('SIGKILL'); } catch { /* gone */ }
+  };
 
   console.log(`\n=== ${sc.name} ===`);
   console.log(`   ${sc.what || ''}`);
@@ -190,6 +199,44 @@ async function runScenario(file) {
     c.send({ type });
   });
   let lastConsoles = {};
+  // 取樣不再只有一條路（#76）。**wire 仍是第一順位**：那份匯出永遠是當下的，
+  // 而且衍生欄位彼此一致。它失敗有兩種原因——匯出越過 `MAX_LINE`（16MB，
+  // N=20 約 40 分鐘就到），或 Hub 當下是死的——兩種情況磁碟上都還有
+  // 快照＋尾檔（#74），那是同一本帳。
+  //
+  // 走磁碟讀的是**快照**，理由見 `fromDisk`。不可以只把尾檔併進去就交給
+  // `checkLedger`：`tail.merge` 依 #74 的規則會刪掉衍生欄位，而 `checkLedger`
+  // 讀的正是那幾個——少了它們，七項檢查會安靜地變成空的，那就是 #76 的
+  // 錯誤換個地方再犯一次。
+  const fromDisk = () => {
+    let ex;
+    try { ex = JSON.parse(fs.readFileSync(dumpPath, 'utf8')); } catch { return null; }
+    // **只讀快照，不把尾檔併進來。** 併了就得 `rebuild()` 重算 chains，而它
+    // 在沒有原 chains 的情況下把每一筆的 `at` 填成 0——所有雜湊因此全變，
+    // 算出來的 head root 對不上任何一個鑄過的 checkpoint（實測：applied>0
+    // 的每一次都報 `chains: checkpoint root mismatch`，applied=0 的每一次都
+    // 乾淨）。那是 #78，不是取樣的缺陷。
+    //
+    // 取樣要的是一份 Hub **真的產生過**、衍生欄位彼此一致的帳，而快照正好
+    // 就是那個東西；尾檔只用來回報「這一份落後幾筆」，讓「交易是否還在
+    // 進行」不會被快照間隔誤判成停擺。
+    return { ex, pending: tailLib.pending(ex, `${dumpPath}.tail`), from: 'snap' };
+  };
+  const readLedger = async () => {
+    // 對抗腳架：強制走第二條路。一條只在 16MB 之後才會跑到的後備路徑，
+    // 等於一條沒有人測過的路徑（同 #74 的 `HUB_TAIL=0`）——而它正是為了
+    // 「量測失效」而存在的，自己失效就沒有人會發現。
+    const live = process.env.AMCN_SAMPLE_DISK === '1'
+      ? null : await ask('export', 'ledger_export');
+    if (live) return { ex: live, pending: { receipts: 0 }, from: 'wire' };
+    // Hub 死著的時候磁碟上只有崩潰當下的中間狀態，不是一本該通過檢查的帳。
+    return hubAlive ? fromDisk() : null;
+  };
+
+  const blind = [];         // 讀不到帳本的取樣時刻（#76）
+  let maxLag = 0;           // 快照落後尾檔最多幾筆收據
+  let fromDiskSamples = 0;  // 有幾輪是靠磁碟讀到的（wire 拿不到）
+  let hubDownSamples = 0;   // 有幾輪根本沒有帳可讀（Hub 當時是死的）
   let receiptsAtKill = 0;   // #74：殺掉 Hub 當下的收據數，供 noHistoryLoss 用
   let idAtKill = null;      // 同上，但記具體的 contract_id——數量會說謊
   const console_ = async () => {
@@ -268,20 +315,38 @@ async function runScenario(file) {
   while (Date.now() < endAt) {
     await sleep(sampleMs);
     const vlist = await ask('list_verifiers', 'verifiers');
-    const ex = await ask('export', 'ledger_export');
+    const led = await readLedger();
+    const ex = led && led.ex;
     const cs = await console_();
     const t = nowS(t0);
     const advertised = vlist ? vlist.verifiers.map((v) => v.did) : [];
     if (advertised.length && !panelDids.length) panelDids = advertised.slice();
-    if (ex) {
+    if (led) {
       lastExport = ex;
+      maxLag = Math.max(maxLag, led.pending.receipts || 0);
+      if (led.from !== 'wire') fromDiskSamples += 1;
       for (const v of inv.checkLedger(ex)) {
         violations.push(`T+${t}s  ${v}`);
       }
-      if (ex.receipts.length > lastReceipts) {
-        for (let k = lastReceipts; k < ex.receipts.length; k++) settleAt.push(Number(t));
-        lastReceipts = ex.receipts.length;
+      // 快照的收據數，加上尾檔裡還沒被收進去的那些。走磁碟時這個加法是
+      // 必要的：#74 的預算旋鈕可以把快照間隔拉到幾分鐘，只數快照會把
+      // 「還在成交」看成「停了」。
+      const seen = ex.receipts.length + (led.pending.receipts || 0);
+      if (seen > lastReceipts) {
+        for (let k = lastReceipts; k < seen; k++) settleAt.push(Number(t));
+        lastReceipts = seen;
       }
+    } else if (!hubAlive) {
+      // 沒有帳可讀，因為 Hub 當時是死的。這不是覆蓋率缺口——停機是情境
+      // 自己安排的，恢復由 `settlementResumesWithin` 與 `noHistoryLoss`
+      // 負責證明。
+      hubDownSamples += 1;
+    } else {
+      // Hub 活著卻讀不到帳＝#76 的那個洞。第一版在這裡什麼都不做，於是
+      // `lastExport` 凍結、不變式停止檢查而 PASS 照舊、`tradingContinues`
+      // 把讀不到報成空窗。「未測到」與「不變式被破壞」也不能混進同一個
+      // 計數器——否則修好覆蓋率的人會以為自己修的是守恆。
+      blind.push(Number(t));
     }
     if (advertised.length === 0 && poolEmptyAt === null && panelDids.length) {
       poolEmptyAt = Number(t);
@@ -315,6 +380,10 @@ async function runScenario(file) {
       `合約開啟 ${Object.values(cs).filter(Boolean)
         .reduce((s, c) => s + (c.contracts ? c.contracts.open : 0), 0)}` +
       (rssMb ? `  hub ${rssMb}MB` : '') + (dumpKb ? `/${dumpKb}KB` : '') +
+      // 讀不到帳本必須印在取樣行上。#76 的證據當時就在同一行（`合約開啟`
+      // 還在跳），只是沒有任何東西說「這一輪的帳我沒讀到」。
+      (led ? (led.from === 'wire' ? '' : `  ${led.from}`)
+           : '  **帳本讀不到，本輪未受檢**') +
       (violations.length ? `  違反 ${violations.length}` : '');
     console.log(`   ${line}`);
     timeline.push(line);
@@ -344,8 +413,22 @@ async function runScenario(file) {
   for (const e of sc.expect || []) {
     switch (e.kind) {
       case 'invariantsHold':
-        check('不變式全程未被破壞', violations.length === 0,
-          violations.length ? violations.slice(0, 3).join(' | ') : `${lastReceipts} 筆結算下 7 項不變式持續通過`);
+        // 「全程」是一個覆蓋率主張，所以讀不到帳本的取樣一樣讓它失敗：
+        // #76 那一輪宣稱「1996 筆結算下持續通過」，而最後 24% 從來沒被檢查，
+        // 連 1996 這個數字本身都是凍結值。未測到不是通過。
+        check('不變式全程未被破壞（且全程都真的檢查過）',
+          violations.length === 0 && blind.length === 0,
+          violations.length ? violations.slice(0, 3).join(' | ')
+            : blind.length
+              ? `${blind.length} 次取樣讀不到帳本（T+${blind[0]}s 起），` +
+                `這段時間未受檢——不是通過（#76）`
+              : `${lastReceipts} 筆結算下 7 項不變式持續通過，` +
+                `${growth.length - hubDownSamples} 次取樣全部讀到帳` +
+                (hubDownSamples ? `（另有 ${hubDownSamples} 次 Hub 停機、無帳可讀）` : '') +
+                (fromDiskSamples
+                  ? `（其中 ${fromDiskSamples} 次 wire 拿不到、改讀磁碟快照，` +
+                    `尾檔另有最多 ${maxLag} 筆未進快照；不併入的理由見 #78）`
+                  : '（全部由 wire 取得）'));
         break;
       case 'settlesBefore':
         check(`故障前有成交（T+${e.atS}s 之前）`,
@@ -422,13 +505,21 @@ async function runScenario(file) {
         const from = e.fromS || 0;
         const marks = [from, ...settleAt.filter((x) => x >= from),
                        Number(nowS(t0))];
-        let gap = 0, at = null;
+        // 讀不到帳本的區間不算空窗，但也不能悄悄跳過：#76 那一輪正是把
+        // 「我沒看到成交」報成「市場停了 590 秒」，而實際上那段時間成交了
+        // 578 筆。未觀測到與沒有發生是兩件不同的事。
+        const unobserved = (a, b) => blind.some((x) => x > a && x <= b);
+        let gap = 0, at = null, skippedWindows = 0;
         for (let i = 1; i < marks.length; i++) {
+          if (unobserved(marks[i - 1], marks[i])) { skippedWindows += 1; continue; }
           if (marks[i] - marks[i - 1] > gap) { gap = marks[i] - marks[i - 1]; at = marks[i - 1]; }
         }
         check(`交易全程未中斷超過 ${e.maxGapS}s（T+${from}s 起）`,
           gap <= e.maxGapS,
-          `最長空窗 ${gap}s（自 T+${at}s）；全程 ${settleAt.length} 筆`);
+          `最長空窗 ${gap}s（自 T+${at}s）；全程 ${settleAt.length} 筆` +
+          (skippedWindows
+            ? `；另有 ${skippedWindows} 段未觀測（取樣讀不到帳本，#76）不計入空窗`
+            : ''));
         break;
       }
       case 'writeOffHappens': {
