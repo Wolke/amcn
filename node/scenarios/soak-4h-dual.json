@@ -1,0 +1,102 @@
+{
+  "name": "soak-4h-dual",
+  "what": "#62 階段 4，拉到會現形的時間尺度上。與 `soak-4h` **同種子、同故障時間軸、同預算、同期望**，唯一的差別是 20 個節點兼任驗證（階段 3 的 `verify: true`）而不是「20 個交易者＋3 個純 verifier」。`soak-4h` 四小時後量到 verifier 持有全部正餘額的 100%、交易 agent 歸零——那是單調抽取的終點。這一輪問的是：**把驗證變成角色而不是物種，之後 CC 還會不會堆在做驗證的人手上？** 要比的不是「有沒有非交易帳戶」（雙角色下依定義沒有），而是**正餘額的分佈**是否仍然單調集中，以及市場健康（結算量、空窗、使用率、貼上限比例）是否跟著改善。",
+  "portOffset": 2100,
+  "seed": 41,
+  "agents": 20,
+  "verifiers": 0,
+  "durationS": 14400,
+  "sampleS": 120,
+  "maxOpenS": 240,
+  "hubEnv": {
+    "HUB_REBATE_MS": "30000",
+    "HUB_INSURANCE_TARGET_FRAC": "0.06",
+    "HUB_TREASURY_RESERVE_CC": "2",
+    "HUB_SNAPSHOT_KBPS": "100"
+  },
+  "profile": {
+    "mode": "latency",
+    "latencyMs": 80,
+    "jitterMs": 40
+  },
+  "timeline": [
+    {
+      "atS": 600,
+      "target": "panel",
+      "fault": {
+        "mode": "blackhole",
+        "direction": "both"
+      }
+    },
+    {
+      "atS": 780,
+      "target": "panel",
+      "fault": "profile"
+    },
+    {
+      "atS": 5400,
+      "action": "killHub"
+    },
+    {
+      "atS": 5520,
+      "action": "startHub",
+      "import": true
+    },
+    {
+      "atS": 9000,
+      "target": "agents",
+      "fault": {
+        "mode": "loss",
+        "lossPct": 2,
+        "latencyMs": 80,
+        "jitterMs": 40
+      }
+    },
+    {
+      "atS": 9600,
+      "target": "agents",
+      "fault": "profile"
+    },
+    {
+      "atS": 12600,
+      "action": "killHub"
+    },
+    {
+      "atS": 12720,
+      "action": "startHub",
+      "import": true
+    }
+  ],
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 300
+    },
+    {
+      "kind": "settlementResumesWithin",
+      "afterS": 12720,
+      "withinS": 300
+    },
+    {
+      "kind": "noHistoryLoss"
+    },
+    {
+      "kind": "rebateReturns",
+      "minCc": 100
+    },
+    {
+      "kind": "tradingContinues",
+      "fromS": 300,
+      "maxGapS": 400
+    },
+    {
+      "kind": "marketMetrics",
+      "minFillRate": 0.9,
+      "minDepth": 1.0
+    }
+  ],
+  "dualRole": true
+}
