@@ -699,6 +699,36 @@ async function runScenario(file) {
     if (top.length > 6) {
       console.log(`   最低       ${top.slice(-3).map(fmt).join('、')}`);
     }
+    // 留存率 ＝ 淨額 ÷ 流入，逐帳戶（#62／#64／#66）。這是**無因次**的，
+    // 所以它是原型與模擬器之間唯一可以直接比的量——原型的經濟時鐘比模擬器
+    // 快約兩個數量級（需求 900ms 一跳），一個「%/天」的保管費率在兩邊根本
+    // 不是同一個單位，拿來互相錨定會得出 615%/天 這種數字。
+    //
+    // 它也是四小時那兩輪真正的差別所在：純 verifier 留存 99.4%（收 859、
+    // 付 5，設計上就不消費），而雙角色的累積者留存 23.0%（收 8,840、付
+    // 6,809）——**機制完全不同，儘管期末分佈看起來一樣集中**。後者的集中
+    // 來自吞吐量不對稱，不是來自不肯花錢，所以對它有效的槓桿也不一樣。
+    const retention = [];
+    for (const [did, chain] of Object.entries(lastExport.chains || {})) {
+      if (did.startsWith('protocol:')) continue;
+      let inn = 0, out = 0;
+      for (const e of chain) {
+        if (e.delta_cc > 0) inn += e.delta_cc; else out -= e.delta_cc;
+      }
+      if (inn > 0) {
+        retention.push({ name: nameOf[did] || did.slice(0, 12),
+                         pct: (100 * (inn - out)) / inn, inn, out });
+      }
+    }
+    if (retention.length) {
+      retention.sort((a, b) => b.pct - a.pct);
+      const top = retention[0];
+      const mid = retention[Math.floor(retention.length / 2)];
+      console.log(`   留存率     最高 ${top.name} ${top.pct.toFixed(1)}%` +
+        `（收 ${top.inn.toFixed(0)}／付 ${top.out.toFixed(0)}）｜` +
+        `中位 ${mid.pct.toFixed(1)}%｜` +
+        `>50% 的帳戶 ${retention.filter((r) => r.pct > 50).length}/${retention.length}`);
+    }
     const mp = lastExport.metrics || {};
     console.log(`   protocol   保險 ${mp.insurance_cc}｜Treasury ` +
       `${mp.treasury_cc}｜損失 ${mp.loss_cc}｜已退還 ${mp.rebated_cc} CC`);
