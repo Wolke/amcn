@@ -74,6 +74,10 @@ cd node && node chaos-run.js scenarios/soak-n20.json
 #   全部正餘額 100%）。這**不是** W10 的拔線演練，那需要多台真實機器
 cd node && node chaos-run.js scenarios/soak-4h.json
 
+# #62 階段 4（約 4 小時）：雙角色 vs 純 verifier，與 soak-4h 同種子同時間軸，
+#   唯一變數是驗證是不是一個獨立物種。結論：吸收端沒消失，只是換人
+cd node && node chaos-run.js scenarios/soak-4h-dual.json
+
 # 分頁匯出 × 排序器重啟（#41／#81，約 3 分鐘）：兩個單獨都乾淨，只有合起來
 #   才抓得到「凍結的快照其實是淺拷貝」
 cd node && node chaos-run.js scenarios/page-kill.json
