@@ -69,6 +69,11 @@ cd node && node chaos-run.js scenarios/soak-norebate.json
 #   （Hub 重啟後成交率 >1，指標本身未修；閘門刻意讓它紅）
 cd node && node chaos-run.js scenarios/soak-n20.json
 
+# 四小時耐久（單機，#74／#41／#62；約 4 小時，會佔住機器）：匯出長到 ~51MB、
+#   快照間隔被預算拉到 ~523s、分頁成為常態；同時量 #62 的終點（verifier 佔
+#   全部正餘額 100%）。這**不是** W10 的拔線演練，那需要多台真實機器
+cd node && node chaos-run.js scenarios/soak-4h.json
+
 # 分頁匯出 × 排序器重啟（#41／#81，約 3 分鐘）：兩個單獨都乾淨，只有合起來
 #   才抓得到「凍結的快照其實是淺拷貝」
 cd node && node chaos-run.js scenarios/page-kill.json

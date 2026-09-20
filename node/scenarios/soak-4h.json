@@ -1,0 +1,101 @@
+{
+  "name": "soak-4h",
+  "what": "四小時耐久跑（#74／#41 都點名「這個量級從未被觸及」）。N=20 的匯出成長實測 262 KB/分，四小時約 60MB——那正是 #74 推估「100 KB/s 的預算會把快照間隔拉到約 8 分鐘、尾檔因此要保存 8 分鐘歷史」的那個點，也是 #41 的 16MB frame 上限會被跨越很多次的區間（分頁因此是常態而非例外）。要問四件事：(1) 匯出成長是否線性、快照間隔被拉到多長；(2) 記憶體地板在四小時尺度是否仍然不上升（先前所有結論都來自 ≤40 分鐘）；(3) 分頁取帳在 60MB 量級是否仍然正確（#81 的凍結快照要撐住反覆的大型分頁）；(4) 中途殺掉排序器，尾檔在「快照很舊」時的重播是否完整。**這不是 W10 的拔線演練**——那需要多台真實機器；這是單機的耐久面。",
+  "portOffset": 2020,
+  "seed": 41,
+  "agents": 20,
+  "verifiers": 3,
+  "durationS": 14400,
+  "sampleS": 120,
+  "maxOpenS": 240,
+  "hubEnv": {
+    "HUB_REBATE_MS": "30000",
+    "HUB_INSURANCE_TARGET_FRAC": "0.06",
+    "HUB_TREASURY_RESERVE_CC": "2",
+    "HUB_SNAPSHOT_KBPS": "100"
+  },
+  "profile": {
+    "mode": "latency",
+    "latencyMs": 80,
+    "jitterMs": 40
+  },
+  "timeline": [
+    {
+      "atS": 600,
+      "target": "panel",
+      "fault": {
+        "mode": "blackhole",
+        "direction": "both"
+      }
+    },
+    {
+      "atS": 780,
+      "target": "panel",
+      "fault": "profile"
+    },
+    {
+      "atS": 5400,
+      "action": "killHub"
+    },
+    {
+      "atS": 5520,
+      "action": "startHub",
+      "import": true
+    },
+    {
+      "atS": 9000,
+      "target": "agents",
+      "fault": {
+        "mode": "loss",
+        "lossPct": 2,
+        "latencyMs": 80,
+        "jitterMs": 40
+      }
+    },
+    {
+      "atS": 9600,
+      "target": "agents",
+      "fault": "profile"
+    },
+    {
+      "atS": 12600,
+      "action": "killHub"
+    },
+    {
+      "atS": 12720,
+      "action": "startHub",
+      "import": true
+    }
+  ],
+  "expect": [
+    {
+      "kind": "invariantsHold"
+    },
+    {
+      "kind": "settlesBefore",
+      "atS": 300
+    },
+    {
+      "kind": "settlementResumesWithin",
+      "afterS": 12720,
+      "withinS": 300
+    },
+    {
+      "kind": "noHistoryLoss"
+    },
+    {
+      "kind": "rebateReturns",
+      "minCc": 100
+    },
+    {
+      "kind": "tradingContinues",
+      "fromS": 300,
+      "maxGapS": 400
+    },
+    {
+      "kind": "marketMetrics",
+      "minFillRate": 0.9,
+      "minDepth": 1.0
+    }
+  ]
+}
