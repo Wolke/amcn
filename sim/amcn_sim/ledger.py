@@ -21,6 +21,7 @@ INSURANCE = "protocol:insurance"
 # 保管費的中繼帳戶（#66 的 redistribute 模式）。刻意與 Treasury 分開：收益
 # 與回流是兩個不同的目的，混在同一個帳戶裡就分不出哪一筆錢在做哪件事。
 DEMURRAGE_POOL = "protocol:demurrage"
+INFLOW_POOL = "protocol:inflow_fee"
 # 保證金託管帳戶。抵押時為負（持有人把 CC 移進來即形成該帳戶的負餘額側），
 # 沒收時沖銷——與 Treasury 分開，因為它不是收入。
 COLLATERAL = "protocol:collateral"
@@ -154,6 +155,32 @@ class Ledger:
         if take <= 1e-12:
             return 0.0
         self.post(tick, "demurrage", f"demurrage:{account}:{tick}",
+                  [Posting(account, -take), Posting(dest, take)])
+        return take
+
+    def inflow_fee(self, tick: int, account: str, amount: float,
+                   dest: str) -> float:
+        """對**當期淨流入**收費，轉給 dest（登記簿 #66 的流量側）。
+
+        為什麼需要一條與 demurrage 分開的路徑：四小時原型量到兩種吸收端，
+        期末分佈一樣（一個帳戶持有全部正餘額），機制卻完全不同——用逐帳戶
+        的**留存率＝淨額÷流入**才分得開。純 verifier 收 859 付 5、留存
+        99.4%，它是**存量**問題，demurrage 對症；#62 階段 4 之後的累積者收
+        8,840 付 6,809、留存 23.0%，它把四分之三都花掉了，集中來自**吞吐量
+        不對稱**——那是**流量**問題，而存量費要抽乾它就得追上淨流入速度。
+
+        所以這裡收的基數是「這一期餘額長了多少」而不是「持有多少」：
+        對高吞吐但把錢花掉的參與者近乎免費，對單調累積者則正比於它累積的
+        速度。Σ 仍為 0（搬移而非鑄造，FR-051），且與 demurrage 同樣屬
+        §2.2 列舉的非雙簽 posting，需要預簽的費率表 Grant。
+
+        回傳實際收取的金額；正餘額不足時不收（不會把帳戶推成負的）。
+        """
+        bal = self.balances.get(account, 0.0)
+        take = min(max(0.0, amount), max(0.0, bal))
+        if take <= 1e-12:
+            return 0.0
+        self.post(tick, "inflow_fee", f"inflow_fee:{account}:{tick}",
                   [Posting(account, -take), Posting(dest, take)])
         return take
 

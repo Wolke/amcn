@@ -123,6 +123,11 @@ cd sim && python3 -u -m amcn_sim.sweep_repay
 # 保證金掃描（推廣額度 × 保證金 × 折扣率，三種子，約 5 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_deposit
 
+# 淨流入費掃描（#66 流量側；費率 × 去向 × N，七種子，約 6 分鐘）
+#   對「當期餘額長了多少」收費，而非對持有量。抽取效果單調成立；
+#   回流效果方向對但落在種子離散內。注意：模擬器裡只有存量型吸收端
+cd sim && python3 -u -m amcn_sim.sweep_inflow
+
 # 保管費掃描（費率 × 收取模式 × N，三種子，約 8 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_demurrage
 

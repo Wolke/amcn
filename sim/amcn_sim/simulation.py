@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .agents import (DEADBEAT, TICKS_PER_DAY, WASHER, Agent, DebtEpisode,
                      build_population, build_verifiers, credit_limit)
-from .ledger import DEMURRAGE_POOL, INSURANCE, Ledger, Posting, TREASURY
+from .ledger import DEMURRAGE_POOL, INFLOW_POOL, INSURANCE, Ledger, Posting, TREASURY
 from .market import Market
 from .metrics import DailySnapshot, Report, finalize, median_price_in, render_text
 
@@ -43,6 +43,14 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         demurrage_rate: float = 0.0,
         demurrage_idle_days: int = 0,
         demurrage_dest: str = "treasury",
+        # 淨流入費（#66 的流量側，由四小時原型的留存率量測導出）。
+        # demurrage 收的是**持有量**，對「收 859 付 5、留存 99.4%」的 verifier
+        # 對症；但 #62 階段 4 之後的累積者留存只有 23.0%（收 8,840 付 6,809），
+        # 它把四分之三都花掉了，集中來自吞吐量不對稱——存量費要抽乾它就得
+        # 追上淨流入速度。這條收的基數是「這一期餘額長了多少」：
+        # 對高吞吐但會花錢的人近乎免費，對單調累積者正比於累積速度。
+        inflow_fee_rate: float = 0.0,
+        inflow_fee_dest: str = "treasury",
         # Treasury 退費（登記簿 #61／#71）。protocol 帳戶只進不出，所以它們
         # 持有的每一塊 CC 都是永久借出去的信用；在沒有結構性淨賣方的小網路
         # 裡，交易者的總負債因此隨成交量單調成長直到全部貼牆。這條路徑把已
@@ -103,6 +111,7 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                     verifiers=verifiers, verifier_rate=verifier_rate,
                     canary_rate=canary_rate, trace=trace)
     ticks = days * TICKS_PER_DAY
+    day_open: dict[str, float] = {}
     report = Report(days=days, n_agents=n_agents)
 
     for a in agents.values():
@@ -203,6 +212,40 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                                     f"demurrage_payout:{tick}",
                                     [Posting(DEMURRAGE_POOL, -pool)] +
                                     [Posting(a, share) for a in active])
+
+            # --- 淨流入費（#66 流量側）-----------------------------
+            # 基數是「這一天餘額長了多少」，所以把錢花出去的人幾乎不用付，
+            # 而單調累積者付得與累積速度成正比。與 demurrage 分開收、分開
+            # 記帳，因為兩者對應的是兩種不同的吸收端（留存率才分得開）。
+            if inflow_fee_rate > 0:
+                holders = [x.aid for x in agents.values()] + \
+                          [v.vid for v in verifiers]
+                charged_in = 0.0
+                for acct in holders:
+                    grew = ledger.balance(acct) - day_open.get(acct, 0.0)
+                    if grew <= 1e-12:
+                        continue
+                    charged_in += ledger.inflow_fee(
+                        tick, acct, grew * inflow_fee_rate,
+                        TREASURY if inflow_fee_dest == "treasury" else INFLOW_POOL)
+                if inflow_fee_dest != "treasury" and charged_in > 1e-9:
+                    # 退給**本期有流出**的帳戶：付出去的人才拿得到，
+                    # 否則又是付給純累積者（#66 第一版踩過的定義錯誤）。
+                    active = [x.aid for x in agents.values()
+                              if x.online and last_move.get(x.aid, -1)
+                              >= tick - TICKS_PER_DAY]
+                    pool = ledger.balance(INFLOW_POOL)
+                    if active and pool > 1e-9:
+                        share = pool / len(active)
+                        ledger.post(tick, "inflow_fee_payout",
+                                    f"inflow_fee_payout:{tick}",
+                                    [Posting(INFLOW_POOL, -pool)] +
+                                    [Posting(a, share) for a in active])
+            # 這一天的期初餘額，供下一天算「長了多少」。放在收費之後，
+            # 所以收走的那一筆不會被下一期重複計入。
+            day_open = {a: ledger.balance(a)
+                        for a in [x.aid for x in agents.values()]
+                        + [v.vid for v in verifiers]}
 
             # --- Treasury 退費（#61／#71）---------------------------
             # 每 treasury_rebate_days 一次。只退「超過準備金的部分」，準備金

@@ -50,6 +50,7 @@ class Report:
     # 的問題不是他們賺多少，而是賺到的錢**留在那裡不動**，離開了交易流通。
     verifier_balance_cc: float = 0.0
     demurrage_collected_cc: float = 0.0
+    inflow_fee_collected_cc: float = 0.0
     # 退還給交易者的 Treasury 收入（#61／#71）。`sweep_size` 的
     # protocol_share_pct（(treasury + insurance) ÷ 結算量）扣掉這一項，才是
     # **真正永久離開流通**的金額——這個區別就是整條路徑要證明的東西。
@@ -239,6 +240,9 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
     report.canary_missed = market.canary_missed
     report.slashed_cc = market.slashed_cc
     report.honest_error_forgiven = getattr(market, 'honest_error_forgiven', 0)
+    report.inflow_fee_collected_cc = sum(
+        p.amount_cc for ev in ledger.events if ev.kind == 'inflow_fee'
+        for p in ev.postings if p.amount_cc > 0)
 
     return report
 def render_text(r: Report, scenario: str) -> str:
