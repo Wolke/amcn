@@ -17,7 +17,12 @@ const transport = require('./lib/transport').get('tcp');
 const { fetchLedger } = require('./lib/ledgerfetch');
 
 const EVERY_S = Number(process.argv[2] || 900);
-const HUB = { host: '127.0.0.1', port: 47180 };
+// 位址可由參數覆寫：拔線演練之後排序器會搬到別台，而觀測必須跟著搬。
+// 另外**不要用 loopback**——在跑著試點的機器上，任何綁 127.0.0.1 的東西
+// 都會優先接走你的查詢（實測：demo 的 hub 綁上 127.0.0.1:47180，於是本機
+// 查詢全部查到它，一度看起來像試點掉了 207 筆帳）。
+const HUB = { host: process.env.PB_HUB || process.argv[3] || '192.168.50.30',
+              port: Number(process.env.PB_HUB_PORT || 47180) };
 const DUMP = path.join(__dirname, 'out', 'pilot-ledger.json');
 const CONSOLES = [47201, 47203];        // 本機 m1 / m1b
 

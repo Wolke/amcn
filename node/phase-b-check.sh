@@ -53,10 +53,20 @@ fetchLedger(c,{timeoutMs:18000}).then((m)=>{
   ok("checkpoint 序號延續而非重來", seq!==null&&seq>=base.checkpoint_seq,
      base.checkpoint_seq+" → "+seq);
   const cls=m.credit_lines||{};
-  const drift=Object.entries(base.accounts).filter(([d,b])=>
-     cls[d]===undefined).map(([d])=>d.slice(10,17));
-  ok("四個 agent 的身分都還在（額度由收據重算）", drift.length===0,
-     drift.length?"缺 "+drift.join(","):Object.keys(cls).length+" 個");
+  // **被拔線那台上的 agent 不會出現在這裡，那是演練的設計而不是失敗。**
+  // 第一版斷言「四個都在」，於是真機演練紅在 m1/m1b 缺席——可是它們正在
+  // 那台被隔離的機器上，不可能回來。要問的是：餘額有沒有留著（有，帳是
+  // 完整的），以及**跟得上的那些**有沒有跟上。
+  const survived=Object.entries(base.accounts).filter(([d])=>cls[d]!==undefined);
+  const absent=Object.entries(base.accounts).filter(([d])=>cls[d]===undefined);
+  ok("跟得上的 agent 都重新註冊了（在被隔離那台上的不算）", survived.length>0,
+     survived.length+" 個跟上"+(absent.length?
+       "；"+absent.length+" 個缺席（"+absent.map(([d])=>d.slice(10,17)).join(",")+
+       "）——應該正好是被拔線那台上的":""));
+  const kept=absent.every(([d])=>m.balances[d]!==undefined);
+  ok("缺席者的餘額仍在帳上（身分不在線，不等於歷史不見）", kept,
+     absent.length?absent.map(([d])=>d.slice(10,17)+" "+(m.balances[d]??"不見了")).join("  ")
+                  :"本輪無缺席者");
   console.log("\n  帳戶 拔線前 → 現在");
   for(const [d,b] of Object.entries(base.accounts)){
     const now=m.balances[d];

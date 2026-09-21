@@ -1,36 +1,27 @@
 {
-  "at": "2026-09-21T03:51:40.256Z",
-  "phase": "B-baseline",
-  "receipts": 148,
-  "checkpoint_seq": 8328,
-  "checkpoints_kept": 764,
-  "sigma": -1.6653345369377348e-14,
-  "fill_rate": 1,
-  "depth": 2.13,
-  "repay_episodes": 21,
-  "avg_repay_ms": 625852,
+  "at": "2026-09-21T05:02:20.598Z",
+  "phase": "B-baseline-v2",
+  "receipts": 207,
+  "checkpoint_seq": 12007,
+  "sigma": 1.584843367652411e-14,
+  "repay_episodes": 25,
   "accounts": {
-    "did:demo:65dea197caf2e00b": {
-      "bal": -10.7922,
-      "cl": 29.93
-    },
-    "did:demo:9c3742f963f88833": {
-      "bal": -3.2819,
-      "cl": 29.11
-    },
     "did:demo:13231fb9b1d06d4f": {
-      "bal": -9.3343,
-      "cl": 30.12
+      "bal": -22.7847,
+      "cl": 32
     },
     "did:demo:b487c35b5a9d6bcb": {
-      "bal": -0.1882,
-      "cl": 30
+      "bal": -0.6768,
+      "cl": 32.13
+    },
+    "did:demo:9c3742f963f88833": {
+      "bal": -1.2681,
+      "cl": 30.92
+    },
+    "did:demo:65dea197caf2e00b": {
+      "bal": -6.1529,
+      "cl": 32.3
     }
   },
-  "protocol": {
-    "protocol:treasury": 5.000000000000004,
-    "protocol:insurance": 1.4223999999999979,
-    "protocol:stake": 8.591699999999989
-  },
-  "last_contract_id": "c-t-m1-63f88833-29"
+  "last_contract_id": "c-t-m2b-b1d06d4f-67"
 }
