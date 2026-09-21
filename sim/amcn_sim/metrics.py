@@ -24,6 +24,11 @@ class DailySnapshot:
     # 會被幾個健康帳戶稀釋；原型 soak 的特徵是「每一個人」都動不了，那只有
     # 逐帳戶看才看得到（登記簿 #61）。
     pinned_frac: float = 0.0
+    # 當天正餘額最高的帳戶。**吸收端是固定角色還是輪流當**，只有逐日記身分
+    # 才分得出來——首位佔比是統計量，它在「同一人永遠吸」與「每天換人」
+    # 之下長得一模一樣，而這兩件事對「經濟能不能運作」的意義完全相反。
+    top_holder: str = ""
+
 
 
 @dataclass
@@ -58,6 +63,8 @@ class Report:
     # 五十個帳戶裡總有某個只收過一筆、沒付過，留存 100%。要問的是那個真的
     # 把 CC 吸走的帳戶：原型量到純 verifier 99.4%、雙角色的累積者 23.0%。
     top_holder_retention: float = 0.0
+    distinct_top_holders: int = 0      # 整輪當過「當日首位」的不同帳戶數
+
     top_holder_share: float = 0.0      # 最大正餘額持有者佔全部正餘額
     # 退還給交易者的 Treasury 收入（#61／#71）。`sweep_size` 的
     # protocol_share_pct（(treasury + insurance) ÷ 結算量）扣掉這一項，才是
@@ -270,6 +277,8 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
         inn = inflow.get(top, 0.0)
         report.top_holder_retention = ((inn - outflow.get(top, 0.0)) / inn
                                        if inn > 0 else 0.0)
+    seen = {d.top_holder for d in report.daily if d.top_holder}
+    report.distinct_top_holders = len(seen)
 
     return report
 def render_text(r: Report, scenario: str) -> str:

@@ -97,6 +97,12 @@ class Agent:
 
     # Demand model: mean own-consumption per day, in units.
     mean_daily_demand: float = 8.0
+    # 需求會不會隨時間改變（#64 的模型限制）。原本 `mean_daily_demand` 一生
+    # 只指派一次，於是抽到低利用率的 agent 是**永久**淨賣方——而「永久低需求
+    # 者會永久累積」離重述輸入很近。賞金獵人館的實際形態是今天接案、明天發案，
+    # 所以需求要能漂移。0 表示不漂移（原行為）。
+    demand_drift_days: int = 0
+    base_demand: float = 0.0
     burst_prob_per_day: float = 0.02    # emergency spike (UC-01 trigger)
     burst_multiplier: float = 5.0
 
@@ -186,6 +192,15 @@ class Agent:
         into = (day - self.cycle_offset_days) % self.cycle_days
         return self.cycle_days - into
 
+    def maybe_drift(self, tick: int) -> None:
+        """週期性重抽利用率：同一個 agent 在不同期間可以是買方或賣方。"""
+        if self.demand_drift_days <= 0 or self.base_demand <= 0:
+            return
+        if tick % (self.demand_drift_days * TICKS_PER_DAY) != 0:
+            return
+        self.mean_daily_demand = self.base_demand * self.rng.choice(
+            [0.3, 0.5, 0.8, 0.8, 1.0, 1.3])
+
     def draw_demand(self, tick: int) -> float:
         """Own consumption this tick, in units (lognormal-ish, hourly)."""
         if tick % TICKS_PER_DAY == 0 and self.rng.random() < self.burst_prob_per_day:
@@ -237,7 +252,8 @@ def credit_limit(a: Agent, tick: int, peers: dict[str, Agent] | None = None,
 
 
 def build_population(n: int, seed: int, deadbeat_frac: float,
-                     washer_frac: float, expiry_cliff: bool) -> list[Agent]:
+                     washer_frac: float, expiry_cliff: bool,
+                     demand_drift_days: int = 0) -> list[Agent]:
     """Heterogeneous population: over-provisioned suppliers, balanced
     users, and under-provisioned chronic requesters."""
     rng = random.Random(seed)
@@ -257,6 +273,8 @@ def build_population(n: int, seed: int, deadbeat_frac: float,
             # expiry_cliff: everyone resets the same day → month-end crash test
             cycle_offset_days=0 if expiry_cliff else r.randrange(cycle),
             mean_daily_demand=capacity / cycle * utilization,
+            demand_drift_days=demand_drift_days,
+            base_demand=capacity / cycle,
             burst_prob_per_day=r.uniform(0.01, 0.05),
             burst_multiplier=r.uniform(3.0, 6.0),
             reliability=r.uniform(0.92, 0.995),

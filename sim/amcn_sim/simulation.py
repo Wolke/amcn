@@ -34,6 +34,10 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         # 99.4% 對 23.0%——而模擬器先前只有前者，所以 #66 的兩個掃描都
         # 只測到存量型吸收端。
         dual_role: bool = False,
+        # 需求漂移天數（#64）。0 ＝ 每個 agent 的利用率一生固定，也就是
+        # 「永久淨賣方」是被指派的而不是長出來的。>0 讓它每 N 天重抽一次，
+        # 這才是「今天接案、明天發案」的賞金獵人館。
+        demand_drift_days: int = 0,
         canary_rate: float = 0.03, verifier_lazy_frac: float = 0.0,
         verifier_stake_cc: float = 50.0,
         # 保證金（#65）。deposit_cc 是每個 agent 抵押的金額；
@@ -96,7 +100,7 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
     seen_events = 0
     defaults: list[dict] = []          # 每個違約身分拿走多少、賠掉多少
     agents = {a.aid: a for a in build_population(
-        n_agents, seed, deadbeat_frac, washer_frac, expiry_cliff)}
+        n_agents, seed, deadbeat_frac, washer_frac, expiry_cliff, demand_drift_days=demand_drift_days)}
     ledger = Ledger()
     if trace == "auto":  # pick a chronically under-provisioned honest agent
         trace = next((a.aid for a in agents.values()
@@ -160,6 +164,9 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         market.clear(agents, tick)
 
         # debt-episode tracking (per-day granularity is enough)
+        if demand_drift_days > 0:
+            for a in agents.values():
+                a.maybe_drift(tick)
         if tick % TICKS_PER_DAY == 0:
             for a in agents.values():
                 bal = ledger.balance(a.aid)
@@ -344,6 +351,12 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                 total_credit_cc=sum(credit_limit(x, tick, agents, market.starter_cc)
                                     for x in agents.values() if x.online),
                 settled_cc_cum=market.stats.settled_cc,
+                # 當日正餘額最高者。逐日記身分才分得出「同一人永遠吸」與
+                # 「每天換人」——兩者的首位佔比長得一樣，意義相反（#64）。
+                top_holder=max(
+                    (x.aid for x in agents.values()
+                     if ledger.balance(x.aid) > 0),
+                    key=lambda a: ledger.balance(a), default=""),
                 # 逐帳戶看「還剩多少可用額度」。原型 soak 的鎖死特徵是每一
                 # 個交易者都貼在上限上（#61），而總量比會被健康帳戶稀釋，
                 # 看不出那件事。
