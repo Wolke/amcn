@@ -19,6 +19,11 @@ from dataclasses import dataclass, field
 HONEST = "honest"
 DEADBEAT = "deadbeat"
 WASHER = "washer"
+# 一個攻擊者控制的 N 個身分（登記簿 #50）。與 DEADBEAT 的差別是**協同**：
+# 同時退場、互相交易以灌 E_eff，而且收益要**合計**到攻擊者頭上。#50 記的是
+# 「GATE-0 的人口是固定 400 個 agent，deadbeat 是外生比例，N 不是攻擊者的
+# 選擇變數」——所以那個模型量不到「鑄 N 個身分各領一份 L_boot」值不值得。
+SYBIL = "sybil"
 
 TICKS_PER_DAY = 24  # 1 tick = 1 hour
 
@@ -253,7 +258,8 @@ def credit_limit(a: Agent, tick: int, peers: dict[str, Agent] | None = None,
 
 def build_population(n: int, seed: int, deadbeat_frac: float,
                      washer_frac: float, expiry_cliff: bool,
-                     demand_drift_days: int = 0) -> list[Agent]:
+                     demand_drift_days: int = 0,
+                     sybil_n: int = 0) -> list[Agent]:
     """Heterogeneous population: over-provisioned suppliers, balanced
     users, and under-provisioned chronic requesters."""
     rng = random.Random(seed)
@@ -285,6 +291,29 @@ def build_population(n: int, seed: int, deadbeat_frac: float,
         )
         a.remaining_quota = a.quota_capacity * r.uniform(0.2, 1.0)
         agents.append(a)
+
+    # Sybil 群：**額外**加在人口之外，因為 N 是攻擊者選的，不是網路人口的
+    # 一個比例。把它做成比例會讓「攻擊者加碼」與「網路變小」變成同一件事。
+    for k in range(sybil_n):
+        r = random.Random(rng.random())
+        a = Agent(
+            aid=f"sybil:{k:04d}", rng=r,
+            # **產能近乎零**：攻擊者不提供真實服務——提供服務就等於做了工，
+            # 那不是白拿。第一版給了 300 的產能，結果那些身分認真賣東西賺錢、
+            # 一毛債都沒欠，量到的壞帳是 0。攻擊的形態是「只買不賣、把額度
+            # 用光就走」。
+            quota_capacity=0.001, cycle_days=30, cycle_offset_days=0,
+            mean_daily_demand=6.0,                # 足以在 84 天內吃光額度
+            burst_prob_per_day=0.02, burst_multiplier=3.0,
+            reliability=0.95, quality=0.95, behavior=SYBIL)
+        a.remaining_quota = a.quota_capacity
+        # 環狀互相交易：每一個的洗量對手是下一個。單獨一個身分沒有對手，
+        # 那正是 F-1 折減要壓的形態（#70 量到環狀的有效率是 0%）。
+        agents.append(a)
+    if sybil_n > 1:
+        base = len(agents) - sybil_n
+        for k in range(sybil_n):
+            agents[base + k].wash_partner = agents[base + (k + 1) % sybil_n].aid
 
     idx = list(range(n))
     rng.shuffle(idx)

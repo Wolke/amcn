@@ -7,7 +7,7 @@ import json
 import random
 from pathlib import Path
 
-from .agents import (DEADBEAT, TICKS_PER_DAY, WASHER, Agent, DebtEpisode,
+from .agents import (DEADBEAT, SYBIL, TICKS_PER_DAY, WASHER, Agent, DebtEpisode,
                      build_population, build_verifiers, credit_limit)
 from .ledger import DEMURRAGE_POOL, INFLOW_POOL, INSURANCE, Ledger, Posting, TREASURY
 from .market import Market
@@ -38,6 +38,11 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         # 「永久淨賣方」是被指派的而不是長出來的。>0 讓它每 N 天重抽一次，
         # 這才是「今天接案、明天發案」的賞金獵人館。
         demand_drift_days: int = 0,
+        # Sybil 攻擊（#50）：攻擊者控制的身分數，以及每個身分要付的保證金。
+        # N 做成**參數**而不是人口比例——它是攻擊者的選擇變數，這正是既有
+        # 模型量不到這件事的原因。
+        sybil_n: int = 0,
+        sybil_deposit_cc: float = 0.0,
         canary_rate: float = 0.03, verifier_lazy_frac: float = 0.0,
         verifier_stake_cc: float = 50.0,
         # 保證金（#65）。deposit_cc 是每個 agent 抵押的金額；
@@ -100,7 +105,7 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
     seen_events = 0
     defaults: list[dict] = []          # 每個違約身分拿走多少、賠掉多少
     agents = {a.aid: a for a in build_population(
-        n_agents, seed, deadbeat_frac, washer_frac, expiry_cliff, demand_drift_days=demand_drift_days)}
+        n_agents, seed, deadbeat_frac, washer_frac, expiry_cliff, demand_drift_days=demand_drift_days, sybil_n=sybil_n)}
     ledger = Ledger()
     if trace == "auto":  # pick a chronically under-provisioned honest agent
         trace = next((a.aid for a in agents.values()
@@ -125,7 +130,23 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
     day_open: dict[str, float] = {}
     report = Report(days=days, n_agents=n_agents)
 
+    # 協同退場：同一天一起消失。分散退場會讓保險池有時間補充，而協同正是
+    # 攻擊者能選的事——把它設成隨機等於替攻擊者做了一個不利的選擇。
+    # 退場時點要留夠沖銷的時間（14 天）。第一版用 `randrange(ticks//3, ticks)`
+    # 抽到 1981（全長 2016），沖銷落在模擬結束之後，於是**攻擊確實發生了、
+    # 報表上卻是 0**——那不是「攻擊不划算」，是量測窗口把它切掉了。
+    # 這與真實攻擊者的誘因也一致：太晚下手，沒收與沖銷都還沒結算完。
+    sybil_exit = (rng.randrange(ticks // 4, max(ticks // 4 + 1,
+                                ticks - 16 * TICKS_PER_DAY))
+                  if sybil_n else None)
     for a in agents.values():
+        if a.behavior == SYBIL:
+            a.exit_tick = sybil_exit
+            if sybil_deposit_cc > 0:
+                # 折扣率要一起設，否則抵押 D 會解鎖 D 的額度（LTV=1），
+                # 對打算違約的人是損益中性的——#65 量到的正是這一點。
+                a.collateral_cc = sybil_deposit_cc
+                a.collateral_ltv = deposit_ltv
         if a.behavior == DEADBEAT:
             # vanishes some time in the second half of the run
             a.exit_tick = rng.randrange(ticks // 3, ticks)

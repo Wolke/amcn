@@ -71,6 +71,11 @@ class Report:
     # 可比——而「持有佔比」不行：獨立 verifier 只有 10 個帳戶、雙角色下那
     # 10 個同時是交易者，同一個佔比在兩種人口下意義不同（#62／#66）。
     verifier_retention: float = 0.0
+    # Sybil 攻擊的淨收益（#50）。**攻擊者拿到的 ＝ 網路沖銷掉的**：它收到
+    # 真實服務、留下負餘額走人，保證金先被沒收，剩下的才是網路的損失，
+    # 也正好是攻擊者白拿的部分。除以身分數就是「每個身分值不值得鑄」。
+    sybil_written_off_cc: float = 0.0
+    sybil_n: int = 0
     # 退還給交易者的 Treasury 收入（#61／#71）。`sweep_size` 的
     # protocol_share_pct（(treasury + insurance) ÷ 結算量）扣掉這一項，才是
     # **真正永久離開流通**的金額——這個區別就是整條路徑要證明的東西。
@@ -281,6 +286,13 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
     v_in = sum(inflow.get(a, 0.0) for a in vids)
     v_out = sum(outflow.get(a, 0.0) for a in vids)
     report.verifier_retention = ((v_in - v_out) / v_in) if v_in > 0 else 0.0
+    # 沖銷是把負餘額**加回零**，所以違約帳戶那一筆是**正的**。第一版濾了
+    # `< 0`，於是壞帳率明明隨 N 上升、這個欄位卻恆為 0。
+    report.sybil_written_off_cc = sum(
+        p.amount_cc for ev in ledger.events if ev.kind == 'write_off'
+        for p in ev.postings
+        if p.account.startswith('sybil:') and p.amount_cc > 0)
+    report.sybil_n = sum(1 for a in ledger.balances if a.startswith('sybil:'))
     if total_pos > 0:
         top = max(pos, key=lambda a: pos[a])
         report.top_holder_share = pos[top] / total_pos
