@@ -27,6 +27,29 @@ M1 與 M2 **都要同時買也同時賣**。這不是對稱美學：`demo-autono
 
 ---
 
+## 1b. 本次試點的實際配置（2026-09-21）
+
+| | 位址 | 連線 | 跑什麼 |
+|---|---|---|---|
+| **M1** | 192.168.50.30 | 有線（en0）| Hub、`pilot-m1`、`pilot-m1b` |
+| **M2** | 192.168.50.175（`macbookair`）| Wi-Fi | `pilot-m2`、`pilot-m2b`、**待命 Hub（未啟動）**、匯出拉取器 |
+| **M3** | 192.168.50.44 | LAN（Windows）| Verifier panel ×3 |
+
+三台同網段 `192.168.50.0/24`，所以 UDP 信標可達（跨網段就要改用 rendezvous）。
+
+**為什麼 Windows 拿 panel**：只有 Hub 會 `listen`，agent 與 verifier 都是往外 dial，所以 panel **完全不需要 inbound TCP**，只要一條 **UDP 47179 inbound** 讓它收得到信標。把最麻煩的防火牆配給最不需要開埠的角色，同時滿足 #31。
+
+```
+HUB_SEED = amcn-pilot-2026-09-21
+hub DID  = did:demo:65f50dce855438dd      ← 已預先算出，可在 Hub 首次啟動前就 pin
+```
+
+**M1 有兩個介面在同一網段**（en0 192.168.50.30、en1 192.168.50.103），Hub 可能廣播錯的那個，所以啟動時明確指定 `HUB_BIND=0.0.0.0 HUB_ADVERTISE_HOST=192.168.50.30`——實測信標會送到 `192.168.50.255` 與 `127.0.0.1`。
+
+**已在 M1 單機驗過整條路**：Hub 起在該 DID、信標廣播、三個 verifier 以 `discover`＋pin 找到並註冊、兩個 agent 註冊、Console 回報額度。
+
+---
+
 ## 2. 前置檢查（每台都做）
 
 ```bash
