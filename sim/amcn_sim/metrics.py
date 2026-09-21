@@ -67,6 +67,10 @@ class Report:
 
     top_holder_share: float = 0.0      # 最大正餘額持有者佔全部正餘額
     total_positive_cc: float = 0.0     # 全部非 protocol 帳戶的正餘額總額
+    # 驗證者整體的留存率（淨額÷流入）。**無因次**，所以它跨人口、跨模型都
+    # 可比——而「持有佔比」不行：獨立 verifier 只有 10 個帳戶、雙角色下那
+    # 10 個同時是交易者，同一個佔比在兩種人口下意義不同（#62／#66）。
+    verifier_retention: float = 0.0
     # 退還給交易者的 Treasury 收入（#61／#71）。`sweep_size` 的
     # protocol_share_pct（(treasury + insurance) ÷ 結算量）扣掉這一項，才是
     # **真正永久離開流通**的金額——這個區別就是整條路徑要證明的東西。
@@ -273,6 +277,10 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
            if b > 0 and not a.startswith('protocol:')}
     total_pos = sum(pos.values())
     report.total_positive_cc = total_pos
+    vids = {v.vid for v in getattr(market, 'verifiers', []) or []}
+    v_in = sum(inflow.get(a, 0.0) for a in vids)
+    v_out = sum(outflow.get(a, 0.0) for a in vids)
+    report.verifier_retention = ((v_in - v_out) / v_in) if v_in > 0 else 0.0
     if total_pos > 0:
         top = max(pos, key=lambda a: pos[a])
         report.top_holder_share = pos[top] / total_pos
