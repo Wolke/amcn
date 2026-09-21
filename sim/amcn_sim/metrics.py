@@ -66,6 +66,7 @@ class Report:
     distinct_top_holders: int = 0      # 整輪當過「當日首位」的不同帳戶數
 
     top_holder_share: float = 0.0      # 最大正餘額持有者佔全部正餘額
+    total_positive_cc: float = 0.0     # 全部非 protocol 帳戶的正餘額總額
     # 退還給交易者的 Treasury 收入（#61／#71）。`sweep_size` 的
     # protocol_share_pct（(treasury + insurance) ÷ 結算量）扣掉這一項，才是
     # **真正永久離開流通**的金額——這個區別就是整條路徑要證明的東西。
@@ -271,6 +272,7 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
     pos = {a: b for a, b in ledger.balances.items()
            if b > 0 and not a.startswith('protocol:')}
     total_pos = sum(pos.values())
+    report.total_positive_cc = total_pos
     if total_pos > 0:
         top = max(pos, key=lambda a: pos[a])
         report.top_holder_share = pos[top] / total_pos

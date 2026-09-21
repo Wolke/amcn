@@ -33,6 +33,11 @@ cd sim && python3 -m amcn_sim --agents 500 --days 84 --scenario baseline
 # 全情境比較（baseline / expiry_cliff / high_default / wash_heavy）
 cd sim && python3 -m amcn_sim --all-scenarios
 
+# GATE-0 八判準（500 agents × 84 天 × 4 情境 × 3 種子，約 15 分鐘）
+#   一個種子過不算過；「不適用」不計入通過。目前 6/8，候選組（--risk-thin 0.06
+#   --risk-base 0.02 --dual-role）7/8，未過的 G8 門檻落在種子離散中間
+cd sim && python3 -u -m amcn_sim.gate0
+
 # 參數掃描（starter × 風險費 × 違約率，輸出 out/sweep.csv）
 cd sim && python3 -m amcn_sim.sweep
 
