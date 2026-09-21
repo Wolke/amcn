@@ -293,6 +293,34 @@ AMCN_HUB_PIN=did:demo:8d36e0673ae02700 AMCN_PANEL_SEED='pilot-panel-CHANGE-ME' \
 
 `hubPin` 要能成立，待命 Hub 必須帶**同一個 `HUB_SEED`**（DID 由 seed 決定）。代價照實記錄：排序器的鑰匙從此存在兩台機器上。不複製的話，pinned client 會拒絕跟隨（那是 pin 的用途），演練就得手動重新 pin——兩條路都可以，但要寫進報告。
 
+### 演練前的兩道檢查（2026-09-21 第一次嘗試就各踩一個）
+
+**(1) 隔離要「驗證」，不是「拔了一條線」。** M1 有兩個介面在同一網段（en0 `192.168.50.30`、en1 `192.168.50.103`），第一次嘗試拔掉的是 en1——那條沒在用，Hub 服務在 en0 上，**從頭到尾沒斷過**。所以拔完要驗，而不是相信自己拔對了：
+
+```bash
+# 在 M1 上，拔線後跑。三個都必須失敗，否則沒有隔離。
+ping -c1 -W 900 192.168.50.1   || echo "閘道不可達 ✓"
+ping -c1 -W 900 192.168.50.175 || echo "M2 不可達 ✓"
+ifconfig | awk '/^[a-z]/{i=$1} /inet /{if($2!~/^127/) print i, $2}'   # 應只剩 lo0
+```
+
+**沒驗證的代價是整場演練白跑**，而且更糟：若同時 M2 的待命 Hub 起來了，網段上會有兩個**同 DID** 的排序器，那是 equivocation 不是接手。第一次嘗試沒出事，純粹因為待命 Hub 剛好沒起來。
+
+**(2) 演練前先確認備份「匯得進去」，不要在接手當下才發現。** 拉到的快照能不能被接受，取決於逐筆驗簽、鏈重算與 checkpoint root 對照（#78），而那是唯讀就能驗的，秒級：
+
+```bash
+cd node && node -e "
+const fs=require('fs'), tail=require('./lib/tail'), {rebuild}=require('./lib/rebuild');
+const p=process.argv[1], ex=JSON.parse(fs.readFileSync(p,'utf8'));
+console.log('尾檔併入', JSON.stringify(tail.merge(ex, p+'.tail')));
+const r=rebuild(ex);
+console.log('rebuild ok =', r.ok);
+if(!r.ok) r.errors.slice(0,3).forEach(e=>console.log(' -',e));
+" out/pulled/latest.json
+```
+
+`rebuild ok = true` 才代表接手會成功。**這一步不會起任何 Hub，所以在拔線之前跑是安全的**——而拔線之後才發現備份匯不進去，就沒有第二次機會了。
+
 ### 演練程序
 
 | 時點 | 動作 | 記錄 |
