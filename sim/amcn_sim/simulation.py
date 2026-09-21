@@ -49,6 +49,13 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         # 換身分在模型裡＝把金絲雀計數歸零而**保留已賺到的費用**——那正是
         # 「棄置身分」的意思：紀錄沒了，錢還在。
         verifier_churn_days: int = 0,
+        # 需求枯竭：第 N 天之後全網需求掉到 20%。要驗「沒人發任務時會怎樣」
+        # 就得先造出那個狀況——這正是「假設沒有人想發任務」那個問題。
+        drought_day: int = 0,
+        # 逆週期收購（§2.2「Treasury 啟動」）：治理上限與觸發門檻。當日結算量
+        # 低於乾旱前基準的 trigger 倍時，Treasury 出面買，全部 tx_class=subsidy。
+        counter_cyclical_cap_cc: float = 0.0,
+        counter_cyclical_trigger: float = 0.5,
         canary_rate: float = 0.03, verifier_lazy_frac: float = 0.0,
         verifier_stake_cc: float = 50.0,
         # 保證金（#65）。deposit_cc 是每個 agent 抵押的金額；
@@ -134,6 +141,10 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                     canary_rate=canary_rate, trace=trace)
     ticks = days * TICKS_PER_DAY
     day_open: dict[str, float] = {}
+    cc_spent = 0.0
+    cc_seq = 0
+    cc_last_volume = 0.0
+    cc_pre_drought: list[float] = []
     report = Report(days=days, n_agents=n_agents)
 
     # 協同退場：同一天一起消失。分散退場會讓保險池有時間補充，而協同正是
@@ -371,6 +382,44 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                                      "seized_cc": seized})
 
             day = tick // TICKS_PER_DAY
+
+            # 乾旱：一次性把全網需求砍到 20%
+            if drought_day and day == drought_day:
+                for a in agents.values():
+                    a.mean_daily_demand *= 0.2
+
+            # 逆週期收購：Treasury 在補貼額度內補上消失的需求。
+            # 買的是**真實的產能**（provider 要有 remaining_quota），所以它是
+            # 需求而不是記帳花招；但它標 subsidy，不進市場指標——一個靠補貼
+            # 撐起來的成交率不是市場數據（同 #63 的關聯方）。
+            if counter_cyclical_cap_cc > 0:
+                today = market.stats.settled_cc - cc_last_volume
+                cc_last_volume = market.stats.settled_cc
+                if not drought_day or day < drought_day:
+                    cc_pre_drought.append(today)
+                    if len(cc_pre_drought) > 14:
+                        cc_pre_drought.pop(0)
+                else:
+                    base = (sum(cc_pre_drought) / len(cc_pre_drought)
+                            if cc_pre_drought else 0.0)
+                    want = min(base * counter_cyclical_trigger - today,
+                               counter_cyclical_cap_cc - cc_spent)
+                    sellers = [a for a in agents.values()
+                               if a.online and a.remaining_quota >= 2.0]
+                    rng.shuffle(sellers)
+                    for a in sellers:
+                        if want <= 1e-9:
+                            break
+                        units = min(a.remaining_quota, 4.0)
+                        price = min(want, units * 1.0)
+                        if price <= 1e-9:
+                            break
+                        cc_seq += 1
+                        ledger.counter_cyclical(tick, f"cc{cc_seq:06d}",
+                                                a.aid, price)
+                        a.remaining_quota -= units
+                        cc_spent += price
+                        want -= price
             debtors = [x for x in agents.values()
                        if ledger.balance(x.aid) < -0.5 and x.online]
             report.daily.append(DailySnapshot(

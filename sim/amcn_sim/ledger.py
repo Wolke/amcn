@@ -109,6 +109,26 @@ class Ledger:
         postings.extend(Posting(aid, amt) for aid, amt in payouts)
         return self.post(tick, "canary", contract_id, postings)
 
+    def counter_cyclical(self, tick: int, contract_id: str, provider: str,
+                         price_cc: float) -> LedgerEvent:
+        """逆週期收購：市場冷掉時由 Treasury 出面買（§2.2「Treasury 啟動」）。
+
+        **它跟其他三支槓桿不同的地方**：demurrage、流入費、雙角色都只是把
+        既有的 CC 搬來搬去——2026-09-21 量到留存率被費率精確控制、集中度
+        卻完全不動。逆週期收購動的是**結構**：它讓正餘額持有者有東西可賣、
+        也讓網路在沒人發任務時仍有需求（FR-056 的「正餘額無處可花」）。
+
+        §2.2 的條件照抄：計入有治理上限的創世補貼額度，Treasury 在該額度內
+        可為負，全部 `tx_class=subsidy`——所以它**不進市場指標**。一個靠補貼
+        撐起來的成交率不是市場數據，那與 #63 的關聯方是同一個道理。
+
+        Σ 仍為 0（搬移而非鑄造，FR-051）。
+        """
+        return self.post(tick, "counter_cyclical", contract_id, [
+            Posting(TREASURY, -price_cc),
+            Posting(provider, price_cc),
+        ], {"tx_class": "subsidy"})
+
     def write_off(self, tick: int, account: str,
                   collateral_cc: float = 0.0) -> float:
         """Absorb a defaulted negative balance: 保證金 → 保險池 → protocol:loss.

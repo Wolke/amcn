@@ -33,6 +33,14 @@ cd sim && python3 -m amcn_sim --agents 500 --days 84 --scenario baseline
 # 全情境比較（baseline / expiry_cliff / high_default / wash_heavy）
 cd sim && python3 -m amcn_sim --all-scenarios
 
+# 逆週期收購（#83，Owner 的「AI 會頭」）：造出需求枯竭再看它能不能撐住
+#   drought_day=42 讓全網需求砍到 20%；counter_cyclical_cap_cc 是治理上限。
+#   實測貼上限 15.0%→2.1%、首位佔比 5.3%→2.8%，需求在約 4,392 CC 飽和
+cd sim && python3 -c "from amcn_sim.simulation import run; \
+  r=run(300,84,42,'baseline',drought_day=42,counter_cyclical_cap_cc=3000, \
+        starter_cc=50.0,deadbeat_frac=0.0,n_verifiers=6); \
+  print('首位佔比', round(r.top_holder_share*100,1), '| Treasury', round(r.treasury_cc,1))"
+
 # GATE-0 八判準（500 agents × 84 天 × 4 情境 × 3 種子，約 15 分鐘）
 #   一個種子過不算過；「不適用」不計入通過。目前 6/8，候選組（--risk-thin 0.06
 #   --risk-base 0.02 --dual-role）7/8，未過的 G8 門檻落在種子離散中間
