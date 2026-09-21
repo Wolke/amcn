@@ -620,9 +620,21 @@ async function runScenario(file) {
         if (mm.avg_repayment_ms == null) {
           bad.push('還債時間無值——本輪沒有任何帳戶從負餘額回到零以上');
         }
+        // §20-9／#63：成交率與深度必須把**關聯方**交易分出來，否則一個
+        // 自己跟自己交易的網路看起來成交率 1.0。2026-09-21 的三台試點就是
+        // 這樣：207 筆全標 `market`，而四個 agent 全屬同一個 Owner——沒有
+        // 人作弊，是設定檔沒宣告 `relatedTo`，而 Hub 查核不了（#63）。
+        const byCls = mm.by_class || {};
+        const ext = (byCls.market || {}).settlements || 0;
+        const rel = (byCls['related-party'] || {}).settlements || 0;
+        if (rel > 0 && ext === 0) {
+          bad.push(`全部 ${rel} 筆都是關聯方交易，外部成交 0——` +
+            '這些數字不是市場數據（§20-9／#63）');
+        }
         check('§20-10 四項指標齊備且在界內', bad.length === 0,
           bad.length ? bad.join('；')
-            : `成交率 ${mm.fill_rate}（${mm.contracts_awarded} 得標／` +
+            : `外部 ${ext} 筆／關聯方 ${rel} 筆｜` +
+              `成交率 ${mm.fill_rate}（${mm.contracts_awarded} 得標／` +
               `${(lastExport.receipts || []).length} 結算）、供需深度 ` +
               `${mm.avg_bids_per_task} 個出價/任務、違約率 ${mm.default_rate}` +
               `（代理 ${mm.default_proxy_rate}）、還債 ` +
