@@ -66,6 +66,15 @@ function effectiveContribution(myDid, myStats, statsOf) {
 // 降到 3.1 CC、壞帳 0.08%。規則：淨賺 ≈ L_boot(t=0) − 抵押×(1−LTV)。
 const COLLATERAL_LTV = Number(process.env.AMCN_COLLATERAL_LTV || 0.5);
 
+// 年齡因子：0（剛加入）到 1（完全成熟）。放在這裡而不是各自實作，因為
+// **hub 與 rebuild 必須算出同一個數**——#60 的教訓是一條規則兩個實作會分岔，
+// 而這一條分岔的後果是接手永遠失敗（見 #82）。
+const AGE_RAMP_MS = Number(process.env.HUB_AGE_RAMP_MS || 30 * 24 * 3600 * 1000);
+function ageFactor(joinedAtMs, nowMs = Date.now(), rampMs = AGE_RAMP_MS) {
+  if (!joinedAtMs) return 0;
+  return Math.max(0, Math.min(1, (nowMs - joinedAtMs) / rampMs));
+}
+
 function creditLine(myDid, myStats, statsOf, ageFactor = 1, collateralCc = 0) {
   const contribution = Math.min(
     effectiveContribution(myDid, myStats, statsOf), 2000);
@@ -87,7 +96,7 @@ function riskRate(myStats) {
   return thin ? RISK_THIN : RISK_BASE;
 }
 
-module.exports = {
+module.exports = { ageFactor, AGE_RAMP_MS,
   STARTER_CC, FEE_RATE, RISK_THIN, RISK_BASE, VERIFIER_RATE, COLLATERAL_LTV,
   newStats, effectiveContribution, creditLine, riskRate,
 };

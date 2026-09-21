@@ -64,6 +64,10 @@ function chainEntry(account, chain, receiptIdx, delta, balanceAfter, at) {
 function rebuild(ex, opts = {}) {
   const errors = [];
   const fail = (m) => { errors.push(m); return null; };
+  // 與 fail 分開：warn 是「這一項無從檢查」，不是「這一項不通過」。混在一起
+  // 的話，修覆蓋率的人會以為自己在修守恆（#76 分「未測到」與「違反」同理）。
+  const warnings = [];
+  const warn = (m) => { warnings.push(m); console.error(`[rebuild] 注意：${m}`); };
   const {
     stakeTargetCc = 5, stakeEscrowFrac = 0.5, expectHubDid = null,
   } = opts;
@@ -211,15 +215,46 @@ function rebuild(ex, opts = {}) {
     prov.earnedBy.set(rec.requester, (prov.earnedBy.get(rec.requester) || 0) + provNet);
     prov.completed += 1;
   }
+  // #82：額度含**年齡**與**抵押品**兩項，而這裡原本兩個都沒傳——
+  // `eeff.creditLine` 的 ageFactor 預設是 1，於是重建一律當成「帳戶已完全
+  // 成熟」。starter 項在年齡 0 與 1 之間差整整一倍（`STARTER*(0.5+0.5*age)`），
+  // 所以每個帳戶都會多出約 25 CC，匯入因此被拒。
+  //
+  // 三台試點是第一次用**生產預設**（30 天斜坡）跑的，也是第一次看到它：
+  // 所有 demo 與 chaos 情境都設 `HUB_AGE_RAMP_MS=1`，斜坡在 1 毫秒內走完、
+  // 兩邊都得到 age=1，於是這個分歧在 harness 裡結構上不可能出現。
+  //
+  // 年齡要以**匯出當下**為準，不是重建當下——重建必然比較晚，算出來的年齡
+  // 會比較大。`exported_at` 就是為此而加（同 #78 的 `at`：衍生值需要產生它
+  // 的輸入）。舊的匯出沒有這個欄位，那就跳過比對並說出來，而不是拿一個
+  // 必定不同的值去判它有罪。
+  const collateralNow = new Map();
+  for (const [did, v] of Object.entries(ex.collateral || {})) {
+    collateralNow.set(did, v);
+  }
+  const exportedAt = ex.exported_at || null;
   const creditLines = {};
   for (const did of stats.keys()) {
-    creditLines[did] = eeff.creditLine(did, stats.get(did), statsOf);
+    // 斜坡長度取自匯出（#82）。用重建方自己的環境變數會在兩邊設定不同時
+    // 靜默算出不同的額度——而「兩邊各算各的」正是這一條的成因。
+    const af = exportedAt
+      ? eeff.ageFactor((ex.joined_at || {})[did], exportedAt,
+                       ex.age_ramp_ms || eeff.AGE_RAMP_MS)
+      : 1;
+    creditLines[did] = eeff.creditLine(did, stats.get(did), statsOf, af,
+                                       collateralNow.get(did) || 0);
   }
-  for (const [did, v] of Object.entries(ex.credit_lines || {})) {
-    const mine = creditLines[did];
-    if (mine === undefined) continue;   // an agent with no settlements yet
-    if (Math.abs(mine - v) > 1e-3) {
-      fail(`credit line mismatch ${did}: rebuilt ${mine.toFixed(3)} vs export ${v.toFixed(3)}`);
+  if (!exportedAt && Object.keys(ex.credit_lines || {}).length) {
+    warn('匯出沒有 exported_at（#82 之前的格式）——信用額度的年齡項無從重算，' +
+         '本次略過額度比對；其餘檢查照跑');
+  } else {
+    for (const [did, v] of Object.entries(ex.credit_lines || {})) {
+      const mine = creditLines[did];
+      if (mine === undefined) continue;   // an agent with no settlements yet
+      if (Math.abs(mine - v) > 1e-3) {
+        fail(`credit line mismatch ${did}: rebuilt ${mine.toFixed(3)} vs ` +
+          `export ${v.toFixed(3)} — 年齡因子或 HUB_AGE_RAMP_MS 兩邊不一致？（#82）`);
+      }
     }
   }
 
@@ -309,10 +344,11 @@ function rebuild(ex, opts = {}) {
     }
   }
 
-  if (errors.length) return { ok: false, errors };
+  if (errors.length) return { ok: false, errors, warnings };
   return {
     ok: true,
     errors: [],
+    warnings,
     balances, chains, stakes,
     stats,
     creditLines,

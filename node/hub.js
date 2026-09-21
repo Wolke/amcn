@@ -200,12 +200,9 @@ const pubkeys = new Map();
 const joinedAt = new Map();
 // 30 days in production; harnesses compress it so a demo is not stuck at half
 // the starter line for its entire few seconds of life.
-const AGE_RAMP_MS = Number(process.env.HUB_AGE_RAMP_MS || 30 * 24 * 3600 * 1000);
-const ageFactorOf = (did) => {
-  const since = joinedAt.get(did);
-  if (!since) return 0;
-  return Math.max(0, Math.min(1, (Date.now() - since) / AGE_RAMP_MS));
-};
+// 定義搬到 lib/eeff.js，與 rebuild 共用——兩邊各算各的正是 #82 的成因。
+const AGE_RAMP_MS = eeff.AGE_RAMP_MS;
+const ageFactorOf = (did) => eeff.ageFactor(joinedAt.get(did));
 // The full-traffic audit log the NFR-005 plaintext scan reads. Bounded,
 // because it is the dominant term in a long run: 20 minutes of the soak
 // produced 5.4 MB of it against 1.3 MB of actual ledger, and it used to be
@@ -982,6 +979,13 @@ function buildExport({ includeRawLog = true } = {}) {
     canary_scored: [...canarySeen],
     events,
     hub_pub: hubId.pub,
+    // 取匯出的時刻（#82）。信用額度含年齡項，而重建一定發生在匯出**之後**，
+    // 沒有這個時間戳就重算不出同一個值——只會算出一個比較大的。
+    exported_at: Date.now(),
+    // 斜坡長度是**這個 Hub 的政策**，不是重建方的環境變數。第一版讓兩邊
+    // 各自讀 `HUB_AGE_RAMP_MS`，於是 `demo-rebuild`（hub 設 1ms、自己沒設）
+    // 又對不上——換一個地方犯同一個錯。跟著匯出走才對得起來。
+    age_ramp_ms: AGE_RAMP_MS,
     ...(includeRawLog ? { raw_log: rawLog.join('\n') } : {}),
   };
 }
