@@ -50,6 +50,38 @@ hub DID  = did:demo:65f50dce855438dd      ← 已預先算出，可在 Hub 首�
 
 ---
 
+## 1c. 起 panel 之後，一定要從 Hub 那一側確認（實戰教訓）
+
+panel 印出「全部 3 個 Verifier 已向 Hub 註冊」**不等於它們在 pool 裡**。兩個理由：
+(a) #49 要求 client 回 `register_ack` 證明它聽得到，沒回的不算 online、不進 pool；
+(b) 舊版的 client 可能在收到確認之前就印那句。
+
+**2026-09-21 的試點第一次起 panel 就踩到**：M3 回報三個都註冊了，而 Hub 的 pool 是 **0**——M3 跑在 v5、Hub 是 v6，三個 verifier 在重連迴圈裡每 5 秒被版本閘門擋一次，57 次之後才被發現。閘門本身運作正常（訊息明確指出 v5 對 v6），只是**沒有人去看 Hub 那一側**。
+
+所以每次起完 panel，在 Hub 那台跑：
+
+```bash
+cd node && node -e "
+const t=require('./lib/transport').get('tcp');
+const c=t.dial({host:'127.0.0.1',port:47180});
+c.onMessage((m)=>{ if(m.type!=='verifiers') return;
+  console.log('pool:', m.verifiers.length, '個');
+  m.verifiers.forEach(v=>console.log('  ', v.did));
+  c.close(); process.exit(0); });
+c.send({type:'list_verifiers'});
+setTimeout(()=>{console.log('無回應');process.exit(1)},5000);"
+```
+
+`pool: 3 個` 才算成功。同時掃一眼 Hub 的 log 有沒有 `rejected`：
+
+```bash
+grep -c "rejected" logs/hub.log      # 期望 0
+```
+
+**這也是「三台必須同 commit」為什麼列在最前面**——版本不符不會靜默半通，但它的症狀出現在**被拒絕的那一端看不到的地方**。
+
+---
+
 ## 2. 前置檢查（每台都做）
 
 ```bash
