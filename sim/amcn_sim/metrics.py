@@ -97,6 +97,12 @@ class Report:
     slashed_cc: float = 0.0
     honest_error_forgiven: int = 0  # canary failures under the evidence bar
     lazy_detect_rate: float | None = None  # slashes / lazy-verifier canary votes
+    # #38 的核心問題：**偷懶到底划不划算**。收入減沒收才是那個數字，而
+    # 「偵測率」不是——抓到了但沒收不到東西，威懾就是 0。沒收額被帳戶餘額
+    # 封頂（`min(stake×frac, balance)`），所以新身分幾乎沒有東西可失。
+    lazy_net_cc: float | None = None       # 偷懶者平均（收入 − 被沒收）
+    honest_net_cc: float | None = None     # 誠實者平均（同上）
+    lazy_advantage_cc: float | None = None # 偷懶 − 誠實；>0 代表偷懶划算
     max_exposure_ratio: float | None = None  # single contract / stake (§4 #7)
     unmet_demand_units: float = 0.0
     failed_verifications: int = 0
@@ -286,6 +292,15 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
     v_in = sum(inflow.get(a, 0.0) for a in vids)
     v_out = sum(outflow.get(a, 0.0) for a in vids)
     report.verifier_retention = ((v_in - v_out) / v_in) if v_in > 0 else 0.0
+    vlist = getattr(market, 'verifiers', []) or []
+    lazy = [v for v in vlist if v.lazy_prob > 0]
+    hon = [v for v in vlist if v.lazy_prob <= 0]
+    net = lambda vs: (sum(v.earned_cc - v.slashed_cc for v in vs) / len(vs)
+                      if vs else None)
+    report.lazy_net_cc = net(lazy)
+    report.honest_net_cc = net(hon)
+    if report.lazy_net_cc is not None and report.honest_net_cc is not None:
+        report.lazy_advantage_cc = report.lazy_net_cc - report.honest_net_cc
     # 沖銷是把負餘額**加回零**，所以違約帳戶那一筆是**正的**。第一版濾了
     # `< 0`，於是壞帳率明明隨 N 上升、這個欄位卻恆為 0。
     report.sybil_written_off_cc = sum(

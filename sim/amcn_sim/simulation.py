@@ -43,6 +43,12 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         # 模型量不到這件事的原因。
         sybil_n: int = 0,
         sybil_deposit_cc: float = 0.0,
+        # verifier 棄置身分重開的週期（#38）。沒收要 `slash_min_samples` 次
+        # 金絲雀樣本才可能發動，所以**第 5 次之前是免費的**；一個偷懶者只要
+        # 在達標前換身分，就永遠罰不到。0 表示不換（原行為）。
+        # 換身分在模型裡＝把金絲雀計數歸零而**保留已賺到的費用**——那正是
+        # 「棄置身分」的意思：紀錄沒了，錢還在。
+        verifier_churn_days: int = 0,
         canary_rate: float = 0.03, verifier_lazy_frac: float = 0.0,
         verifier_stake_cc: float = 50.0,
         # 保證金（#65）。deposit_cc 是每個 agent 抵押的金額；
@@ -185,6 +191,13 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         market.clear(agents, tick)
 
         # debt-episode tracking (per-day granularity is enough)
+        if (verifier_churn_days > 0
+                and tick > 0
+                and tick % (verifier_churn_days * TICKS_PER_DAY) == 0):
+            for v in verifiers:
+                if v.lazy_prob > 0:
+                    v.canary_seen = 0
+                    v.canary_failed = 0
         if demand_drift_days > 0:
             for a in agents.values():
                 a.maybe_drift(tick)
