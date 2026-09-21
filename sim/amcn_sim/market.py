@@ -125,13 +125,15 @@ class Market:
         self.trace_log: list[str] = []
 
     # --- verification market -------------------------------------------
-    def panel_for(self, contract_id: str, seed: str, size: int = 3
-                  ) -> list[Verifier]:
+    def panel_for(self, contract_id: str, seed: str, size: int = 3,
+                  exclude: tuple[str, ...] = ()) -> list[Verifier]:
         """Same rule as node/lib/panel.js: sort the pool by
         sha256(seed + contract_id + id) and take the first `size`. The seed is
         a future checkpoint root in the protocol (§4 #6); here it stands in as
         an opaque per-contract value the requester does not choose."""
-        live = [v for v in self.verifiers if v.online]
+        # 當事人不得驗自己的合約。獨立 verifier 人口下這不可能發生（角色互斥），
+        # 但雙角色下 pool 就是交易者本身——原型的 #62 階段 1 正是補這一條。
+        live = [v for v in self.verifiers if v.online and v.vid not in exclude]
         if len(live) < size:
             return []
         keyed = sorted(live, key=lambda v: hashlib.sha256(
@@ -275,7 +277,8 @@ class Market:
         cid = f"canary{self.canary_seq:06d}"
         units = 2.0
         price = units * REF_PRICE
-        panel = self.panel_for(cid, f"cp{tick // 4}")
+        panel = self.panel_for(cid, f"cp{tick // 4}",
+                               exclude=(provider.aid,))
         if not panel:
             return
         # The decoy is planted as bad work, so the correct verdict is FAIL.
@@ -360,7 +363,8 @@ class Market:
                  self.rng.random() < provider.quality)
         # The panel decides what the network acts on, which is not always the
         # truth — that gap is the whole point of pricing verification.
-        panel = self.panel_for(task.task_id, f"cp{tick // 4}")
+        panel = self.panel_for(task.task_id, f"cp{tick // 4}",
+                               exclude=(requester.aid, provider.aid))
         if panel:
             verdicts = self._verdicts(panel, truth, expected_majority=True)
             ok = sum(verdicts) >= 2

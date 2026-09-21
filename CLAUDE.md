@@ -127,6 +127,9 @@ cd sim && python3 -u -m amcn_sim.sweep_deposit
 #   對「當期餘額長了多少」收費，而非對持有量。抽取效果單調成立；
 #   回流效果方向對但落在種子離散內。注意：模擬器裡只有存量型吸收端
 cd sim && python3 -u -m amcn_sim.sweep_inflow
+#   加 --dual-role 讓驗證由交易者兼任（#62 階段 3 的形狀）。兩種人口都給出
+#   同一個機械關係：首位持有者留存率 = (1 − 費率)，半幅近乎為零
+cd sim && python3 -u -m amcn_sim.sweep_inflow --dual-role
 
 # 保管費掃描（費率 × 收取模式 × N，三種子，約 8 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_demurrage

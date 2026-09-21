@@ -55,13 +55,17 @@ class Verifier:
 
 
 def build_verifiers(n: int, seed: int, lazy_frac: float = 0.0,
-                    stake_cc: float = 50.0) -> list[Verifier]:
+                    stake_cc: float = 50.0,
+                    agent_ids: list[str] | None = None) -> list[Verifier]:
     r = random.Random(seed + 9001)
     out = []
     n_lazy = int(n * lazy_frac)
     for i in range(n):
+        # `agent_ids` 給定時，驗證是**角色**而不是獨立物種（#62 階段 3 在原型
+        # 的形狀）：panel 從交易者裡抽，驗證費因此落在會花錢的帳戶上。
+        # 沒給就是原本的獨立 verifier 人口——那是留存 99.4% 的純吸收端。
         out.append(Verifier(
-            vid=f"verifier:{i:04d}",
+            vid=(agent_ids[i] if agent_ids else f"verifier:{i:04d}"),
             stake_cc=stake_cc * r.uniform(0.8, 1.6),
             competence=r.uniform(0.94, 0.995),
             lazy_prob=0.0,

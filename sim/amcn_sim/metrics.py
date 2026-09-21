@@ -51,6 +51,14 @@ class Report:
     verifier_balance_cc: float = 0.0
     demurrage_collected_cc: float = 0.0
     inflow_fee_collected_cc: float = 0.0
+    # 留存率＝淨額÷流入，逐帳戶取最大值（#66／#62）。**無因次**，所以它是
+    # 原型與模擬器之間唯一能直接比的量——四小時真機量到純 verifier 99.4%、
+    # 雙角色的累積者 23.0%，兩種吸收端機制完全不同而期末分佈看起來一樣。
+    # **持有最多的那個帳戶**留存了它收到的多少比例。取最大值沒有資訊量——
+    # 五十個帳戶裡總有某個只收過一筆、沒付過，留存 100%。要問的是那個真的
+    # 把 CC 吸走的帳戶：原型量到純 verifier 99.4%、雙角色的累積者 23.0%。
+    top_holder_retention: float = 0.0
+    top_holder_share: float = 0.0      # 最大正餘額持有者佔全部正餘額
     # 退還給交易者的 Treasury 收入（#61／#71）。`sweep_size` 的
     # protocol_share_pct（(treasury + insurance) ÷ 結算量）扣掉這一項，才是
     # **真正永久離開流通**的金額——這個區別就是整條路徑要證明的東西。
@@ -243,6 +251,25 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
     report.inflow_fee_collected_cc = sum(
         p.amount_cc for ev in ledger.events if ev.kind == 'inflow_fee'
         for p in ev.postings if p.amount_cc > 0)
+    inflow: dict[str, float] = {}
+    outflow: dict[str, float] = {}
+    for ev in ledger.events:
+        for p in ev.postings:
+            if p.account.startswith('protocol:'):
+                continue
+            if p.amount_cc > 0:
+                inflow[p.account] = inflow.get(p.account, 0.0) + p.amount_cc
+            else:
+                outflow[p.account] = outflow.get(p.account, 0.0) - p.amount_cc
+    pos = {a: b for a, b in ledger.balances.items()
+           if b > 0 and not a.startswith('protocol:')}
+    total_pos = sum(pos.values())
+    if total_pos > 0:
+        top = max(pos, key=lambda a: pos[a])
+        report.top_holder_share = pos[top] / total_pos
+        inn = inflow.get(top, 0.0)
+        report.top_holder_retention = ((inn - outflow.get(top, 0.0)) / inn
+                                       if inn > 0 else 0.0)
 
     return report
 def render_text(r: Report, scenario: str) -> str:

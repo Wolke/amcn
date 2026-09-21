@@ -28,6 +28,12 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         risk_base: float = 0.01, deadbeat_frac: float | None = None,
         repay_discount: float = 0.35, band_low_cl_frac: float | None = -0.15,
         n_verifiers: int = 9, verifier_rate: float = 0.04,
+        # 驗證是角色還是獨立物種（#62 階段 3／階段 4）。True 時 panel 從
+        # 交易者裡抽，驗證費落在**會花錢**的帳戶上；False 是原本的獨立
+        # verifier 人口。四小時原型量到兩者的吸收機制完全不同——留存率
+        # 99.4% 對 23.0%——而模擬器先前只有前者，所以 #66 的兩個掃描都
+        # 只測到存量型吸收端。
+        dual_role: bool = False,
         canary_rate: float = 0.03, verifier_lazy_frac: float = 0.0,
         verifier_stake_cc: float = 50.0,
         # 保證金（#65）。deposit_cc 是每個 agent 抵押的金額；
@@ -102,6 +108,7 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
             a.collateral_cc = deposit_cc
             a.collateral_ltv = deposit_ltv
     verifiers = build_verifiers(n_verifiers, seed,
+                                agent_ids=(sorted(agents)[:n_verifiers] if dual_role else None),
                                 lazy_frac=verifier_lazy_frac,
                                 stake_cc=verifier_stake_cc)
     market = Market(ledger, random.Random(seed + 1),

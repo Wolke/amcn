@@ -39,12 +39,14 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="amcn_sim.sweep_inflow")
     p.add_argument("--days", type=int, default=84)
     p.add_argument("--seeds", type=int, nargs="+", default=[42, 7, 99])
+    p.add_argument("--dual-role", action="store_true",
+                   help="驗證由交易者兼任（#62 階段 3 的形狀），而非獨立 verifier")
     p.add_argument("--out", default="out/sweep_inflow.csv")
     args = p.parse_args(argv)
 
     rows = []
     hdr = (f"{'N':>3} {'費率':>6} {'模式':>11} | {'結算CC':>14} {'流速':>11} "
-           f"{'貼上限%':>12} {'verifier持有':>14} {'Gini':>11} {'收取CC':>8}")
+           f"{'貼上限%':>12} {'首位留存%':>11} {'首位佔比%':>11} {'收取CC':>8}")
     print(hdr)
     print("-" * len(hdr))
     for n in SIZES:
@@ -54,12 +56,13 @@ def main(argv: list[str] | None = None) -> None:
                     continue          # 零費率只需要一組對照
                 acc: dict[str, list[float]] = {
                     k: [] for k in ("settled", "vel", "pinned", "vbal",
-                                    "gini", "fee")}
+                                    "gini", "fee", "ret", "top")}
                 for seed in args.seeds:
                     rep = run(n, args.days, seed, "baseline",
                               starter_cc=50.0, deadbeat_frac=0.0,
                               n_verifiers=max(3, n // 10),
-                              inflow_fee_rate=rate, inflow_fee_dest=dest)
+                              inflow_fee_rate=rate, inflow_fee_dest=dest,
+                              dual_role=args.dual_role)
                     tail = rep.daily[-7:] if len(rep.daily) >= 7 else rep.daily
                     acc["settled"].append(rep.settled_cc)
                     acc["vel"].append(rep.credit_velocity_per_month)
@@ -69,6 +72,8 @@ def main(argv: list[str] | None = None) -> None:
                     acc["vbal"].append(rep.verifier_balance_cc)
                     acc["gini"].append(rep.gini_balances)
                     acc["fee"].append(rep.inflow_fee_collected_cc)
+                    acc["ret"].append(rep.top_holder_retention * 100)
+                    acc["top"].append(rep.top_holder_share * 100)
                 half = lambda xs: (max(xs) - min(xs)) / 2   # noqa: E731
                 mean = {k: stx.mean(v) for k, v in acc.items()}
                 shown = "（無流入費）" if rate == 0.0 else label
@@ -76,8 +81,8 @@ def main(argv: list[str] | None = None) -> None:
                       f"{mean['settled']:>8.0f}±{half(acc['settled']):<5.0f} "
                       f"{mean['vel']:>6.2f}±{half(acc['vel']):<4.2f} "
                       f"{mean['pinned']:>7.1f}±{half(acc['pinned']):<4.1f} "
-                      f"{mean['vbal']:>8.1f}±{half(acc['vbal']):<5.1f} "
-                      f"{mean['gini']:>6.3f}±{half(acc['gini']):<4.3f} "
+                      f"{mean['ret']:>6.1f}±{half(acc['ret']):<4.1f} "
+                      f"{mean['top']:>6.1f}±{half(acc['top']):<4.1f} "
                       f"{mean['fee']:>8.1f}")
                 rows.append({
                     "n_agents": n, "rate_of_net_inflow": rate, "dest": dest,
@@ -90,6 +95,9 @@ def main(argv: list[str] | None = None) -> None:
                     "pinned_pct_halfspread": round(half(acc["pinned"]), 2),
                     "verifier_balance_mean": round(mean["vbal"], 2),
                     "gini_mean": round(mean["gini"], 4),
+                    "top_holder_retention_pct_mean": round(mean["ret"], 2),
+                    "top_holder_share_pct_mean": round(mean["top"], 2),
+                    "dual_role": bool(args.dual_role),
                     "gini_halfspread": round(half(acc["gini"]), 4),
                     "inflow_fee_cc_mean": round(mean["fee"], 2),
                 })
