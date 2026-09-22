@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全漏洞（私下回報）
+    url: https://github.com/Wolke/amcn/security/advisories/new
+    about: 可被利用的漏洞請走私下回報，不要開公開 issue。見 SECURITY.md
+  - name: 我想加入一個網路，但連不上
+    url: https://github.com/Wolke/amcn/blob/main/node/JOIN.md
+    about: 先跑 node pilot-doctor.js，它會指出第一個 FAIL 在哪一層

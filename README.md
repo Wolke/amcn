@@ -12,7 +12,7 @@
 需要 Node.js ≥ 20，**不需要** `npm install`（零第三方套件）、不需要模型、不花錢。
 
 ```bash
-git clone <this repo> && cd ai-exchage/node
+git clone https://github.com/Wolke/amcn.git && cd amcn/node
 ./quickstart.sh
 ```
 
@@ -87,11 +87,11 @@ node/                      Phase 1 閉環原型（協定 v7）＋所有實際會
   verifier.js / panel.js    驗收者 / 一個指令起一整個 panel
   verify-ledger.js         自己驗一本帳（逐筆驗簽、餘額重放、checkpoint 比對）
   pilot-doctor.js          一個指令回答「我為什麼連不上」
-  demo*.js / redteam*.js   回歸閘門（§20 驗收、紅隊 45＋13 案）
+  demo*.js / redteam*.js   回歸閘門（§20 驗收、紅隊 50＋13 案）
   chaos-run.js scenarios/  故障注入與長跑情境
 sim/amcn_sim/              Phase 0 經濟模擬器（純 Python stdlib，21 項測試）
 docs/AMCN-SDD-v0.1.md      需求真相來源：原則 P-01～P-10、FR/NFR、威脅模型、§20 驗收
-docs/evaluation/           已裁決的架構、缺陷登記簿（83 條）、證據包、試點 runbook
+docs/evaluation/           已裁決的架構、缺陷登記簿（88 條）、證據包、試點 runbook
 CLAUDE.md                  給 AI Agent 的導覽：閱讀順序、引用規則、全部指令
 ```
 
@@ -100,7 +100,7 @@ CLAUDE.md                  給 AI Agent 的導覽：閱讀順序、引用規則�
 ```bash
 python3 -m unittest discover -s sim/tests   # 模擬器 21 項
 cd node && node demo.js                     # 閉環 26 項斷言
-cd node && node redteam.js                  # 協議層紅隊 45 案（block 45、known-open 0）
+cd node && node redteam.js                  # 協議層紅隊 50 案（block 50、known-open 0）
 ```
 
 完整清單（含長跑、故障注入、跨語言對照、參數掃描）在 `CLAUDE.md`。
@@ -116,6 +116,22 @@ Agent A 額度耗盡 → 自動向陌生 Agent B 借用推理 → B 的 Key 全�
 任何架構若不能讓這個閉環成立，即視為失敗。這個閉環目前在**單機**（`demo.js`）、
 **無人介入**（`demo-autonomous.js`）、**三台真實機器**（90 分鐘、105 筆結算）
 三種規模上都跑過。
+
+## 參與開發
+
+PR 歡迎。先讀 [CONTRIBUTING.md](CONTRIBUTING.md)——有幾條不太常見的規矩，而它們
+不是風格偏好：**零相依**（沒有 `npm install`）、**每個宣稱都要指向一個可以重跑的
+指令**（修了 bug 就補一個在修之前是紅的閘門）、**引用用穩定編號而不是行號**、
+**找到設計缺陷就在登記簿加一列，未修就寫未修**。
+
+CI（`.github/workflows/gates.yml`）跑的就是那些指令本身，沒有另一套「CI 專用測試」。
+
+安全漏洞請走 [SECURITY.md](SECURITY.md) 的私下回報，不要開公開 issue。
+
+## 授權
+
+Apache License 2.0（見 [LICENSE](LICENSE)）。送出 PR 即表示你同意你的貢獻以
+同一個授權釋出。
 
 ## 現在的誠實狀態（2026-09-22）
 

@@ -1,0 +1,95 @@
+# 回歸閘門。PR 的判準是「每個宣稱都指向一個可以重跑的指令」（CONTRIBUTING.md），
+# 所以 CI 跑的就是那些指令本身——沒有另一套「CI 專用測試」。
+#
+# 零相依是設計的一部分：沒有 npm install、沒有 pip install。
+name: gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # 快的那一批：約四分鐘，每個 PR 都跑。
+  gates:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 模擬器（21 項：帳本守恆、額度性質、端到端情境）
+        run: python3 -m unittest discover -s sim/tests
+
+      - name: 語法檢查（零相依，所以這一步就是 lint）
+        run: |
+          for f in node/*.js node/lib/*.js; do node --check "$f"; done
+
+      - name: 閉環 26 項斷言
+        working-directory: node
+        run: node demo.js
+
+      - name: 帳本可由匯出驗證式重建（含竄改檔被拒）
+        working-directory: node
+        run: node demo-rebuild.js
+
+      - name: 金絲雀稽核（偷懶 verifier 被沒收押注）
+        working-directory: node
+        run: node demo-canary.js
+
+      - name: 押注沒收與退還的 2×2（#38）
+        working-directory: node
+        run: node demo-forfeit.js
+
+      - name: 紅隊第一批（協議層，50 案）
+        working-directory: node
+        run: node redteam.js
+
+      - name: 紅隊第二批（惡意參與者，13 案）
+        working-directory: node
+        run: node redteam-agents.js
+
+      - name: 失敗時附上子行程的 log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-node${{ matrix.node }}
+          path: |
+            node/logs/
+            node/out/redteam-logs/
+          if-no-files-found: ignore
+
+  # 慢的那一批：手動觸發。它們合計約三分鐘但對時序比較敏感，
+  # 放在同一個 job 裡會讓「PR 是紅的」變成一個模糊的訊號。
+  long:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: 無人閉環（全程零人工）
+        working-directory: node
+        run: node demo-autonomous.js
+      - name: 三種傳輸實作產生同一本帳（tcp／http／secure）
+        working-directory: node
+        run: node demo-transport.js
+      - name: 殺掉 Hub 之後全網自行重連
+        working-directory: node
+        run: node demo-reconnect.js
+      - name: 年齡斜坡（新身分拿不到成熟額度）
+        working-directory: node
+        run: node demo-ageramp.js
+      - name: 分頁匯出 × 排序器重啟
+        working-directory: node
+        run: node chaos-run.js scenarios/page-kill.json
+      - name: 快照＋尾檔恢復
+        working-directory: node
+        run: node chaos-run.js scenarios/tail-recover.json
