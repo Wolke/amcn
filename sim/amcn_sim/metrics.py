@@ -76,6 +76,11 @@ class Report:
     # 也正好是攻擊者白拿的部分。除以身分數就是「每個身分值不值得鑄」。
     sybil_written_off_cc: float = 0.0
     sybil_n: int = 0
+    # 入門採購（#90）：Treasury 為「還沒有賺得額度的身分」買了多少真實工作。
+    # 與 L_boot 的差別是它**換到了東西**，所以它不是白給——這一格要與
+    # sybil_written_off_cc 一起看：入門採購高而白拿低，才是想要的形狀。
+    onboarding_cc_spent: float = 0.0
+    onboarding_identities: int = 0
     # 退還給交易者的 Treasury 收入（#61／#71）。`sweep_size` 的
     # protocol_share_pct（(treasury + insurance) ÷ 結算量）扣掉這一項，才是
     # **真正永久離開流通**的金額——這個區別就是整條路徑要證明的東西。
@@ -308,6 +313,10 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
         for p in ev.postings
         if p.account.startswith('sybil:') and p.amount_cc > 0)
     report.sybil_n = sum(1 for a in ledger.balances if a.startswith('sybil:'))
+    report.onboarding_cc_spent = sum(getattr(a, 'onboarding_cc', 0.0)
+                                     for a in agents.values())
+    report.onboarding_identities = sum(
+        1 for a in agents.values() if getattr(a, 'onboarding_cc', 0.0) > 1e-9)
     if total_pos > 0:
         top = max(pos, key=lambda a: pos[a])
         report.top_holder_share = pos[top] / total_pos

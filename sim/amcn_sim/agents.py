@@ -137,6 +137,9 @@ class Agent:
     online: bool = True
     earned_cc: float = 0.0
     spent_cc: float = 0.0
+    # 入門採購已收到多少（#90）。Treasury 買新人的第一份工作，而不是送它額度：
+    # 額度是賺來的，所以新身分的起點是「有事可做」而不是「有錢可花」。
+    onboarding_cc: float = 0.0
     tasks_completed: int = 0
     tasks_failed: int = 0
     disputes: int = 0

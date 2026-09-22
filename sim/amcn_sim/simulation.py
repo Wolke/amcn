@@ -63,6 +63,16 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         drought_day: int = 0,
         # 逆週期收購（§2.2「Treasury 啟動」）：治理上限與觸發門檻。當日結算量
         # 低於乾旱前基準的 trigger 倍時，Treasury 出面買，全部 tx_class=subsidy。
+        # 入門採購（#90）：Treasury 向**還沒有任何賺得額度**的身分購買真實工作，
+        # 每個身分有上限、全網有治理上限。這是「保證金」問題的另一個答案——
+        # 保證金要求新人先有錢（而新身分餘額是 0，`collateral_post` 因此拒絕它），
+        # 擔保人要求新人先有關係（而網路上的 agent 之間沒有社會網絡）。
+        # 入門採購兩者都不要求：它要求新人**先做事**。
+        #
+        # Sybil 的經濟因此反轉：N 個身分要拿到 N 份 CC，就得交付 N 份真實工作，
+        # 而那不是攻擊，那是供給。
+        onboarding_cap_cc: float = 0.0,        # 每個身分的上限
+        onboarding_total_cap_cc: float = 0.0,  # 全網治理上限
         counter_cyclical_cap_cc: float = 0.0,
         counter_cyclical_trigger: float = 0.5,
         canary_rate: float = 0.03, verifier_lazy_frac: float = 0.0,
@@ -152,6 +162,7 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
     day_open: dict[str, float] = {}
     cc_spent = 0.0
     cc_seq = 0
+    onb_spent = 0.0
     cc_last_volume = 0.0
     cc_pre_drought: list[float] = []
     report = Report(days=days, n_agents=n_agents)
@@ -442,6 +453,31 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                         a.remaining_quota -= units
                         cc_spent += price
                         want -= price
+            # 入門採購（#90）。條件是「賺得額度仍為 0」——也就是還沒有任何
+            # 對手方紀錄的人；買的是真實產能（要有 remaining_quota），而且
+            # 標 subsidy 不進市場指標（同 #83 的逆週期收購）。
+            if onboarding_cap_cc > 0:
+                for a in agents.values():
+                    if onb_spent >= onboarding_total_cap_cc > 0:
+                        break
+                    if not a.online or a.remaining_quota < 2.0:
+                        continue
+                    if a.onboarding_cc >= onboarding_cap_cc:
+                        continue
+                    # 已經有賺得額度的人不需要入門採購——它已經進入市場了。
+                    if a.effective_contribution(agents) > 1e-9:
+                        continue
+                    units = min(a.remaining_quota, 4.0)
+                    price = min(units * 1.0, onboarding_cap_cc - a.onboarding_cc)
+                    if onboarding_total_cap_cc > 0:
+                        price = min(price, onboarding_total_cap_cc - onb_spent)
+                    if price <= 1e-9:
+                        continue
+                    cc_seq += 1
+                    ledger.counter_cyclical(tick, f"onb{cc_seq:06d}", a.aid, price)
+                    a.remaining_quota -= units
+                    a.onboarding_cc += price
+                    onb_spent += price
             debtors = [x for x in agents.values()
                        if ledger.balance(x.aid) < -0.5 and x.online]
             report.daily.append(DailySnapshot(

@@ -100,6 +100,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--risk-thin", type=float, default=None)
     p.add_argument("--risk-base", type=float, default=None)
     p.add_argument("--demand-drift-days", type=int, default=0)
+    # #90 的候選組：額度全部只能賺（starter 0），而 Treasury 買新人的第一份
+    # 工作。要當成決定就得過這八條，而不是只看 baseline 一個情境。
+    p.add_argument("--starter", type=float, default=50.0,
+                   help="開機信用額度（0 ＝ 額度全部只能賺，#90）")
+    p.add_argument("--onboarding", type=float, default=0.0,
+                   help="每個新身分的入門採購上限（Treasury 買它的第一份工作）")
+    p.add_argument("--onboarding-total", type=float, default=0.0,
+                   help="入門採購的全網治理上限")
     p.add_argument("--out", default="out/gate0.csv")
     args = p.parse_args(argv)
 
@@ -115,7 +123,10 @@ def main(argv: list[str] | None = None) -> None:
         per: dict[str, list[bool]] = {}
         detail: dict[str, list[str]] = {}
         for seed in args.seeds:
-            rep = run(args.agents, args.days, seed, sc, starter_cc=50.0,
+            rep = run(args.agents, args.days, seed, sc,
+                      starter_cc=args.starter,
+                      onboarding_cap_cc=args.onboarding,
+                      onboarding_total_cap_cc=args.onboarding_total,
                       n_verifiers=max(3, args.agents // 50),
                       dual_role=args.dual_role,
                       demand_drift_days=args.demand_drift_days,
