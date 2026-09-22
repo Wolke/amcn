@@ -227,7 +227,15 @@ function report(contractId) {
     seed_root: ctx.seedRoot,
     // 入門採購要把斷言集一起送出：Hub 會檢查它含確定性斷言，否則那筆錢
     // 就是換個名目白給（登記簿 #90 的條件 i）。
-    ...(MODE === 'onboard' ? { asserts: ASSERTS } : {}),
+    //
+    // `outcome` 是**這一次面板的實際裁決**，而 `expected_verdict` 是「這份
+    // 任務的正確答案是什麼」——兩個不同的東西。失敗也要報上來，因為 Hub
+    // 要算「連續通過幾次」：實測連續 1 次時攻擊者每身分還能矇到 5.52 CC，
+    // 連續 3 次才壓到 0.00（而誠實新人只從 196 人掉到 187 人）。只報成功
+    // 的話 Hub 永遠算不出連續，那個旋鈕就不存在。
+    ...(MODE === 'onboard'
+      ? { asserts: ASSERTS, outcome: passes >= 2 ? 'PASS' : 'FAIL' }
+      : {}),
   };
   hub.send({ type: REPORT_TYPE, report: reportBody,
              sig: sign(id.privateKey, reportBody), attestations: ctx.attest });

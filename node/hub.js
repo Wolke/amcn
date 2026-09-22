@@ -168,6 +168,19 @@ const stakeReleased = new Set();
 const ONBOARD_DID = process.env.HUB_ONBOARD_DID || null;
 const ONBOARD_CAP_CC = Number(process.env.HUB_ONBOARD_CAP_CC || 20);
 const ONBOARD_TOTAL_CC = Number(process.env.HUB_ONBOARD_TOTAL_CC || 2000);
+// 要**連續**通過幾次才付一次款（#90）。
+//
+// 「答案已知」只讓單一次交付判得出來；它擋不住「一直試、矇中一次就拿錢」。
+// 模擬器量到的形狀：連續 1 次時交假東西的攻擊者每身分仍拿 5.52 CC、連續 2 次
+// 掉到 1.33、連續 3 次是 **0.00**，而誠實新人只從 196 人掉到 187 人（每人
+// 19.2 → 16.1 CC）。那 9 個沒領到的是品質低到連續三次都過不了的節點，
+// 而「連續交出三份通過驗收的工作」正是「證明你做得出來」本身。
+//
+// 為什麼不是「失敗幾次就出局」：那條實測沒有用——一次出局讓攻擊者拿 4.89 CC
+// （比三次出局的 5.52 只低一點），卻讓 200 人裡 26 個誠實新人進不了門。
+// 失敗上限限制的是「失敗幾次」，限制不了「矇中幾次」。
+const ONBOARD_STREAK = Number(process.env.HUB_ONBOARD_STREAK || 3);
+const onboardStreak = new Map();  // did -> 目前連續通過次數
 const onboarded = new Map();   // did -> 已領的 CC
 // 「曾經收到過 CC」的身分。入門採購的合格條件用這個，而**不是** E_eff＝0：
 // verifier 的驗證費不進 `stats.earnedBy`（那張表只記結算的買賣雙方），所以用
@@ -728,6 +741,18 @@ function handleOnboardResult(msg, chan) {
   if (report.expected_verdict !== 'PASS') {
     return fail(chan, 'onboarding task must expect PASS (its answer is known)', ref);
   }
+  // 失敗的嘗試也要報上來，而它的作用就是**把連續次數歸零**。
+  if (report.outcome === 'FAIL') {
+    if (onboardSeen.has(ref)) return fail(chan, 'onboarding already scored', ref);
+    onboardSeen.add(ref);
+    const had = onboardStreak.get(report.provider) || 0;
+    onboardStreak.set(report.provider, 0);
+    console.log(`[hub] onboarding ${String(report.provider).slice(0, 18)}: ` +
+      `交付未通過，連續次數 ${had} → 0`);
+    chan.send({ type: 'onboard_progress', contract_id: ref,
+                provider: report.provider, streak: 0, required: ONBOARD_STREAK });
+    return;
+  }
   // 條件 (i)：只接受確定性斷言。`contains`／`max_len` 這類弱斷言連「有沒有做」
   // 都判不出來，而那正是整個機制的支點。
   const asserts = Array.isArray(report.asserts) ? report.asserts : [];
@@ -783,14 +808,27 @@ function handleOnboardResult(msg, chan) {
   }
 
   onboardSeen.add(ref);
+  // 連續通過才付。發樁者無法用「只報成功」繞過這條，因為連續是由 Hub 自己
+  // 數的；它能做的是不發任務（那本來就在它的權限內）或多報失敗——後者只會
+  // 讓新人更難通過，而發樁者是營運方授權的身分，那個權力本來就存在。
+  const streak = (onboardStreak.get(report.provider) || 0) + 1;
+  onboardStreak.set(report.provider, streak);
+  if (streak < ONBOARD_STREAK) {
+    console.log(`[hub] onboarding ${report.provider.slice(0, 18)}: ` +
+      `連續通過 ${streak}/${ONBOARD_STREAK}（還不付款）`);
+    chan.send({ type: 'onboard_progress', contract_id: ref,
+                provider: report.provider, streak, required: ONBOARD_STREAK });
+    return;
+  }
+  onboardStreak.set(report.provider, 0);
   if (!applyPostings('onboarding', ref,
         [{ account: TREASURY, amount_cc: -price },
          { account: report.provider, amount_cc: price }])) return;
   onboarded.set(report.provider, +(already + price).toFixed(4));
   onboardSpent = +(onboardSpent + price).toFixed(4);
   console.log(`[hub] ONBOARD ${report.provider.slice(0, 18)}: ${price} CC ` +
-    `（答案已知的任務、${passers.size} 位 verifier 判 PASS；` +
-    `累計 ${onboarded.get(report.provider)}/${ONBOARD_CAP_CC}、` +
+    `（連續 ${ONBOARD_STREAK} 份答案已知的工作、最後一份 ${passers.size} 位 ` +
+    `verifier 判 PASS；累計 ${onboarded.get(report.provider)}/${ONBOARD_CAP_CC}、` +
     `全網 ${onboardSpent}/${ONBOARD_TOTAL_CC}）`);
   chan.send({ type: 'onboard_paid', contract_id: ref, provider: report.provider,
               price_cc: price, total_cc: onboarded.get(report.provider) });
@@ -1162,6 +1200,7 @@ function buildExport({ includeRawLog = EXPORT_RAWLOG } = {}) {
     canary_scored: [...canarySeen],
     // #90：誰領過入門採購、領了多少。它是 Treasury 的支出，所以必須可稽核。
     onboarded: Object.fromEntries(onboarded),
+    onboard_streak: Object.fromEntries(onboardStreak),
     onboard_paid: [...onboardSeen],
     events,
     hub_pub: hubId.pub,

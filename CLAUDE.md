@@ -96,6 +96,8 @@ cd node && node verify-ledger.js out/mine.json --pin did:demo:<hub did>
 #   三道門＝答案可判（只收 sha256_eq）＋面板真的判過＋收款方從沒收過 CC，
 #   外加每身分與全網兩個上限。四條負對照比正向那一條重要
 cd node && node demo-onboard.js
+#   HUB_ONBOARD_STREAK 預設 3：要連續 3 次通過才付一次。連續 1 次時交假東西的
+#   攻擊者每身分仍拿 5.52 CC，連續 3 次是 0.00（誠實新人只從 196 掉到 187 人）
 
 # #38 押注沒收／退還 demo（約 70 秒，14 項斷言，測的是一個 2×2：
 #   離線×未被測夠 → 全額沒收；在線×被測夠 → 可取回並退出 pool；

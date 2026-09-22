@@ -50,6 +50,8 @@ class ConservationError(RuntimeError):
 class Ledger:
     def __init__(self) -> None:
         self.events: list[LedgerEvent] = []
+        # #90：曾經被付過錢的帳戶（入門採購不計）。
+        self.ever_paid: set[str] = set()
         self.balances: dict[str, float] = {}
 
     def post(self, tick: int, kind: str, contract_id: str,
@@ -62,6 +64,13 @@ class Ledger:
         self.events.append(ev)
         for p in postings:
             self.balances[p.account] = self.balances.get(p.account, 0.0) + p.amount_cc
+            # #90：「曾經被付過錢」。入門採購本身不算，否則第一筆就把自己的
+            # 資格取消掉。與原型的 `inflowSeen` 同一條規則——原型那邊是用
+            # 「E_eff＝0」寫錯過一次（驗證費不進那張表，於是每個 verifier
+            # 都永遠算新人），所以這裡從一開始就用收款事實而不是額度公式。
+            if (kind != "onboarding" and p.amount_cc > 1e-9
+                    and not p.account.startswith("protocol:")):
+                self.ever_paid.add(p.account)
         return ev
 
     def settle(self, tick: int, contract_id: str, requester: str,
@@ -125,6 +134,20 @@ class Ledger:
         Σ 仍為 0（搬移而非鑄造，FR-051）。
         """
         return self.post(tick, "counter_cyclical", contract_id, [
+            Posting(TREASURY, -price_cc),
+            Posting(provider, price_cc),
+        ], {"tx_class": "subsidy"})
+
+    def onboarding(self, tick: int, contract_id: str, provider: str,
+                   price_cc: float) -> LedgerEvent:
+        """入門採購（#90）：Treasury 買下新人那份**通過驗收**的工作。
+
+        與 `counter_cyclical` 分開一個 kind 不是分類癖：`ever_paid` 要排除
+        入門採購本身，否則**第一筆付款就把自己的資格取消掉**——實測就是這樣
+        （每個身分只領到一次約 4 CC，而上限是 20，看起來像上限沒生效）。
+        同樣標 `tx_class=subsidy`，所以它不進市場指標。
+        """
+        return self.post(tick, "onboarding", contract_id, [
             Posting(TREASURY, -price_cc),
             Posting(provider, price_cc),
         ], {"tx_class": "subsidy"})

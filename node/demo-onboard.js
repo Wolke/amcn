@@ -12,6 +12,9 @@
 //       上限走抵押（#65）。
 //   (4) 超過每身分上限 → 拒絕。這筆錢來自 Treasury 的創世補貼額度（§2.2），
 //       所以它必須有治理上限，而上限要真的擋得住。
+//   (5) **只通過一次不給錢**。「答案已知」只讓單次判得出來，擋不住「一直試、
+//       矇中一次就拿錢」——模擬器量到連續 1 次時交假東西的攻擊者每身分仍拿
+//       5.52 CC、連續 3 次才是 0.00。所以要連續 N 次，而中間失敗要歸零。
 //
 // Run:  node demo-onboard.js        (DEMO_PORT_OFFSET=100 可與跑中的試點並存)
 'use strict';
@@ -24,6 +27,7 @@ const OFFSET = Number(process.env.DEMO_PORT_OFFSET || 0);
 const PORT = 47180 + 700 + OFFSET;
 const RUN_MS = Number(process.env.DEMO_RUN_MS || 30000);
 const CAP = 12;                      // 每身分上限，刻意設小讓上限被撞到
+const STREAK = 2;                    // 連續通過幾次才付（真實預設 3）
 const ISSUER_SEED = 'demo-onboard-issuer';
 const ISSUER = identityFromSeed(ISSUER_SEED);
 
@@ -60,7 +64,10 @@ function forge(report, attestations = []) {
     const t = setTimeout(() => resolve(null), 5000);
     const c = transport.dial({ port: PORT });
     c.onMessage((m) => {
-      if (m.type !== 'error' && m.type !== 'onboard_paid') return;
+      // `onboard_progress` 也要收：連續次數的回報（含失敗歸零）走那個型別，
+      // 而第一版只等 error／onboard_paid，所以那條斷言拿到的是「無回應」——
+      // Hub 明明做對了，閘門卻紅在自己的接線上。
+      if (!['error', 'onboard_paid', 'onboard_progress'].includes(m.type)) return;
       clearTimeout(t); c.close(); resolve(m);
     });
     // 偽造者必須先註冊成發樁者那個身分，否則 Hub 會在 `agents.get` 就擋掉，
@@ -80,6 +87,9 @@ async function main() {
     HUB_PORT: String(PORT), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0',
     HUB_ONBOARD_DID: ISSUER.did,
     HUB_ONBOARD_CAP_CC: String(CAP), HUB_ONBOARD_TOTAL_CC: '100',
+    // 連續 2 次（而不是預設的 3）只是為了讓這支 demo 在 30 秒內看得到付款；
+    // 真實預設是 3，理由見 hub.js 那一段。
+    HUB_ONBOARD_STREAK: String(STREAK),
   }));
   await sleep(600);
 
@@ -127,6 +137,12 @@ async function main() {
   // 上限要真的擋得住：跑滿之後累計不得超過 CAP。
   check(`每身分上限擋得住（累計 ≤ ${CAP} CC）`,
     paid <= CAP + 1e-6, `累計 ${paid.toFixed(2)} / ${CAP} CC`);
+
+  // 連續通過的證據：付款次數必須是「通過次數 ÷ STREAK」，而不是等於通過次數。
+  const progress = (ex.events || []).filter((e) => e.kind === 'onboarding').length;
+  check(`要連續 ${STREAK} 次通過才付一次（不是每通過一次就付）`,
+    progress > 0 && paid / 2 === progress,
+    `${progress} 次付款、每次 2 CC；若改成一次一付會是 ${progress * STREAK} 次`);
 
   const before = paid;
   const base = {
@@ -186,6 +202,23 @@ async function main() {
     marketPaid && !!r3 && r3.type === 'error' && /never been paid/.test(r3.why || ''),
     marketPaid ? (r3 ? (r3.why || r3.type).slice(0, 72) : '無回應')
       : '前置不成立：市場還沒付錢給新人');
+
+  // (5) 中間失敗要把連續次數歸零。先送一次 PASS（連續 1），再送一次 FAIL，
+  // 然後再送一次 PASS——如果歸零有效，這時候不該付款（連續只回到 1）。
+  const fresh2 = identityFromSeed('demo-onb-streak');
+  await new Promise((resolve) => {
+    const c = transport.dial({ port: PORT });
+    const body = { did: fresh2.did, pub: fresh2.pub, box_pub: fresh2.pub };
+    c.send({ type: 'register', ...body, sig: sign(fresh2.privateKey, body) });
+    setTimeout(() => { c.close(); resolve(); }, 400);
+  });
+  const failReport = await forge({ ...base, provider: fresh2.did,
+    contract_id: 'streak-fail-1', asserts: [{ op: 'sha256_eq' }], outcome: 'FAIL' });
+  const streakAfter = (await exportLedger()).onboard_streak || {};
+  check('負對照五：交付未通過時連續次數歸零（失敗的嘗試也要報上來）',
+    !!failReport && failReport.type === 'onboard_progress'
+      && failReport.streak === 0 && (streakAfter[fresh2.did] || 0) === 0,
+    failReport ? `回覆 ${failReport.type}、streak ${failReport.streak}` : '無回應');
 
   // (4) 偽造不得改動帳本
   const after = await exportLedger();

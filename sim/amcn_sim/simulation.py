@@ -43,6 +43,8 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         # 模型量不到這件事的原因。
         sybil_n: int = 0,
         sybil_deposit_cc: float = 0.0,
+        sybil_quality: float = 0.95,
+        sybil_capacity: float = 0.001,
         # verifier 棄置身分重開的週期（#38）。沒收要 `slash_min_samples` 次
         # 金絲雀樣本才可能發動，所以**第 5 次之前是免費的**；一個偷懶者只要
         # 在達標前換身分，就永遠罰不到。0 表示不換（原行為）。
@@ -73,6 +75,18 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         # 而那不是攻擊，那是供給。
         onboarding_cap_cc: float = 0.0,        # 每個身分的上限
         onboarding_total_cap_cc: float = 0.0,  # 全網治理上限
+        # 連續交不出通過驗證的東西幾次之後就不再提供。補貼額度有限，而一個
+        # 一直失敗的身分不該無限消耗它——這也是攻擊者被擋下來的地方之一。
+        onboarding_max_fails: int = 3,
+        # 要連續通過幾次才付一次。失敗上限限制的是「失敗幾次」，限制不了
+        # 「矇中幾次」——實測一次出局並沒有讓攻擊者拿得更少（4.89 vs 4.22），
+        # 卻讓 200 人裡 26 個誠實新人進不了門。連續通過才是對的旋鈕，因為
+        # 它對攻擊者是平方、對誠實者幾乎無感。
+        # 預設 3，因為 3 是實測把攻擊者收益壓到 **0.00** 的值（連續 1 次是
+        # 5.52、2 次是 1.33），而代價只有「誠實新人 196 → 187 人領到、每人
+        # 19.2 → 16.1 CC」。那 9 個沒領到的是品質低到連續三次都過不了的人，
+        # 那不是誤殺，那就是「證明你做得出來」這個門檻本身。
+        onboarding_streak_required: int = 3,
         counter_cyclical_cap_cc: float = 0.0,
         counter_cyclical_trigger: float = 0.5,
         canary_rate: float = 0.03, verifier_lazy_frac: float = 0.0,
@@ -137,7 +151,8 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
     seen_events = 0
     defaults: list[dict] = []          # 每個違約身分拿走多少、賠掉多少
     agents = {a.aid: a for a in build_population(
-        n_agents, seed, deadbeat_frac, washer_frac, expiry_cliff, demand_drift_days=demand_drift_days, sybil_n=sybil_n)}
+        n_agents, seed, deadbeat_frac, washer_frac, expiry_cliff, demand_drift_days=demand_drift_days, sybil_n=sybil_n, sybil_quality=sybil_quality,
+        sybil_capacity=sybil_capacity)}
     ledger = Ledger()
     if trace == "auto":  # pick a chronically under-provisioned honest agent
         trace = next((a.aid for a in agents.values()
@@ -163,6 +178,8 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
     cc_spent = 0.0
     cc_seq = 0
     onb_spent = 0.0
+    onb_attempts = 0
+    onb_failed = 0
     cc_last_volume = 0.0
     cc_pre_drought: list[float] = []
     report = Report(days=days, n_agents=n_agents)
@@ -464,8 +481,13 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                         continue
                     if a.onboarding_cc >= onboarding_cap_cc:
                         continue
-                    # 已經有賺得額度的人不需要入門採購——它已經進入市場了。
-                    if a.effective_contribution(agents) > 1e-9:
+                    # 資格條件與原型同一條：**從來沒有被付過錢**。
+                    # 原型那邊本來寫「E_eff＝0」而錯了——驗證費不進 E_eff 的
+                    # 那張表，於是每個 verifier 都永遠算新人（閘門逼出來的）。
+                    # 所以這裡用收款事實，而不是額度公式。
+                    if a.aid in ledger.ever_paid:
+                        continue
+                    if a.onboarding_failed >= onboarding_max_fails:
                         continue
                     units = min(a.remaining_quota, 4.0)
                     price = min(units * 1.0, onboarding_cap_cc - a.onboarding_cc)
@@ -473,9 +495,22 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                         price = min(price, onboarding_total_cap_cc - onb_spent)
                     if price <= 1e-9:
                         continue
-                    cc_seq += 1
-                    ledger.counter_cyclical(tick, f"onb{cc_seq:06d}", a.aid, price)
+                    # **通過驗證才付**。走與普通結算完全同一條路徑（真值是
+                    # reliability × quality 的抽樣，而網路依據面板的裁決），
+                    # 否則模擬裡的入門採購只是「消耗產能換錢」，與原型不同構。
                     a.remaining_quota -= units
+                    onb_attempts += 1
+                    if not market.onboarding_verdict(a, tick):
+                        a.onboarding_failed += 1
+                        a.onboarding_streak = 0
+                        onb_failed += 1
+                        continue
+                    a.onboarding_streak += 1
+                    if a.onboarding_streak < onboarding_streak_required:
+                        continue          # 通過了，但還沒連續到門檻
+                    a.onboarding_streak = 0
+                    cc_seq += 1
+                    ledger.onboarding(tick, f"onb{cc_seq:06d}", a.aid, price)
                     a.onboarding_cc += price
                     onb_spent += price
             debtors = [x for x in agents.values()
@@ -530,6 +565,7 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                 fh.write(",".join(
                     "" if d[c] is None else f"{d[c]:.4f}" if isinstance(d[c], float)
                     else str(d[c]) for c in cols) + "\n")
+    report.onboarding_attempts = onb_attempts
     return report
 
 

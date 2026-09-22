@@ -140,6 +140,12 @@ class Agent:
     # 入門採購已收到多少（#90）。Treasury 買新人的第一份工作，而不是送它額度：
     # 額度是賺來的，所以新身分的起點是「有事可做」而不是「有錢可花」。
     onboarding_cc: float = 0.0
+    # 入門採購的交付被判 FAIL 的次數。連續失敗到上限就不再提供——發樁者的
+    # 補貼額度有限，而一個一直交不出東西的身分不該無限消耗它。
+    onboarding_failed: int = 0
+    # 連續通過幾次（#90）。要求連續 N 次才付款，對誠實者幾乎無感（0.9^2≈0.81），
+    # 對交假東西的人是平方壓制（0.095^2≈0.009）——因為它必須「連續」矇中。
+    onboarding_streak: int = 0
     tasks_completed: int = 0
     tasks_failed: int = 0
     disputes: int = 0
@@ -262,7 +268,9 @@ def credit_limit(a: Agent, tick: int, peers: dict[str, Agent] | None = None,
 def build_population(n: int, seed: int, deadbeat_frac: float,
                      washer_frac: float, expiry_cliff: bool,
                      demand_drift_days: int = 0,
-                     sybil_n: int = 0) -> list[Agent]:
+                     sybil_n: int = 0,
+                     sybil_quality: float = 0.95,
+                     sybil_capacity: float = 0.001) -> list[Agent]:
     """Heterogeneous population: over-provisioned suppliers, balanced
     users, and under-provisioned chronic requesters."""
     rng = random.Random(seed)
@@ -305,10 +313,16 @@ def build_population(n: int, seed: int, deadbeat_frac: float,
             # 那不是白拿。第一版給了 300 的產能，結果那些身分認真賣東西賺錢、
             # 一毛債都沒欠，量到的壞帳是 0。攻擊的形態是「只買不賣、把額度
             # 用光就走」。
-            quota_capacity=0.001, cycle_days=30, cycle_offset_days=0,
+            # 產能可調。預設 0.001 是「只買不賣」那個形態（第一版給 300 的
+            # 結果是它們認真賣東西賺錢、壞帳 0，那不是攻擊）。但「通過驗證
+            # 才付」之後要問的是另一個形態：**有產能、但交假東西**——那才
+            # 測得到驗收有沒有攔住它（#90）。
+            quota_capacity=sybil_capacity, cycle_days=30, cycle_offset_days=0,
             mean_daily_demand=6.0,                # 足以在 84 天內吃光額度
             burst_prob_per_day=0.02, burst_multiplier=3.0,
-            reliability=0.95, quality=0.95, behavior=SYBIL)
+            # quality 可調：入門採購「通過驗證才付」之後，攻擊者能不能拿到錢
+            # 取決於它交得出通過驗收的東西，而那正是要量的那一格（#90）。
+            reliability=0.95, quality=sybil_quality, behavior=SYBIL)
         a.remaining_quota = a.quota_capacity
         # 環狀互相交易：每一個的洗量對手是下一個。單獨一個身分沒有對手，
         # 那正是 F-1 折減要壓的形態（#70 量到環狀的有效率是 0%）。

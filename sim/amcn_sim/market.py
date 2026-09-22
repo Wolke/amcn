@@ -353,6 +353,25 @@ class Market:
         # drop fully-consumed offers for cleanliness (list rebuilt next tick)
         _ = by_provider
 
+    def onboarding_verdict(self, provider: Agent, tick: int) -> bool:
+        """入門採購那份「答案已知的工作」有沒有通過（#90）。
+
+        刻意用與普通結算**完全同一條路徑**：交付的真值是 reliability × quality
+        兩個抽樣，而網路依據的是**面板的裁決**而不是真值——後者才是驗證市場
+        存在的理由。少了這一段，入門採購在模擬裡就只是「消耗產能換錢」，
+        而原型那邊已經是嚴格版（Hub 要求面板的可問責 PASS），兩邊會不同構。
+
+        它也是這個機制唯一的攻擊面：交付假東西而讓面板誤放。所以防線退回
+        「驗證會不會被騙」，那是金絲雀與 commit-reveal 在守的東西。
+        """
+        truth = (self.rng.random() < provider.reliability and
+                 self.rng.random() < provider.quality)
+        panel = self.panel_for(f"onb-{provider.aid}-{tick}", f"cp{tick // 4}",
+                               exclude=(provider.aid,))
+        if panel:
+            return sum(self._verdicts(panel, truth, expected_majority=True)) >= 2
+        return truth
+
     def _execute(self, task: Task, requester: Agent, provider: Agent,
                  price: float, tick: int, agents: dict[str, Agent]) -> None:
         task.matched_tick = tick

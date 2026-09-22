@@ -81,6 +81,14 @@ class Report:
     # sybil_written_off_cc 一起看：入門採購高而白拿低，才是想要的形狀。
     onboarding_cc_spent: float = 0.0
     onboarding_identities: int = 0
+    # 交付被判 FAIL 的次數／總嘗試次數（#90）。這一格是「通過驗證才付」有沒有
+    # 真的在運作的證據：全 0 代表驗收根本沒攔下任何東西。
+    onboarding_failed: int = 0
+    onboarding_attempts: int = 0
+    # 攻擊者那一組的入門採購：領到多少、被判 FAIL 幾次。與 sybil_written_off_cc
+    # 一起看才完整——「領到的」是它真的交付換來的，「沖銷的」才是白拿。
+    sybil_onboarding_cc: float = 0.0
+    sybil_onboarding_failed: int = 0
     # 退還給交易者的 Treasury 收入（#61／#71）。`sweep_size` 的
     # protocol_share_pct（(treasury + insurance) ÷ 結算量）扣掉這一項，才是
     # **真正永久離開流通**的金額——這個區別就是整條路徑要證明的東西。
@@ -317,6 +325,14 @@ def finalize(report: Report, agents: dict[str, Agent], ledger: Ledger,
                                      for a in agents.values())
     report.onboarding_identities = sum(
         1 for a in agents.values() if getattr(a, 'onboarding_cc', 0.0) > 1e-9)
+    report.onboarding_failed = sum(getattr(a, 'onboarding_failed', 0)
+                                   for a in agents.values())
+    report.sybil_onboarding_cc = sum(getattr(a, 'onboarding_cc', 0.0)
+                                     for a in agents.values()
+                                     if a.aid.startswith('sybil:'))
+    report.sybil_onboarding_failed = sum(getattr(a, 'onboarding_failed', 0)
+                                         for a in agents.values()
+                                         if a.aid.startswith('sybil:'))
     if total_pos > 0:
         top = max(pos, key=lambda a: pos[a])
         report.top_holder_share = pos[top] / total_pos
