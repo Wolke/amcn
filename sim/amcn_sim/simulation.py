@@ -49,6 +49,12 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         # 換身分在模型裡＝把金絲雀計數歸零而**保留已賺到的費用**——那正是
         # 「棄置身分」的意思：紀錄沒了，錢還在。
         verifier_churn_days: int = 0,
+        # #38 的修法：未達 `slash_min_samples` 就棄置身分時，已託管的押注
+        # **不退還**（轉入保險池）。這不是「懲罰」而是「保證金不退」——
+        # 一個誠實退場的 verifier 只要待到樣本數達標就拿得回去。
+        # 2026-09-21 量到每 2 天換一次身分即可完全逃掉沒收（188 → 5.7 CC），
+        # 而身分是免費的（#50），所以那條路沒有成本。
+        stake_forfeit_on_churn: bool = False,
         # 需求枯竭：第 N 天之後全網需求掉到 20%。要驗「沒人發任務時會怎樣」
         # 就得先造出那個狀況——這正是「假設沒有人想發任務」那個問題。
         drought_day: int = 0,
@@ -206,9 +212,22 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
                 and tick > 0
                 and tick % (verifier_churn_days * TICKS_PER_DAY) == 0):
             for v in verifiers:
-                if v.lazy_prob > 0:
-                    v.canary_seen = 0
-                    v.canary_failed = 0
+                if v.lazy_prob <= 0:
+                    continue
+                # 棄置發生在**樣本數達標之前**才沒收——達標之後離開是正常
+                # 退場，押注該退。門檻用 market 的 slash_min_samples，
+                # 兩邊必須是同一個數，否則規則與偵測條件對不上。
+                if (stake_forfeit_on_churn
+                        and v.canary_seen < market.slash_min_samples):
+                    bond = min(v.stake_cc * market.slash_frac,
+                               max(ledger.balance(v.vid), 0.0))
+                    if bond > 1e-9:
+                        ledger.slash(tick, f"forfeit:{v.vid}:{tick}",
+                                     v.vid, bond)
+                        v.slashed_cc += bond
+                        market.slashed_cc += bond
+                v.canary_seen = 0
+                v.canary_failed = 0
         if demand_drift_days > 0:
             for a in agents.values():
                 a.maybe_drift(tick)
