@@ -16,6 +16,7 @@ node demo-transport.js    # 約 35 秒，7 項驗收（W10：第二個 ITranspor
 node demo-reconnect.js    # 約 40 秒，8 項驗收（W10 預演：殺掉 Hub，網路自己回來）
 node demo-forfeit.js      # 約 70 秒，14 項驗收（#38：押注的沒收與退還是一個 2×2）
 node demo-tor.js          # 約 20 秒，7 項驗收（#89：零入向埠，不需要安裝 tor）
+node demo-onboard.js      # 約 45 秒，8 項驗收（#90：買新人的「答案已知的工作」）
 
 # 不是閘門，是給人用的：
 ./quickstart.sh           # 單機起一個真的網路並留著（status / stop）
@@ -61,6 +62,8 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `ledger-dump.js` | 災難匯出：把 Hub 完整帳本寫成檔案 |
 | `demo-rebuild.js` | W10 驗收（7 項）：第二排序器從匯出重建、餘額／額度一致、竄改檔被拒 |
 | `canary.js` | W9 金絲雀稽核（proposal-C §7）：獨立進程發布「斷言不可能被滿足」的暗樁任務，唯一正確裁決是 FAIL；投 PASS 的 verifier 被記錄，達到證據門檻即沒收押注。身分由 seed 決定，需在 Hub 設 `HUB_CANARY_DID` 授權 |
+| `onboard.js` | #90 入門採購的發樁者（＝`canary.js` 的 `mode:"onboard"`）：發**答案已知且可通過**的任務，讓沒有紀錄的新人用一次真交付換到第一筆 CC。與金絲雀是鏡像關係——後者發不可能通過的樁抓偷懶的 verifier，兩者都靠「答案已知」成立，所以共用同一支程式。需在 Hub 設 `HUB_ONBOARD_DID` 授權 |
+| `demo-onboard.js` | #90 驗收（8 項）：新人靠交付拿到 CC、錢出自 Treasury、上限擋得住，外加四條負對照（弱斷言被拒、無可問責 PASS 被拒、被市場付過錢之後就不再是新人、偽造報告後帳一分未動）|
 | `demo-canary.js` | W9 金絲雀驗收（6 項）：偷懶 verifier 被沒收、誠實者未受罰、押注帳務一致、Σ=0 |
 | `panel.js` / `panel.cmd` | 專用 Verifier panel 主機（INSTALL §6）：探測 Hub、啟動 N 個 Verifier、全數註冊後回報、Ctrl-C 一次停完。跨平台，Windows 免改 PowerShell 執行原則 |
 | `demo-autonomous.js` | W8 驗收：§27 閉環全程零人工（12 項斷言）。無 `posts` 時間表、無 Console 呼叫 |

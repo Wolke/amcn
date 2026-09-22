@@ -47,6 +47,10 @@ jobs:
         working-directory: node
         run: node demo-forfeit.js
 
+      - name: 入門採購買的是答案已知的工作（#90）
+        working-directory: node
+        run: node demo-onboard.js
+
       - name: 零入向埠的傳輸（#89；自帶 SOCKS5 代理，不需要安裝 tor）
         working-directory: node
         run: node demo-tor.js

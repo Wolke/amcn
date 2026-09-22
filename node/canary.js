@@ -36,13 +36,26 @@ const cfg = process.env.AGENT_CONFIG
   ? JSON.parse(process.env.AGENT_CONFIG)
   : JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
 
+const IMPOSSIBLE_ASSERTS = [{ op: 'max_len', arg: 1 }];
+// 入門採購模式（#90）。同一個流程、同一個問責標準，只有兩件事相反：
+// 斷言是**可以通過**的（而且是確定性的，所以發樁者自己算得出正確答案），
+// 正確裁決因此是 PASS。金絲雀抓的是「不做事的 verifier」，入門採購買的是
+// 「新人的第一次真交付」——兩者都靠「答案已知」這一件事才成立，所以共用
+// 這支程式而不是各寫一份。
+const ONBOARD_ASSERTS = [{ op: 'sha256_eq' }, { op: 'max_len', arg: 64 }];
+const MODE = cfg.mode === 'onboard' ? 'onboard' : 'canary';
+const ASSERTS = MODE === 'onboard' ? ONBOARD_ASSERTS : IMPOSSIBLE_ASSERTS;
+const WANT = MODE === 'onboard' ? 'PASS' : 'FAIL';
+const REPORT_TYPE = MODE === 'onboard' ? 'onboard_result' : 'canary_result';
+const HUB_ENV = MODE === 'onboard' ? 'HUB_ONBOARD_DID' : 'HUB_CANARY_DID';
+
 // A seeded identity, so HUB_CANARY_DID can be configured once: the hub has
 // to authorise this DID before this process starts, which a fresh keypair
 // every run makes impossible.
 const id = cfg.seed ? identityFromSeed(cfg.seed) : genIdentity();
 if (!cfg.seed) {
   console.log('警告：未設 seed，DID 每次啟動都會變，' +
-    'HUB_CANARY_DID 會失效——正式使用請設 cfg.seed');
+    `${HUB_ENV} 會失效——正式使用請設 cfg.seed`);
 }
 const box = genBoxKeys();
 const name = cfg.name || 'canary';
@@ -51,7 +64,6 @@ const log = (m) => console.log(`[${name} ${id.did}] ${m}`);
 // An assert set no honest output can satisfy, so FAIL is the only correct
 // verdict. Kept deliberately simple: a verifier that runs the DSL at all
 // gets this right.
-const IMPOSSIBLE_ASSERTS = [{ op: 'max_len', arg: 1 }];
 const UNITS = cfg.units || 2;
 const MAX_PRICE_CC = cfg.maxPriceCC || UNITS * 1.3;
 const EVERY_MS = cfg.everyMs || 8000;
@@ -103,8 +115,8 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
           contract_id: ctx.contract_id,
           requester: id.did, provider: msg.bid.provider, price_cc: msg.bid.price_cc,
           payload_box: seal(msg.bid.box_pub, ctx.payload),
-          acceptance: { method: 'judge-quorum', asserts_hash: assertsHash(IMPOSSIBLE_ASSERTS) },
-          asserts: IMPOSSIBLE_ASSERTS,
+          acceptance: { method: 'judge-quorum', asserts_hash: assertsHash(ASSERTS) },
+          asserts: ASSERTS,
           verifier_pool: ctx.pool.map((v) => v.did),
           verifier_pool_hash: panelLib.poolHash(ctx.pool.map((v) => v.did)),
           panel_seed_cp: ctx.seedCp,
@@ -134,8 +146,8 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
         for (const v of ctx.panel) {
           const request = {
             contract_id: ctx.contract_id, requester: id.did, provider: ctx.provider,
-            output: msg.delivery.output, asserts: IMPOSSIBLE_ASSERTS,
-            asserts_hash: assertsHash(IMPOSSIBLE_ASSERTS),
+            output: msg.delivery.output, asserts: ASSERTS,
+            asserts_hash: assertsHash(ASSERTS),
             panel_seed_cp: ctx.seedCp,
             payload_box: seal(v.box_pub, ctx.payload),
           };
@@ -206,17 +218,22 @@ function report(contractId) {
   const ctx = open.get(contractId);
   if (!ctx || ctx.reported || !ctx.attest || !ctx.attest.length) return;
   ctx.reported = true;
-  const wrong = ctx.attest.filter((x) => x.attestation.verdict === 'PASS').length;
+  const passes = ctx.attest.filter((x) => x.attestation.verdict === 'PASS').length;
   const reportBody = {
     contract_id: contractId, issuer: id.did, provider: ctx.provider,
-    price_cc: ctx.price_cc, expected_verdict: 'FAIL',
+    price_cc: ctx.price_cc, expected_verdict: WANT,
     verifier_pool: ctx.pool.map((v) => v.did),
     verifier_pool_hash: panelLib.poolHash(ctx.pool.map((v) => v.did)),
     seed_root: ctx.seedRoot,
+    // 入門採購要把斷言集一起送出：Hub 會檢查它含確定性斷言，否則那筆錢
+    // 就是換個名目白給（登記簿 #90 的條件 i）。
+    ...(MODE === 'onboard' ? { asserts: ASSERTS } : {}),
   };
-  hub.send({ type: 'canary_result', report: reportBody,
+  hub.send({ type: REPORT_TYPE, report: reportBody,
              sig: sign(id.privateKey, reportBody), attestations: ctx.attest });
-  log(`reported ${contractId}: ${ctx.attest.length} 份裁決，${wrong} 份錯誤（投 PASS）`);
+  log(MODE === 'onboard'
+    ? `reported ${contractId}: ${ctx.attest.length} 份裁決，${passes} 份 PASS（期望 PASS）`
+    : `reported ${contractId}: ${ctx.attest.length} 份裁決，${passes} 份錯誤（投 PASS）`);
   open.delete(contractId);
 }
 
@@ -228,27 +245,30 @@ function post() {
   }
   seq += 1;
   hub.send({ type: 'list_verifiers' });
-  const taskId = `canary-${id.did.slice(-8)}-${seq}`;
+  const taskId = `${MODE}-${id.did.slice(-8)}-${seq}`;
   const contractId = `c-${taskId}`;
   const seedCp = verifierDir.next_checkpoint_seq != null
     ? verifierDir.next_checkpoint_seq : 0;
-  const payload = `canary ${seq}: decoy with unsatisfiable asserts`;
+  const payload = MODE === 'onboard'
+    ? `onboarding ${seq}: prove you can do the work (answer = sha256 of this)`
+    : `canary ${seq}: decoy with unsatisfiable asserts`;
   const task = {
     task_id: taskId, requester: id.did, units: UNITS,
     max_price_cc: MAX_PRICE_CC,
-    acceptance: { method: 'judge-quorum', asserts_hash: assertsHash(IMPOSSIBLE_ASSERTS) },
+    acceptance: { method: 'judge-quorum', asserts_hash: assertsHash(ASSERTS) },
   };
   open.set(contractId, {
     contract_id: contractId, payload, pool, seedCp, lock: verifierDir.lock,
     maxPriceCC: MAX_PRICE_CC, attest: [],
   });
   hub.send({ type: 'task', task, sig: sign(id.privateKey, task), pub: id.pub });
-  log(`posted decoy ${taskId} (${UNITS}u, max ${MAX_PRICE_CC} CC)`);
+  log(`posted ${MODE === 'onboard' ? 'onboarding task' : 'decoy'} ${taskId} ` +
+    `(${UNITS}u, max ${MAX_PRICE_CC} CC)`);
 }
 
 
 console.log(`DID ${name} ${id.did}`);
-console.log(`→ 在 Hub 設 HUB_CANARY_DID=${id.did} 後重啟 Hub，否則報告會被拒絕`);
+console.log(`→ 在 Hub 設 ${HUB_ENV}=${id.did} 後重啟 Hub，否則報告會被拒絕`);
 
 setTimeout(() => setInterval(post, EVERY_MS).unref(), 2000);
 setTimeout(post, 2500);

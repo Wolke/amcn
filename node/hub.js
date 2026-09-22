@@ -152,6 +152,31 @@ const canarySeen = new Set();  // canary contract_ids already scored
 // 成為一條免費偷懶的路（比 #38 原本那條更好，因為連換身分都不必）。
 // 這個集合可由事件流重建（見匯入處），所以它不是新的信任狀態。
 const stakeReleased = new Set();
+// #90 入門採購：Treasury 向**還沒有任何賺得紀錄**的身分購買**答案已知的工作**。
+//
+// 它是「保證金」那個問題的答案，而不是保證金的變體：保證金要求新人先有錢
+// （新身分餘額是 0，`collateral_post` 因此拒絕它——那正是 #90 的內容），
+// 擔保人要求新人先有關係（而 agent 之間沒有社會網絡，Owner 當場否決）。
+// 入門採購只要求新人**先做事**，於是 Sybil 的經濟反轉：N 個身分要拿 N 份 CC
+// 就得交付 N 份真實工作，而那不是攻擊，那是供給。模擬器量到每身分白拿由
+// 17.49 CC 變 0.00（GATE-0 候選組 8/8，但兩個限制見登記簿 #90）。
+//
+// **「答案已知」是這件事成立的硬條件**：模擬器裡 Treasury 只是消耗掉對方的
+// 產能，而真實版本若買的是做工給你看的東西，攻擊者就是每身分白拿一筆、
+// 只換了記帳名目。所以這裡只接受 `sha256_eq` 這類**確定性**斷言——發樁者
+// 自己算得出正確答案，因此「有沒有真的做」是可判的，而不是靠信任。
+const ONBOARD_DID = process.env.HUB_ONBOARD_DID || null;
+const ONBOARD_CAP_CC = Number(process.env.HUB_ONBOARD_CAP_CC || 20);
+const ONBOARD_TOTAL_CC = Number(process.env.HUB_ONBOARD_TOTAL_CC || 2000);
+const onboarded = new Map();   // did -> 已領的 CC
+// 「曾經收到過 CC」的身分。入門採購的合格條件用這個，而**不是** E_eff＝0：
+// verifier 的驗證費不進 `stats.earnedBy`（那張表只記結算的買賣雙方），所以用
+// E_eff 判斷會讓每一個 verifier 都永遠算「新人」——閘門第一次跑就是這樣露出來的
+// （負對照三本來該以「已有紀錄」被拒，卻是以「面板不足」被拒）。
+// 可由事件流重建（見匯入處），所以它不是新的信任狀態。
+const inflowSeen = new Set();
+const onboardSeen = new Set(); // 已計入的 contract_id
+let onboardSpent = 0;
 // #87 上線前的濫用預算。區網裡這些都不需要；公網上少了它們，任何人都能
 // 用連線數與註冊數把 Hub 的記憶體吃光，而且不必先證明自己是誰。
 const MAX_CONNS = Number(process.env.HUB_MAX_CONNS || 200);
@@ -181,6 +206,14 @@ const exportWindow = new Map(); // ip -> [timestamps]
 // conservation and hash-chain rules; kept separate so `receipts` stays the
 // list of things two parties signed.
 function applyPostings(kind, ref, postings) {
+  // 入門採購本身不算「曾經收到 CC」，否則第一筆就把自己的資格取消掉。
+  if (kind !== 'onboarding') {
+    for (const p of postings) {
+      if (p.amount_cc > 1e-9 && !p.account.startsWith('protocol:')) {
+        inflowSeen.add(p.account);
+      }
+    }
+  }
   const total = postings.reduce((t, p) => t + p.amount_cc, 0);
   if (Math.abs(total) > 1e-9) {
     console.error(`[hub] refusing ${kind} ${ref}: postings sum ${total} != 0`);
@@ -295,6 +328,7 @@ const REQUIRED = {
   receipt: ['receipt', 'sigs'],
   forced_settlement: ['receipt', 'provider_sig', 'evidence'],
   canary_result: ['report', 'sig'],
+  onboard_result: ['report', 'sig'],
   checkpoint_request: ['seq'],
   collateral_post: ['did', 'amount_cc', 'sig'],
   collateral_release: ['did', 'amount_cc', 'sig'],
@@ -593,6 +627,12 @@ function applySettlement(kind, receipt, sigs, evidence) {
   for (const p of receipt.postings) {
     balances.set(p.account, bal(p.account) + p.amount_cc);
     chainAppend(p.account, idx, p.amount_cc);
+    // #90：結算的分錄**不走 applyPostings**（收據是雙方簽的物件，另一條路），
+    // 所以「曾經收到過 CC」要在這裡也記一次。漏掉這裡的後果是：verifier 的
+    // 驗證費不算收入，於是每個 verifier 都永遠符合入門採購的資格。
+    if (p.amount_cc > 1e-9 && !p.account.startsWith('protocol:')) {
+      inflowSeen.add(p.account);
+    }
   }
   const req = agents.get(receipt.requester), prov = agents.get(receipt.provider);
   req.stats.paidTo.set(receipt.provider,
@@ -659,6 +699,101 @@ function handleReceipt(msg, chan) {
   }
   if (!validateSchedule(receipt, chan, ref, msg.attestations)) return;
   applySettlement('dual', receipt, sigs);
+}
+
+// 入門採購的結果（#90）。金絲雀的鏡像：金絲雀發**不可能通過**的樁來抓偷懶的
+// verifier；入門採購發**答案已知且可通過**的任務，讓還沒有紀錄的新人用一次
+// 真的交付換到它的第一筆 CC。
+//
+// 三道門，缺一不可：
+//   1. **答案是可判的**——只接受確定性斷言（`sha256_eq`），發樁者自己算得出
+//      正確答案。少了這一條，入門採購就是換個名目白給（登記簿 #90 的條件 i）。
+//   2. **面板真的判過**——與結算同一個問責標準：commit-reveal 的承諾必須在
+//      看到別人的裁決之前就送出，而且 quorum 要足。
+//   3. **收款方真的是新人**——沒有任何賺得紀錄（E_eff ≈ 0）。老手要更高上限
+//      走抵押（#65），不走這裡。
+// 另有每身分與全網兩個上限，因為這筆錢來自 Treasury 的創世補貼額度（§2.2）。
+function handleOnboardResult(msg, chan) {
+  const { report, sig, attestations } = msg;
+  const ref = report && report.contract_id;
+  if (!ONBOARD_DID) return fail(chan, 'onboarding not enabled on this hub', ref);
+  const issuer = agents.get(report.issuer);
+  if (!issuer || report.issuer !== ONBOARD_DID) {
+    return fail(chan, 'onboarding report from an unauthorised issuer', ref);
+  }
+  if (!verify(issuer.pub, report, sig)) {
+    return fail(chan, 'bad onboarding report signature', ref);
+  }
+  if (onboardSeen.has(ref)) return fail(chan, 'onboarding already paid', ref);
+  if (report.expected_verdict !== 'PASS') {
+    return fail(chan, 'onboarding task must expect PASS (its answer is known)', ref);
+  }
+  // 條件 (i)：只接受確定性斷言。`contains`／`max_len` 這類弱斷言連「有沒有做」
+  // 都判不出來，而那正是整個機制的支點。
+  const asserts = Array.isArray(report.asserts) ? report.asserts : [];
+  if (!asserts.some((a) => a && a.op === 'sha256_eq')) {
+    return fail(chan, 'onboarding task needs a deterministic assert ' +
+      '(sha256_eq); a task whose answer cannot be checked cannot price identity', ref);
+  }
+  const prov = agents.get(report.provider);
+  if (!prov) return fail(chan, 'onboarding payee is not registered', ref);
+
+  // 條件 (iii)：收款方必須從來沒有收到過任何 CC。
+  //
+  // 用「曾經收到過 CC」而不是 E_eff＝0：verifier 的驗證費不進 `stats.earnedBy`
+  // （那張表只記結算的買賣雙方），所以 E_eff 會讓每個 verifier 都永遠算新人。
+  // 這個錯誤是閘門第一次跑就露出來的，而它的後果是「已經在賺錢的帳戶可以
+  // 反覆領入門採購」——被每身分上限擋住，但語意是錯的。
+  if (inflowSeen.has(report.provider)) {
+    return fail(chan, 'onboarding is for identities that have never been paid ' +
+      'anything; 已經在賺錢的帳戶要更高上限請走抵押（#65）', report.provider);
+  }
+  const already = onboarded.get(report.provider) || 0;
+  const price = Number(report.price_cc);
+  if (!(price > 0)) return fail(chan, 'onboarding price must be positive', ref);
+  if (already + price > ONBOARD_CAP_CC + 1e-9) {
+    return fail(chan, `onboarding cap for ${report.provider.slice(0, 18)}: ` +
+      `${already.toFixed(2)} + ${price} > ${ONBOARD_CAP_CC}`, ref);
+  }
+  if (onboardSpent + price > ONBOARD_TOTAL_CC + 1e-9) {
+    return fail(chan, `onboarding allowance exhausted ` +
+      `(${onboardSpent.toFixed(2)}/${ONBOARD_TOTAL_CC})`, ref);
+  }
+
+  // 條件 (ii)：面板真的判過，而且是可問責的 PASS。
+  const panelDids = panel.deriveDids(report.verifier_pool, ref, report.seed_root);
+  if (panel.poolHash(report.verifier_pool) !== report.verifier_pool_hash) {
+    return fail(chan, 'onboarding pool does not match its pinned hash', ref);
+  }
+  const passers = new Set();
+  for (const e of attestations || []) {
+    const a = e && e.attestation;
+    if (!a || a.contract_id !== ref || a.verdict !== 'PASS') continue;
+    const v = agents.get(a.verifier);
+    if (!hasRole(v, 'verifier') || !panelDids.includes(a.verifier)) continue;
+    if (!verify(v.pub, a, e.sig)) continue;
+    if (typeof e.nonce !== 'string' || sha256(canon(a) + e.nonce) !== e.commitment) continue;
+    if (!verify(v.pub, { contract_id: ref, verifier: a.verifier,
+                         commitment: e.commitment }, e.commit_sig)) continue;
+    passers.add(a.verifier);
+  }
+  if (passers.size < 2) {
+    return fail(chan, `onboarding needs 2 accountable PASS attestations, ` +
+      `got ${passers.size}`, ref);
+  }
+
+  onboardSeen.add(ref);
+  if (!applyPostings('onboarding', ref,
+        [{ account: TREASURY, amount_cc: -price },
+         { account: report.provider, amount_cc: price }])) return;
+  onboarded.set(report.provider, +(already + price).toFixed(4));
+  onboardSpent = +(onboardSpent + price).toFixed(4);
+  console.log(`[hub] ONBOARD ${report.provider.slice(0, 18)}: ${price} CC ` +
+    `（答案已知的任務、${passers.size} 位 verifier 判 PASS；` +
+    `累計 ${onboarded.get(report.provider)}/${ONBOARD_CAP_CC}、` +
+    `全網 ${onboardSpent}/${ONBOARD_TOTAL_CC}）`);
+  chan.send({ type: 'onboard_paid', contract_id: ref, provider: report.provider,
+              price_cc: price, total_cc: onboarded.get(report.provider) });
 }
 
 // A canary result: the issuer reports how the panel judged a decoy whose
@@ -1025,6 +1160,9 @@ function buildExport({ includeRawLog = EXPORT_RAWLOG } = {}) {
     stakes: Object.fromEntries(stakes),
     canary_stats: Object.fromEntries(canaryStats),
     canary_scored: [...canarySeen],
+    // #90：誰領過入門採購、領了多少。它是 Treasury 的支出，所以必須可稽核。
+    onboarded: Object.fromEntries(onboarded),
+    onboard_paid: [...onboardSeen],
     events,
     hub_pub: hubId.pub,
     // 取匯出的時刻（#82）。信用額度含年齡項，而重建一定發生在匯出**之後**，
@@ -1235,12 +1373,26 @@ if (process.env.HUB_IMPORT) {
   for (const c of r.canaryScored) canarySeen.add(c);
   // #38：曾經取回押注的身分由事件流認定，不是由匯出的摘要欄位認定——否則
   // 一個少了旗標的匯出會讓它重新進 pool。
+  // #90 同理：「曾經收到過 CC」也從事件流重建，否則重啟之後每個人都又變成新人。
   for (const e of (ex.events || [])) {
-    if (e.kind !== 'stake_release') continue;
-    for (const p of (e.postings || [])) {
-      if (p.account !== STAKE && p.amount_cc > 0) stakeReleased.add(p.account);
+    if (e.kind === 'stake_release') {
+      for (const p of (e.postings || [])) {
+        if (p.account !== STAKE && p.amount_cc > 0) stakeReleased.add(p.account);
+      }
+    }
+    if (e.kind !== 'onboarding') {
+      for (const p of (e.postings || [])) {
+        if (p.amount_cc > 1e-9 && !p.account.startsWith('protocol:')) {
+          inflowSeen.add(p.account);
+        }
+      }
     }
   }
+  for (const [did, cc] of Object.entries(ex.onboarded || {})) {
+    onboarded.set(did, cc);
+    onboardSpent = +(onboardSpent + cc).toFixed(4);
+  }
+  for (const c of (ex.onboard_paid || [])) onboardSeen.add(c);
   for (const c of r.settledIds) settledIds.add(c);
   // #77：得標集合與觀測計數器要跟著回來，否則成交率的分子分母不同生命期。
   for (const c of (ex.awarded || [])) market.contracts.add(c);
@@ -1592,6 +1744,7 @@ transport.listen({
         case 'receipt': handleReceipt(msg, chan); break;
         case 'forced_settlement': handleForced(msg, chan); break;
         case 'canary_result': handleCanaryResult(msg, chan); break;
+        case 'onboard_result': handleOnboardResult(msg, chan); break;
         case 'collateral_post': {
           // 自願鎖入 CC 換取額度上限。必須是自己的正餘額——不能用信用額度
           // 去抵押信用額度，那等於無擔保放大，正是折扣率要避免的事。
