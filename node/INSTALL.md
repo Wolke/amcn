@@ -391,23 +391,60 @@ panel 與供給端自己重新註冊（#40），帳本從快照＋尾檔接續�
 文字送給任何連得上的人。現在要 `HUB_EXPORT_RAWLOG=1` 才有，而需要掃流量的閘門
 自己設它。
 
-### 還在你手上的兩件
+### 搬到公網可達的主機（一個指令）
 
-**1. 公網可達位址。** 兩條路，而我建議前者：
+```bash
+cd node
+./service/deploy-hub.sh user@1.2.3.4 --dry-run   # 先看它會做什麼
+./service/deploy-hub.sh user@1.2.3.4             # 搬過去並啟動
+./service/deploy-hub.sh user@1.2.3.4 --status    # 之後看狀態
+```
 
-- **把排序器放到一台便宜的 VPS，家裡這台繼續跑供給端與 verifier。** 排序器搬家
-  是設計內的事（`HUB_SEED` 讓 `hub did` 跨機器不變，#14 就是為了這個），而這樣
-  家用 IP 不會暴露、頻寬與重啟也不綁在你的桌機上。
-- **家用寬頻 port forward**：最快，但那是把一個沒有速率限制以外防護的服務直接
-  暴露在你家的 IP 上。真的要做，至少先確認上面那張表的值符合你的機器。
+六步：檢查 SSH 與 OS → 裝 Node ≥ 20（Ubuntu 24.04 內建是 18.x，太舊，走
+NodeSource）→ `git clone`（repo 是公開的，所以遠端不需要任何憑證）→ **帶著
+`configs/.hub-seed` 與帳本過去**（那兩個不在 git 裡，`.gitignore` 把它們當私鑰）
+→ **遠端先自己驗那本帳**再啟動（不驗就啟動的排序器比起不來的更糟）→ 裝 systemd
+服務（`Restart=always`，預設就是 `AMCN_TRANSPORT=secure`）。
 
-不建議一開始就用 TLS 終結型的隧道（Cloudflare 之類）：`http` 傳輸是長連 chunked
+最後它會**比對遠端與本機的 `hub did` 是否一致**並直接說結論。那是整件事的重點：
+`hub did` 由 `.hub-seed` 決定，所以帶著它過去，對已經釘住你的人來說 Hub 只是換了
+位址，沒有人要改設定（#14 讓 `HUB_SEED` 存在就是為了這個）。
+
+**搬家這條路先在不花錢的地方驗過**：`node chaos-run.js scenarios/hub-moves.json`
+——殺掉 Hub、換埠重啟（同 seed、從匯出重建、發布新的簽署 rendezvous 記錄），
+沒有人改任何設定檔，實測 **3/3**，交易在 T+88s 恢復並續跑 47 筆。
+
+**為什麼是搬排序器而不是家用 port forward**：家用寬頻最快，但那是把服務直接暴露
+在你家的 IP 上。排序器搬家是設計內的事，而搬完之後家裡那台只跑供給端與 verifier
+——它們用 `hubPin` 跟著新位址走，家用 IP 不會出現在任何地方。
+
+### 位址輪替：用你的公開 repo 當 rendezvous
+
+`lib/rendezvous.js` 支援 `https://` 的記錄，所以輪替機制可以是**一次 commit**：
+
+```bash
+HUB_RENDEZVOUS=rendezvous.json node hub.js     # Hub 自己週期性寫出簽署記錄
+# 把 rendezvous.json commit 進公開 repo，客戶端設定：
+#   "rendezvous": "https://raw.githubusercontent.com/<你>/<repo>/main/rendezvous.json"
+#   "hubPin": "did:demo:…"
+```
+
+承載記錄的主機（GitHub）**不受信任**：它能扣住或給舊的，但無法冒充——記錄帶著
+Hub 的簽章，客戶端拿 `hubPin` 核對。記錄預設 10 分鐘就算過期
+（`AMCN_RENDEZVOUS_MAX_AGE_MS`），靜態 IP 的情況要把它調長。
+
+### 不要走的那條路
+
+**不要用 TLS 終結型的隧道**（Cloudflare 之類）：`http` 傳輸是長連 chunked
 NDJSON，中間任何緩衝都會讓它的即時性失效，而那個失敗模式很難從錯誤訊息看出來。
+要加密就用 `AMCN_TRANSPORT=secure`（它加密的是 AMCN 自己的信封，不需要中間人）。
 
-**2. repo 目前是 private。** 陌生人 clone 不到，而 `JOIN.md` 的可信度恰恰來自
-「你可以自己驗帳」——那需要看得到程式。公開等於把設計、缺陷登記簿與證據包一起
-公開；我認為那是優勢而不是風險（登記簿裡那 88 條是**已經被找出來並修掉**的東西，
-而不是被藏起來的東西），但這是你的決定。
+### repo 已經公開（2026-09-22）
+
+https://github.com/Wolke/amcn ，Apache-2.0。所以遠端主機 `git clone` 不需要任何
+憑證，而 `JOIN.md` 的可信度（「你可以自己驗帳」）成立——那需要看得到程式。
+公開前掃過：追蹤檔案與 137 個 commit 的完整歷史都沒有憑證字串；三個腳本原本把
+開發機的內網位址寫成預設值，已改成 `127.0.0.1`。
 
 ### 還沒有人跑過的那一條（#86）
 
