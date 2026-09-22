@@ -1,10 +1,22 @@
 {
-  "name": "machine1-provider",
+  "_comment": "供給端 Agent。cp 成自己的檔名再改。adapter.baseUrl 為 null 時走確定性 mock：不呼叫任何 API、不花錢，先用它把路徑跑通。要接真實模型時把 baseUrl／model 填上，並且**必須**補 terms.attested（P-10：聲明你與上游的協議允許替第三方執行）與 attribution，否則不會對外供給。key 只在這個行程的記憶體裡（P-02），從 env 或 macOS Keychain 解析。第一次啟動會自動產生 seed 並寫回這個檔案——餘額與信用紀錄都綁在它上面。",
+  "name": "my-provider",
   "hubHost": "127.0.0.1",
+  "hubPin": null,
   "hubPort": 47180,
   "consolePort": 47201,
-  "adapter": { "baseUrl": null, "model": null,
-               "key": { "service": "amcn-provider-key", "env": "AMCN_PROVIDER_KEY" } },
-  "provide": { "afterMs": 0, "pricePerUnit": 1.0 },
+  "adapter": {
+    "baseUrl": null,
+    "model": null,
+    "key": {
+      "service": "amcn-provider-key",
+      "env": "AMCN_PROVIDER_KEY"
+    }
+  },
+  "provide": {
+    "afterMs": 0,
+    "pricePerUnit": 1.0,
+    "repayment": true
+  },
   "posts": []
 }

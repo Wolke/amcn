@@ -1,17 +1,25 @@
 # AMCN Phase 1 閉環原型
 
-整合計畫（`docs/evaluation/final-architecture.md` §5）W4–W8 里程碑的可執行版：三個獨立 OS 進程的 Agent＋一個 Coordination Hub，跑通 SDD §27 閉環並自動驗收 8 項判準。零第三方相依（Node.js ≥ 20）。
+整合計畫（`docs/evaluation/final-architecture.md` §5）W4–W8 里程碑的可執行版：三個獨立 OS 進程的 Agent＋一個 Coordination Hub，跑通 SDD §27 閉環並自動驗收 26 項判準。零第三方相依（Node.js ≥ 20）、協定 v7。
+
+**要開始用而不是讀程式**：單機 `./quickstart.sh`、加入別人的網路看 [JOIN.md](JOIN.md)、自己開一個網路看 [INSTALL.md](INSTALL.md)。
 
 ## 執行
 
 ```bash
 cd node
-node demo.js              # 約 15 秒，21 項驗收（腳本驅動，回歸閘門）
+node demo.js              # 約 15 秒，26 項驗收（腳本驅動，回歸閘門）
 node demo-autonomous.js   # 約 20 秒，12 項驗收（W8：全程零人工）
 node demo-canary.js       # 約 30 秒，6 項驗收（W9：金絲雀沒收偷懶者押注）
 node demo-rebuild.js      # 約 25 秒，7 項驗收（W10：第二排序器重建帳本）
 node demo-transport.js    # 約 35 秒，7 項驗收（W10：第二個 ITransport，兩傳輸同一本帳）
 node demo-reconnect.js    # 約 40 秒，8 項驗收（W10 預演：殺掉 Hub，網路自己回來）
+node demo-forfeit.js      # 約 70 秒，14 項驗收（#38：押注的沒收與退還是一個 2×2）
+
+# 不是閘門，是給人用的：
+./quickstart.sh           # 單機起一個真的網路並留著（status / stop）
+node verify-ledger.js <匯出.json> --pin did:demo:…   # 自己驗一本帳
+node pilot-doctor.js <hub ip>                        # 一個指令回答「為什麼連不上」
 
 # 任一支都可與跑中的試點並存：
 DEMO_PORT_OFFSET=100 node demo.js
@@ -20,7 +28,7 @@ DEMO_PORT_OFFSET=100 node demo.js
 AMCN_TRANSPORT=http node demo.js
 ```
 
-`AMCN_TRANSPORT` 選 `tcp`（預設）或 `http`。所有進程必須一致——混用時雙方都會明確拒絕並印出原因，不會靜默卡住。
+`AMCN_TRANSPORT` 選 `tcp`（預設）、`http`、`secure`（加密＋身分認證，連線要離開區網時用）或 `chaos`（故障注入，只給情境用）。所有進程必須一致——混用時雙方都會明確拒絕並印出原因，不會靜默卡住。
 
 `demo.js` 用 `posts: [{atMs, ...}]` 時間表驅動，證明機制正確；`demo-autonomous.js` 沒有任何時間表與 Console 呼叫，每筆任務都來自 Agent 自行偵測額度耗盡（§20-8／§6.2）。
 
@@ -46,7 +54,7 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `lib/eeff.js` | 與 `sim/amcn_sim` 同構的 E_eff 信用公式（starter 50、風險費 6%/2%——GATE-0 掃描定案參數）＋保險池 |
 | `fake-provider.js` | 本機 key-gated OpenAI-compatible 端點，讓真 HTTP 路徑可測而不花錢 |
 | `lib/strategy.js` | FR-055 目標餘額區間＋還債排程器：`[low, high]` 預設 `[-0.3×CL, +100]`，跌破 low 則供給折價、暫停非必要消費；§20-10 平均還債時間 |
-| `lib/discovery.js` | §2.1「協議內發現與輪替」的區網部分：Hub 簽署 UDP 信標，Agent 以 `hubHost: "discover"` 自動尋找並可用 `hubPin` 釘住身分（跨機尚未驗證，見 §4 #18）|
+| `lib/discovery.js` | §2.1「協議內發現與輪替」的區網部分：Hub 簽署 UDP 信標，Agent 以 `hubHost: "discover"` 自動尋找並可用 `hubPin` 釘住身分。跨機已在三台真實機器上驗證（#18 已撤銷），廣播被訪客網路／VLAN／Wi-Fi client isolation 擋時改手填 IP；跨網段用 `lib/rendezvous.js`|
 | `lib/demand.js` | W8 無人觸發源：自有額度／需求模型，額度耗盡（UC-01 步驟 1）自動轉為任務；含 Owner 預算上限與週期相位錯開 |
 | `lib/rebuild.js` | W10 帳本重建：從匯出檔**驗證式**重構（逐筆驗簽、pubkey 自證、鏈重算、信用額度由收據重放），任何不符即拒絕。鏈條目規則與 `hub.js` 共用同一份實作 |
 | `ledger-dump.js` | 災難匯出：把 Hub 完整帳本寫成檔案 |
@@ -64,18 +72,21 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | `lib/rendezvous.js` | 跨網段的發現與輪替（§4 #45）：Hub 發布簽署的位址記錄，client 每次重連重新解析、以 `hubPin` 驗身分。承載記錄的主機不受信任——它能扣住或給舊的，但無法冒充 |
 | `lib/transport-chaos.js` | 實作 3：故障注入（`AMCN_TRANSPORT=chaos`）。包裝 tcp／http，由執行期可改的控制檔驅動：`blackhole`（寫入成功但消失、連線永不關閉）、`reset`、`latency`／`jitter`、`loss`、`freeze`（只斷入向＝對手卡死）、單向中斷。注入點在**位元組層**而非 channel 之上——否則 channel 自己的活性 ping 會繞過故障（第一版就是這樣錯的）。`AMCN_CHAOS_SEED` 讓丟包樣式可重播 |
 | `lib/transport-http.js` | 實作 2：HTTP——長連 chunked NDJSON 回應載 server→client，POST 載 client→server。刻意不選另一種 socket 方言：那會共用 TCP 的故障模型，換了等於沒換。此實作線上無連線狀態、送達以請求為單位，POST 必須自行保序（單 socket keep-alive）|
+| `quickstart.sh` | 推廣用的起步路徑：在一台機器上拉起 Hub＋3 個 Verifier＋兩個 Agent、跑完第一筆結算，然後**留著**讓人操作（發任務、查帳、重啟、備份）。與 `demo.js` 的分工是「活的網路」對「回歸閘門」|
+| `verify-ledger.js` | 參與者自己驗一本帳（§20-4 的使用者版本）：與第二個排序器啟動時用同一份 `lib/rebuild.js`——逐筆驗簽、pubkey 自證 DID、餘額由事件重放、鏈重算、額度重放、checkpoint 比對鏈頭，任何一項不符是拒絕。`--pin` 才會檢查「是誰簽的」|
+| `JOIN.md` | 可以直接轉給參與者的那份文件：三種參與方式的門檻、押注規則、CC 是什麼／不是什麼、義務、跨網段、自檢與查帳 |
 | `pilot-doctor.js` | 跨平台試點診斷（§4 #43）：`node pilot-doctor.js <hub IP>` 依序驗網段、設定檔、TCP、**AMCN 協議層**、UDP 信標，並指出第一個 FAIL。只用 node，Windows 可直接跑 |
 | `lib/log.js` | 長時間執行的時間戳（§4 #42）：hub／agent／verifier／canary／panel 的每一行加 UTC ISO-8601。包裝 console 而非逐一改呼叫端，因為斷線時最關鍵的行來自 `lib/channel.js`／`transport-*.js` |
 | `lib/invariants.js` | 六項協議不變式（Σ=0、雜湊鏈、雙簽、quorum 支撐與費率、信用上限、contract_id 唯一）＋兩項需要現場取樣的（pool 不得宣告離線者、合約不得卡住）。**連續檢查**而非結尾檢查一次——故障情境要問的是「不變式是否曾經被破壞」 |
-| `redteam.js` | W11 紅隊第一批（26 案）：先讓誠實拓撲產生真實收據與證據包，再變造它們攻擊 Hub。含兩個串謀身分對結算驗證器的直接攻擊（簽章全部有效，測的是 schedule 驗證）。每案的期望結果事先寫定，`known-open` 案**攻擊成功才是 PASS** |
+| `redteam.js` | W11 紅隊第一批（45 案，block 45／known-open 0）：先讓誠實拓撲產生真實收據與證據包，再變造它們攻擊 Hub。含兩個串謀身分對結算驗證器的直接攻擊（簽章全部有效，測的是 schedule 驗證）。每案的期望結果事先寫定，`known-open` 案**攻擊成功才是 PASS** |
 | `cl-trace.js` / `cl-compare.js` | E5 跨語言對照：`sim/fixtures/cl-flows.json` 的同一組流水分別餵模擬器與原型，逐步比對信用額度。找到 #60（原型第一天給兩倍開機信用），修後 75/75 一致 |
-| `redteam-agents.js` | W11 紅隊第二批（9 案）：對手是**參與者**——惡意 payload、不交付的 provider、承諾後沉默的 verifier。找到 #58（沉默 verifier 癱瘓結算）與 #59（殺價不交付癱瘓市場）|
+| `redteam-agents.js` | W11 紅隊第二批（13 案）：對手是**參與者**——惡意 payload、不交付的 provider、承諾後沉默的 verifier。找到 #58（沉默 verifier 癱瘓結算）與 #59（殺價不交付癱瘓市場）|
 | `chaos-run.js` / `scenarios/` | 情境執行器：自行拉起拓撲、依時間表注入故障、持續檢查不變式、輸出時間軸與 PASS/FAIL，每個子行程的 log 落地。`--seed` 讓失敗可重播。取代了原本需要人拔線的開發環節 |
 | `demo-reconnect.js` | W10 預演（8 項）：SIGKILL 掉 Hub → 同 seed 從自動匯出重啟 → 六個 client 自行重連、重新註冊、餘額延續、交易恢復，全程無人介入（§4 #40）|
 | `demo-transport.js` | W10 驗收（7 項）：同一場 `demo.js` 在兩種傳輸下 fingerprint 相同（收據／事件／餘額／額度／驗收方式全等）、混用傳輸雙方都明確拒絕 |
 | `mcp-server.js` | §23.1 需求側入口：MCP server（JSON-RPC over stdio，協議 2025-06-18），三個 tool `amcn_balance` / `amcn_publish_task` / `amcn_request_inference`。不持有任何金鑰，只經 127.0.0.1 的 Owner Console 操作本機 Agent |
 
-## Demo 自動斷言（`demo.js` 現為 21 項，下表列出其中 11 項核心判準）
+## Demo 自動斷言（`demo.js` 現為 26 項，下表列出其中 11 項核心判準）
 
 W9／W10 加進來的斷言（commit-reveal、押注託管、未來 checkpoint 抽選、contract_id 冪等、版本閘門、畸形 frame 回歸閘門、傳輸可替換）沒有列在這張表裡——以 `node demo.js` 的實際輸出為準，這裡是給第一次讀的人看的地圖。
 
@@ -136,9 +147,9 @@ Hub 因此週期性把超額退還給**本期有支出的**帳戶，按支出額
 
 - Verifier 是確定性 judge（跑 DSL asserts）：主觀任務需 LLM judge＋commit-reveal（訊息流已就位，換 verifier 內核即可）。
 - 爭議路徑只有「強制結算」一條：FAIL 後的 DISPUTED／仲裁／押金沒收未實作。
-- Verifier 無報酬 posting（違反 FR-057 精神，demo 從簡）；正式版按整合架構把驗證費列入收據。
+- ~~Verifier 無報酬 posting~~ **已修**：驗證費在收據裡逐 panel 成員分攤（實測一筆 10 CC 的任務每位 0.13 CC），其中一部分託管為押注（#28），而押注的沒收與退還規則見 `demo-forfeit.js`（#38、協定 v7）。
 - Panel seed 用「最新」checkpoint root，有 grinding 風險（評審 A-④）：正式版綁未來輪 checkpoint＋commit-reveal。
-- credit line 的 age factor 固定為 1（demo 跑秒級）；風險費率靜態二檔，正式版依 GATE-0 結論做動態定價。
+- ~~credit line 的 age factor 固定為 1~~ **已修**（#82）：年齡斜坡是 `0.5 + 0.5 × min(1, 帳齡/30天)`，所以新身分第一天的額度約 23.1 CC 而不是 46.25；demo 與情境用 `HUB_AGE_RAMP_MS=1` 壓掉它，**真實部署不要動**。風險費率仍是靜態二檔（6%/2%，GATE-0 候選組），動態定價未做。
 - 無心跳/逾時/備援重發（PROVIDER_FAILED 路徑）；Console 為唯讀 JSON，無政策編輯。
 
 ## 把 AMCN 當工具用（MCP，§23.1）

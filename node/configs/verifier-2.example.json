@@ -1,5 +1,7 @@
 {
+  "_comment": "單獨起一個 Verifier 用。多數人不需要這個檔——`node panel.js <hub ip>` 一個指令就會起 3 個並自動保存身分（configs/.panel-seed）。自己起的話：hubHost 改成 Hub 那台的 IP（或 \"discover\"），hubPin 填對方的 hub did。第一次啟動會自動產生 seed 並寫回這個檔案——押注與受測紀錄綁在它上面，換身分離開而金絲雀樣本未達標時押注不退（#38）。releaseStakeAfterMs 是收工取回押注用的（需先被金絲雀測夠），平常不要設。",
   "name": "V2",
   "hubHost": "192.168.1.10",
+  "hubPin": null,
   "hubPort": 47180
 }

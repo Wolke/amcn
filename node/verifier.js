@@ -17,9 +17,25 @@ const { genBoxKeys } = require('./lib/e2e');
 // nothing could load it — env was the only path, which also meant every
 // verifier had to be started with shell-quoted JSON (a real obstacle on
 // PowerShell, where bash's single-quote form does not work).
-const cfg = process.env.AGENT_CONFIG
-  ? JSON.parse(process.env.AGENT_CONFIG)
-  : JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
+const cfgPath = process.env.AGENT_CONFIG ? null : process.argv[2];
+const cfg = cfgPath
+  ? JSON.parse(require('node:fs').readFileSync(cfgPath, 'utf8'))
+  : JSON.parse(process.env.AGENT_CONFIG);
+// 與 agent.js 同一條（見那裡的說明）：從設定檔啟動而沒有 seed 時，產生一個
+// 並寫回去。對 verifier 這件事現在**有價**：協定 v7 之後，還沒被金絲雀測夠
+// 就換身分離開的 verifier 押注不退（#38），所以每次重啟換 DID 等於每次丟掉
+// 已經託管的押注。
+if (cfgPath && !cfg.seed) {
+  cfg.seed = `${cfg.name || 'verifier'}-${require('node:crypto').randomBytes(12).toString('hex')}`;
+  try {
+    require('node:fs').writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n');
+    console.log(`[amcn] 已為 ${cfgPath} 產生固定身分 seed（押注與受測紀錄都綁在` +
+      '這個身分上，請備份也請不要外流）。');
+  } catch (e) {
+    console.error(`[amcn] 警告：無法把 seed 寫回 ${cfgPath}（${e.message}）——` +
+      '重啟後押注會留在舊 DID 上，而未達金絲雀樣本門檻的棄置押注不退（#38）。');
+  }
+}
 // A verifier without a stable identity abandons its escrowed stake on
 // every restart (§4 #28), which is the same hole as #17 wearing a
 // different hat — and it would make the stake unenforceable by simply

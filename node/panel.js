@@ -41,8 +41,30 @@ const HUB_PIN = process.env.AMCN_HUB_PIN || null;
 const PORT = Number(portArg || 47180);
 const SIZE = Number(sizeArg || 3);
 // AMCN_PANEL_SEED keeps verifier identities stable across restarts. Without
-// it each restart abandons the panel's escrowed stake (§4 #17/#28).
-const SEED = process.env.AMCN_PANEL_SEED || null;
+// it each restart abandons the panel's escrowed stake (§4 #17/#28) — and
+// since protocol v7 that is not merely untidy: a verifier that leaves before
+// the canaries have tested it enough **does not get its stake back** (#38).
+// So an unset seed is no longer a warning, it is a default we have to supply:
+// one is generated on first run and kept next to the configs. The env var
+// still wins, which is what the multi-machine runbook uses.
+const SEED_FILE = path.join(__dirname, 'configs', '.panel-seed');
+function panelSeed() {
+  if (process.env.AMCN_PANEL_SEED) return { seed: process.env.AMCN_PANEL_SEED, from: 'env' };
+  const fs = require('node:fs');
+  try {
+    const kept = fs.readFileSync(SEED_FILE, 'utf8').trim();
+    if (kept) return { seed: kept, from: 'file' };
+  } catch { /* first run */ }
+  const seed = `panel-${require('node:crypto').randomBytes(12).toString('hex')}`;
+  try {
+    fs.mkdirSync(path.dirname(SEED_FILE), { recursive: true });
+    fs.writeFileSync(SEED_FILE, seed + '\n', { mode: 0o600 });
+    return { seed, from: 'new' };
+  } catch (e) {
+    return { seed: null, from: `unwritable: ${e.message}` };
+  }
+}
+const { seed: SEED, from: SEED_FROM } = panelSeed();
 
 const major = Number(process.versions.node.split('.')[0]);
 if (major < 20) {
@@ -81,9 +103,15 @@ async function main() {
   console.log(`AMCN Verifier panel → hub ` +
     `${DISCOVER ? 'via UDP beacon' : `${HOST}:${PORT}`}, ${SIZE} verifiers` +
     (SEED ? `, seeded identities (${SEED}-V1…)` : ', ephemeral identities'));
-  if (!SEED) {
-    console.log('提示：設 AMCN_PANEL_SEED 可讓 verifier 身分跨重啟不變，' +
-      '否則每次重啟都會棄置已託管的押注（§4 #17/#28）');
+  if (SEED_FROM === 'new') {
+    console.log(`已產生本機 panel 身分並存在 ${SEED_FILE}（0600）。` +
+      '押注與受測紀錄綁在這組身分上，請備份這個檔案、也不要外流。');
+  } else if (SEED_FROM === 'file') {
+    console.log(`沿用 ${SEED_FILE} 的 panel 身分（押注與受測紀錄因此延續）。`);
+  } else if (!SEED) {
+    console.log(`提示：無法保存 panel 身分（${SEED_FROM}）——這次是臨時身分，` +
+      '重啟就會棄置已託管的押注，而未被金絲雀測夠就離開的押注不退（#38）。' +
+      '請設 AMCN_PANEL_SEED。');
   }
   console.log('（Verifier 不需要 API key、不需要模型、不參與信用）\n');
 

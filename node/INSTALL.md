@@ -1,4 +1,9 @@
-# 多台電腦跑 AMCN 試點：安裝指南
+# 多台電腦跑 AMCN：安裝指南（開一個網路的人看這份）
+
+**先看哪一份**：
+- 只想在自己一台機器上看它動起來 → `cd node && ./quickstart.sh`（一個指令，約 30 秒起一個真的網路，見 [README](README.md)）
+- 要加入**別人**已經在跑的網路 → [JOIN.md](JOIN.md)
+- 要**自己開**一個網路給別人加入 → 就是這一份
 
 目標：機器 1 跑 Hub＋Provider Agent＋3 個 Verifier，機器 2 跑 Requester Agent，跨區網完成一次「借用 → 驗收 → 結算」，然後角色互換測還債。
 
@@ -63,9 +68,9 @@ cp configs/provider.example.json configs/provider.json
 AMCN_PROVIDER_KEY='sk-test-anything' node agent.js configs/provider.json
 ```
 
-看到 `registered, dynamic credit line 46.3 CC` 和 `now providing at 1 CC/unit` 即成功。
+看到 `registered, dynamic credit line 23.1 CC` 和 `supply armed at 1 CC/unit` 即成功。
 
-（46.3 不是錯誤：starter 是 50 CC，但全新帳號沒有成交紀錄，`lib/eeff.js` 的 `creditLine` 會乘上 quality 係數 `0.25 + 0.75 × 0.9 = 0.925`——那個 0.9 是零歷史時的 completion-rate prior，所以 `50 × 0.925 = 46.25`。跑出第一批成交後這個數字會上升。）
+（23.1 不是錯誤，而且它**不是**舊版文件寫的 46.3。兩個係數相乘：starter 50 CC × 新戶品質係數 0.925（`0.25 + 0.75 × 0.9`，那個 0.9 是零歷史時的 completion-rate prior）× **年齡斜坡**。年齡斜坡是 `0.5 + 0.5 × min(1, 帳齡/30天)`（#60／#82），所以第一天只有一半：`50 × 0.925 × 0.5 = 23.1`，30 天後才走到約 46.25。**這是刻意的**——全新身分拿不到成熟額度，是 Sybil 那一面的第一道門（#50）。所有 demo 與情境把斜坡壓成 1ms（`HUB_AGE_RAMP_MS`）才看得到成熟值，真實部署不要動它。跑出成交之後這個數字會隨紀錄與對手多樣性上升。）
 
 ## 2. 機器 2：Requester
 
@@ -89,7 +94,7 @@ node agent.js configs/requester.json
 
 注意 Hub 的身分目前每次重啟都會換（見第 8 節），所以 Hub 重開後 `hubPin` 要跟著更新。
 
-看到 `registered, dynamic credit line 46.3 CC` 表示已跨機連上 Hub（同樣的 0.925 新戶係數，見步驟 1d）。
+看到 `registered, dynamic credit line 23.1 CC` 表示已跨機連上 Hub（同樣的新戶係數×年齡斜坡，見步驟 1d）。
 
 ## 3. 發第一筆任務（在機器 2）
 
@@ -241,14 +246,72 @@ node agent.js configs\provider.json
 
 ## 8. 安全注意（試點範圍）
 
-- Hub 綁 `0.0.0.0` 只該在**受信任的區網**做；傳輸層目前無 TLS（訊息本身有簽章、payload 有 E2E 加密，但 metadata 是明文）。不要暴露到公網。兩種傳輸實作（`AMCN_TRANSPORT=tcp|http`）都沒有 TLS——`http` 是明文 HTTP，不是 HTTPS。
+- Hub 綁 `0.0.0.0` 只該在**受信任的區網**做。`tcp`（預設）與 `http` 兩個傳輸實作都沒有加密——訊息本身有簽章、payload 有 E2E 加密，但信封是明文（誰跟誰、多少錢、什麼時候），而 `http` 是明文 HTTP 不是 HTTPS。**連線要離開區網就換 `AMCN_TRANSPORT=secure`**（#44）：臨時 X25519 → HKDF → AES-256-GCM，臨時金鑰由 Ed25519 身分簽章、以 DID 為信任錨（不是 TLS，也沒有 CA）。每一台都要設，並用 `AMCN_SECURE_SEED` 給自己一個穩定的通道身分、`AMCN_SECURE_PIN` 指定只跟誰講話。它防的是路徑上的第三方；**防不了 Hub 本身**——Hub 看得到 metadata 是它的工作，那一層靠的是簽章與 payload E2E。閘門：`demo-transport.js` 三種實作跑出同一本帳。
 - Console（47201/47202）只綁 localhost，這是刻意的——它是 Owner 的控制面。
 - **Verifier panel 與交易雙方應在不同機器**（第 6 節）。同機 panel 使 2-of-3 quorum 的獨立性只存在於協議層（§4 #31）。
 - API key 永遠只在 agent 進程的機器上；試點時可用 `sk-test-anything` 假 key 跑 mock adapter，完全不花錢。
 
 ## 9. 已知限制（試點範圍內會撞到的）
 
-- **持久化要自己開，預設是關的**（§4 #17 已修，但不是自動生效）。Hub 帳本仍在記憶體：要活過重啟，啟動時就得設 `HUB_DUMP_PATH`（自動匯出）並在下次啟動設 `HUB_IMPORT`（見第 1 節）。Agent／Verifier／Canary 的身分同理——設定檔沒有 `seed` 欄位時每次啟動都 `genIdentity()` 產生**新 DID**，範本也沒有預設值。被棄置的負餘額身分會在帳上留下永不償還的洞，所以正式跑試點前，每個角色都該有固定的 `seed`。keystore 只保管 API key，不保管身分。
+- **Hub 的持久化要自己開，預設是關的**（§4 #17）。帳本在記憶體：要活過重啟，啟動時就得設 `HUB_DUMP_PATH`（週期快照＋每筆變動即時附加的 `.tail`）並在下次啟動設 `HUB_IMPORT`（見第 1 節）。**身分這一側已經自動了（2026-09-22）**：以設定檔路徑啟動而檔裡沒有 `seed` 時，`agent.js`／`verifier.js` 會產生一個並**寫回那個檔案**；`panel.js` 則把 panel 的身分存成 `configs/.panel-seed`（0600）。用 `AGENT_CONFIG` 環境變數啟動時**不會**這樣做——所有 demo 與情境走那條路，它們刻意要每次都是新身分。所以現在要注意的是反過來的事：**那些設定檔與 seed 檔等同私鑰**，要備份、不要外流、不要放進 git（`.gitignore` 已經排除 `configs/*.json` 與 `.panel-seed`）。舊的設定檔如果沒有 `seed`，補一次就好。
 - **傳輸層無 TLS**。訊息有簽章、payload 有 E2E 加密，但 metadata 是明文（見第 8 節）。兩種 `AMCN_TRANSPORT` 實作都一樣，`http` 是明文 HTTP。
 - **升級必須所有機器同時做**（§4 #33 已修：協議有版本欄位，混版是拒絕而非崩潰）。`git pull` 後請把**每一台**的 Hub 與 Agent 都重啟，不要只更新其中一台——版本不符的 frame 會被丟棄並記錄 `[wire] rejected ...: protocol v...`，功能上等於那台不存在。
 - **`AMCN_TRANSPORT` 每台都要一致**。不一致時雙方都會印出拒絕原因（第 7 節），但網路不會運作。
+
+## 10. 開一個網路要負責的事（營運方視角）
+
+Hub 不是信任根（§2.2），但它是**唯一知道所有出價的人**，而且它掛掉時沒有人能結算。
+所以開網路的人要負責的三件事：
+
+### 10a. 備份與還原
+
+```bash
+# 啟動時就設好，兩者一起用
+HUB_SEED='一個你會保管的字串' HUB_DUMP_PATH=out/ledger.json HUB_BIND=0.0.0.0 node hub.js
+```
+
+- `HUB_SEED` 決定 Hub 的 DID。**丟了它，所有釘住你的人都要改設定**。
+- `HUB_DUMP_PATH` 寫的是快照 `ledger.json` ＋ 即時尾檔 `ledger.json.tail`。
+  **兩個都要備份**——只留快照會少掉最近那一段，而那正是崩潰時最想要的（#74）。
+- 還原：`HUB_IMPORT=out/ledger.json node hub.js`。匯入會**驗證整份匯出**
+  （逐筆驗簽、鏈重算、額度重放、checkpoint 比對），不符就拒絕啟動而不是帶著錯的帳開始服務。
+- 還原前先自己驗一次，不必等 Hub：
+  ```bash
+  node verify-ledger.js out/ledger.json --pin did:demo:<你的 hub did>
+  ```
+
+### 10b. 要不要開金絲雀（決定 verifier 會不會被抽查）
+
+沒有金絲雀時，偷懶的 verifier（不看斷言就投 PASS）沒有任何成本，而押注沒收
+與 #38 的「早退不退押注」都要靠它的樣本數才會啟動。
+
+```bash
+# 1) 產生發樁者的身分（它會花 Treasury 的錢，所以由營運方授權）
+HUB_CANARY_DID=did:demo:<canary 的 did> … node hub.js
+# 2) 另一個行程跑發樁者
+AGENT_CONFIG='{"hubPort":47180,"name":"canary","seed":"<同一個 seed>","everyMs":60000,"units":2}'   node canary.js
+```
+
+閘門：`node demo-canary.js`（偷懶者被沒收、誠實者分文未失）與 `node demo-forfeit.js`
+（未被測夠就離線押注不退、被測夠者可取回）。
+
+### 10c. 回流：protocol 帳戶不是只進不出
+
+`protocol:treasury`／`protocol:insurance` 只收不付時，它們持有的每一塊 CC 都是永久
+借出去的信用——小網路的結局是所有人貼著上限、市場停住（實測 40 分鐘後 122.53 CC
+卡在 protocol 帳戶裡）。Hub 因此週期性把超額退還給**本期有支出的**帳戶：
+
+| 環境變數 | 預設 | 說明 |
+|---|---|---|
+| `HUB_REBATE_MS` | 60000 | 檢查週期 |
+| `HUB_INSURANCE_TARGET_FRAC` | 0.06 | 保險池目標 ＝ 曝險 × 此值；設 0 關閉 |
+| `HUB_TREASURY_RESERVE_CC` | 5 | Treasury 保留額（供金絲雀與啟動補貼）|
+| `HUB_REBATE_MIN_CC` | 0.05 | 低於此金額不動作 |
+
+### 10d. 招人時要講清楚的三件事
+
+1. **你的 `hub did`**（他們要拿它當 `hubPin`，否則廣播網段上任何人都能冒充你）。
+2. **`AMCN_TRANSPORT` 用哪一個**（每一台必須一致；離開區網要 `secure`）。
+3. **協定版本**（現在是 v7）。混版不會半通，而是被明確拒絕。
+
+`node/JOIN.md` 就是可以直接轉給他們的那份文件。

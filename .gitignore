@@ -13,6 +13,11 @@ node/logs/
 
 # Per-machine pilot configs (node/INSTALL.md has you cp from *.example.json).
 # They carry machine-specific IPs/ports and, once you point at a real model,
-# provider endpoints and key-service names.
+# provider endpoints and key-service names. Since 2026-09-22 they also carry
+# the `seed` that *is* the identity (agent.js/verifier.js write one back when
+# a config file has none), so these files are private keys, not preferences.
 node/configs/*.json
 !node/configs/*.example.json
+# The panel launcher's saved identity (panel.js). Same reason: the panel's
+# stake and canary record are bound to it.
+node/configs/.panel-seed

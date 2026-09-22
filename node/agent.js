@@ -27,9 +27,30 @@ const demand = require('./lib/demand');
 const panelLib = require('./lib/panel');
 const adapter = require('./adapter');
 
-const cfg = process.env.AGENT_CONFIG
-  ? JSON.parse(process.env.AGENT_CONFIG)
-  : JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'));
+const cfgPath = process.env.AGENT_CONFIG ? null : process.argv[2];
+const cfg = cfgPath
+  ? JSON.parse(require('node:fs').readFileSync(cfgPath, 'utf8'))
+  : JSON.parse(process.env.AGENT_CONFIG);
+// 從設定檔啟動而檔裡沒有 `seed` 時，產生一個並**寫回那個檔案**。
+//
+// 理由是下面那一大段註解的實務版：範本沒有 seed，所以照著安裝文件複製範本的
+// 人，每次重啟都是一個新身分——舊 DID 的餘額沒人能花、負債沒人會還，而且信用
+// 紀錄從零開始。要求每個人自己想一個隨機字串填進去是**把預設值的責任推給使用
+// 者**，而推廣時這條路上的人只會照做最短的那一步。
+//
+// 只在「以設定檔路徑啟動」時這樣做：所有 demo 與情境都走 AGENT_CONFIG 環境
+// 變數，它們刻意要每次都是乾淨的新身分（不然斷言會沿用上一次的餘額）。
+if (cfgPath && !cfg.seed) {
+  cfg.seed = `${cfg.name || 'agent'}-${require('node:crypto').randomBytes(12).toString('hex')}`;
+  try {
+    require('node:fs').writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n');
+    console.log(`[amcn] 已為 ${cfgPath} 產生固定身分 seed，身分將跨重啟不變。` +
+      '這個檔案現在等同私鑰，請備份也請不要外流。');
+  } catch (e) {
+    console.error(`[amcn] 警告：無法把 seed 寫回 ${cfgPath}（${e.message}）——` +
+      '這個行程的身分只存在於記憶體，重啟後餘額與信用紀錄都會留在舊 DID 上。');
+  }
+}
 // §4 #17 / W10「帳本匯出重建」的前半：一個會活過重啟的身分。
 // Without it every restart abandoned whatever the old DID held — this pilot
 // left a +16.52 CC balance nobody can ever spend and a -10 CC debt nobody
@@ -1130,6 +1151,18 @@ function noteProvider(did, field) {
 }
 
 const idTag = id.did.slice(-8);
+// 每個行程一個啟動標記，混進 task_id 裡。
+//
+// 為什麼需要它：`contract_id` 是 Hub 的冪等鍵（重送同一筆結算會被拒），而它
+// 由 task_id 衍生。task_id 從前是 `t-<名字>-<did 後 8 碼>-<本行程的第 N 筆>`
+// ——身分固定之後，**重啟後的第一筆任務會撞到上一輪的第一筆**，Hub 正確地
+// 回 `duplicate contract_id: already settled`，於是那筆任務靜默作廢。
+//
+// 這個 bug 在身分是一次性的時候看不見（DID 每次都變，前綴自然不同），是
+// 「設定檔沒有 seed 就自動產生一個」（#84）把它變成一般使用者會踩到的路：
+// 帳本接續 ＋ 身分延續 ＝ 每次重啟的前幾筆任務都會被拒。實測就是這樣發現的
+// （quickstart 第二次執行，第一筆任務沒有結算）。
+const runTag = Date.now().toString(36);
 let postSeq = 0;
 const pausedPosts = [];
 function postTask(post) {
@@ -1137,7 +1170,7 @@ function postTask(post) {
   hub.send({ type: 'list_verifiers' }); // refresh panel directory + lock
   const now = Date.now();
   const task = {
-      task_id: `t-${cfg.name}-${idTag}-${postSeq}`,
+      task_id: `t-${cfg.name}-${idTag}-${runTag}-${postSeq}`,
       requester: id.did,
       units: post.units,
       max_price_cc: post.maxPriceCC,

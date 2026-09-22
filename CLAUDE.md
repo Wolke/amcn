@@ -15,6 +15,14 @@
 - 設計討論必須對照 SDD §27 閉環判準與 §5.2 MVP 非目標；任何方案若破壞「Key 不離機」（P-02）或引入投機幣（P-04）即不合格。
 - 提案內的數值參數（信用額度、費率、押金）尚未定案，最終以 Phase 0 模擬 GATE-0 結果為準（final-architecture §5 W3）。
 
+## 使用者文件（推廣用，2026-09-22 新增）
+
+- `README.md` — 入口：五分鐘單機起步（`node/quickstart.sh`）、三條路徑的分流、三十秒版的機制。
+- `node/JOIN.md` — **可直接轉給參與者**：三種角色的門檻（verifier／provider／requester）、
+  押注的四條規則（#38 的沒收與退還）、CC 是什麼／不是什麼、義務、跨網段 `secure`、自檢與查帳。
+- `node/INSTALL.md` — 營運方：多機安裝、備份還原（快照＋尾檔）、金絲雀、回流、招人要講的三件事。
+- 對外說法的界線：`related-party`（#63）與「零個外部參與者」必須誠實標註，不得用關聯方數字宣稱市場。
+
 ## 程式碼
 
 - `sim/amcn_sim/` — Phase 0 經濟模擬器，純 Python stdlib（3.10+），無第三方相依。
@@ -42,8 +50,9 @@ cd sim && python3 -c "from amcn_sim.simulation import run; \
   print('首位佔比', round(r.top_holder_share*100,1), '| Treasury', round(r.treasury_cc,1))"
 
 # GATE-0 八判準（500 agents × 84 天 × 4 情境 × 3 種子，約 15 分鐘）
-#   一個種子過不算過；「不適用」不計入通過。目前 6/8，候選組（--risk-thin 0.06
-#   --risk-base 0.02 --dual-role）7/8，未過的 G8 門檻落在種子離散中間
+#   一個種子過不算過；「不適用」不計入通過。預設組 6/8；**候選組 8/8**
+#   （starter 50、風險費 6%/2%、LTV 0.5、G8 改成 verifier 留存 ≤95%），
+#   詳見 docs/evaluation/phase0-results.md 的 v3 回合
 cd sim && python3 -u -m amcn_sim.gate0
 
 # 參數掃描（starter × 風險費 × 違約率，輸出 out/sweep.csv）
@@ -63,6 +72,13 @@ cd node && node demo-rebuild.js
 
 # W10 第二個 ITransport（約 35 秒，7 項斷言：tcp 與 http 產生同一本帳）
 cd node && node demo-transport.js
+
+# 單機起一個真的網路（推廣用的第一步，約 30 秒；留著讓人操作，不是回歸閘門）
+cd node && ./quickstart.sh          # ./quickstart.sh status / stop
+
+# 自己驗一本帳（不必相信 Hub）：逐筆驗簽、餘額由事件重放、checkpoint 比對鏈頭
+cd node && node ledger-dump.js out/mine.json 127.0.0.1 47180
+cd node && node verify-ledger.js out/mine.json --pin did:demo:<hub did>
 
 # #38 押注沒收／退還 demo（約 70 秒，14 項斷言，測的是一個 2×2：
 #   離線×未被測夠 → 全額沒收；在線×被測夠 → 可取回並退出 pool；

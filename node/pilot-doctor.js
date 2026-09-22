@@ -45,15 +45,32 @@ async function main() {
       if (i.family === 'IPv4' && !i.internal) mine.push(i);
     }
   }
+  // 目標是本機時沒有「網段」可談，而第一版會因此在單機起步時報一個假的
+  // FAIL——推廣路上第一個看到的東西不該是一個不是問題的紅字。
+  const selfTarget = ['127.0.0.1', 'localhost', '::1'].includes(HOST)
+    || mine.some((i) => i.address === HOST);
   const sameNet = mine.filter((i) => netOf(i.address, i.netmask) === netOf(HOST, i.netmask));
-  say(sameNet.length > 0, '本機與 Hub 在同一網段',
-    `本機 ${mine.map((i) => i.address).join(', ') || '(無對外位址)'}` +
-    (sameNet.length ? '' : ` ← 都不在 ${HOST} 的網段：跨 VLAN／訪客網路／VPN 都會擋`));
+  if (selfTarget) {
+    say(true, 'Hub 就在本機（單機起步不需要網段檢查）',
+      `本機 ${mine.map((i) => i.address).join(', ') || '(無對外位址)'}`);
+  } else {
+    say(sameNet.length > 0, '本機與 Hub 在同一網段',
+      `本機 ${mine.map((i) => i.address).join(', ') || '(無對外位址)'}` +
+      (sameNet.length ? '' : ` ← 都不在 ${HOST} 的網段：跨 VLAN／訪客網路／VPN 都會擋`));
+  }
 
   // 3. 設定檔（若指定或找得到）：JSON 合法性與它實際指向哪
-  const cfgPath = cfgArg ||
-    ['configs/pilot-m2.json', 'configs/pilot-m1.json', 'configs/requester.json']
-      .find((f) => fs.existsSync(f));
+  // 沒有指定設定檔時，找**這台實際在用的**那一個：configs/ 下任何不是範本的
+  // .json。第一版寫死三個試點檔名，所以在別人的機器上這一節永遠跳過（而那正
+  // 是「有沒有固定 seed」最該被檢查的地方）。
+  const cfgPath = cfgArg || (() => {
+    try {
+      return fs.readdirSync('configs')
+        .filter((f) => f.endsWith('.json') && !f.endsWith('.example.json'))
+        .sort()
+        .map((f) => `configs/${f}`)[0];
+    } catch { return null; }
+  })();
   if (cfgPath) {
     let cfg = null, err = null;
     try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch (e) { err = e.message; }

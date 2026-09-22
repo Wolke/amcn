@@ -1,6 +1,8 @@
 {
-  "name": "machine2-requester",
+  "_comment": "需求端 Agent。cp 成自己的檔名再改（例：configs/my-agent.json）。hubHost 填 Hub 那台的 IP，或 \"discover\" 用 Hub 的簽署 UDP 信標自動找（廣播會被訪客網路／VLAN 擋，手填 IP 不受影響）。hubPin 填對方 Hub 啟動時印出的 hub did——不填的話，廣播網段上任何人都能冒充 Hub。第一次啟動會自動產生 seed 並寫回這個檔案：那就是你的身分，備份它、不要外流。要讓它自己偵測額度耗盡而發任務，加上 policy（見 JOIN.md 路徑 C 或 configs/pilot-m2.example.json）。",
+  "name": "my-agent",
   "hubHost": "discover",
+  "hubPin": null,
   "hubPort": null,
   "consolePort": 47202,
   "adapter": null,
