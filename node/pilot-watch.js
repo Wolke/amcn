@@ -21,7 +21,8 @@ const EVERY_S = Number(process.argv[2] || 900);
 // 另外**不要用 loopback**——在跑著試點的機器上，任何綁 127.0.0.1 的東西
 // 都會優先接走你的查詢（實測：demo 的 hub 綁上 127.0.0.1:47180，於是本機
 // 查詢全部查到它，一度看起來像試點掉了 207 筆帳）。
-const HUB = { host: process.env.PB_HUB || process.argv[3] || '192.168.50.30',
+// 預設本機（公開前的清理）：試點當時的位址留在 docs 的紀錄裡，不該當程式預設。
+const HUB = { host: process.env.PB_HUB || process.argv[3] || '127.0.0.1',
               port: Number(process.env.PB_HUB_PORT || 47180) };
 const DUMP = path.join(__dirname, 'out', 'pilot-ledger.json');
 const CONSOLES = [47201, 47203];        // 本機 m1 / m1b

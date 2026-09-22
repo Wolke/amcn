@@ -7,8 +7,8 @@
 // Agent 實際會走的那條路：同一個 transport、同一套 frame、同一個版本閘門。
 //
 // Run:  node pilot-doctor.js <hub IP> [hub port] [設定檔]
-//       node pilot-doctor.js 192.168.50.30
-//       node pilot-doctor.js 192.168.50.30 47180 configs/pilot-m2.json
+//       node pilot-doctor.js 192.168.1.10
+//       node pilot-doctor.js 192.168.1.10 47180 configs/my-agent.json
 'use strict';
 const os = require('node:os');
 const fs = require('node:fs');

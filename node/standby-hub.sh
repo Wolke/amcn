@@ -14,7 +14,8 @@ set -eu
 cd "$(dirname "$0")"
 
 SEED="${HUB_SEED:-amcn-pilot-2026-09-21}"
-SELF="${1:-192.168.50.175}"
+# 預設本機：寫死別人家的內網位址對 clone 這份 repo 的人沒有意義（公開前的清理）。
+SELF="${1:-127.0.0.1}"
 IMPORT="${2:-out/pulled/latest.json}"
 
 if [ ! -e "$IMPORT" ]; then
