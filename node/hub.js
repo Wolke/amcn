@@ -121,6 +121,10 @@ const SLASH_FRAC = Number(process.env.HUB_SLASH_FRAC || 0.10);
 const SLASH_THRESHOLD = Number(process.env.HUB_SLASH_THRESHOLD || 0.25);
 const SLASH_MIN_SAMPLES = Number(process.env.HUB_SLASH_MIN_SAMPLES || 5);
 const SLASH_MIN_FAILURES = Number(process.env.HUB_SLASH_MIN_FAILURES || 3);
+// §4 #38：離線多久才算「丟掉身分」而不是「暫時斷線」。預設同違約門檻（14
+// 天），因為兩件事問的是同一個問題——這個 DID 還會回來嗎。
+const STAKE_FORFEIT_AFTER_MS = Number(
+  process.env.HUB_STAKE_FORFEIT_AFTER_MS || DEFAULT_AFTER_MS);
 // §4 #41: how often an *unchanged* checkpoint is still kept, as a heartbeat
 // in the audit trail. Root changes are always kept; idle ticks between them
 // are not. Measured on the pilot: 1 hour idle produced 718 KB of dump made
@@ -142,6 +146,12 @@ const collateral = new Map(); // did -> CC locked in protocol:collateral
 const writtenOff = new Map();  // did -> CC absorbed by the waterfall
 const canaryStats = new Map(); // verifier did -> {seen, failed, slashed_cc}
 const canarySeen = new Set();  // canary contract_ids already scored
+// 曾經取回押注的 DID（#38）。放在這裡而**不是**放在 agent 記錄上，因為
+// `register` 會整個換掉那筆記錄——旗標掛在上面的話，斷線重連就把它清乾淨了，
+// 於是「取回押注 → 重新註冊 → 帶著乾淨的受測紀錄回到 pool，但身上零押注」
+// 成為一條免費偷懶的路（比 #38 原本那條更好，因為連換身分都不必）。
+// 這個集合可由事件流重建（見匯入處），所以它不是新的信任狀態。
+const stakeReleased = new Set();
 
 // Post a balanced set that is not a settlement (escrow, slashing). Same
 // conservation and hash-chain rules; kept separate so `receipts` stays the
@@ -264,6 +274,7 @@ const REQUIRED = {
   checkpoint_request: ['seq'],
   collateral_post: ['did', 'amount_cc', 'sig'],
   collateral_release: ['did', 'amount_cc', 'sig'],
+  stake_release: ['did', 'amount_cc', 'sig'],
   fee_quote: ['contract_id', 'requester', 'price'],
 };
 function missingFields(msg) {
@@ -1185,6 +1196,14 @@ if (process.env.HUB_IMPORT) {
   for (const [k, v] of r.stakes) stakes.set(k, v);
   for (const [k, v] of r.canaryStats) canaryStats.set(k, v);
   for (const c of r.canaryScored) canarySeen.add(c);
+  // #38：曾經取回押注的身分由事件流認定，不是由匯出的摘要欄位認定——否則
+  // 一個少了旗標的匯出會讓它重新進 pool。
+  for (const e of (ex.events || [])) {
+    if (e.kind !== 'stake_release') continue;
+    for (const p of (e.postings || [])) {
+      if (p.account !== STAKE && p.amount_cc > 0) stakeReleased.add(p.account);
+    }
+  }
   for (const c of r.settledIds) settledIds.add(c);
   // #77：得標集合與觀測計數器要跟著回來，否則成交率的分子分母不同生命期。
   for (const c of (ex.awarded || [])) market.contracts.add(c);
@@ -1247,10 +1266,43 @@ function writeOff(did) {
   return debt;
 }
 
+// §4 #38：偷懶的 verifier 原本最好的策略是「在金絲雀測夠次數之前換身分」。
+// 押注是從收入託管來的，換身分只是把它留在舊 DID 上——沒有人拿走，所以 churn
+// 幾乎不花錢。模擬器量到 2 天換一次身分就由 −0.30 轉為 +0.30 CC 的優勢
+// （c99869b），而同一支模擬器加上這條規則後 1／2／3 天 churn 的淨收益分別掉到
+// 0.72／1.81／2.86 CC，優勢全部翻回 −44 CC 以下：換得越快、賠得越多。
+//
+// 為什麼綁 `seen < SLASH_MIN_SAMPLES` 而不是一律沒收：一個已經被測夠、
+// 通過率良好的 verifier 離線是**退出**，不是規避。沒收它的押注會把押注變成
+// 罰金；#38 的判斷是「a bond you do not get back」——沒被測夠就走的人拿不回
+// 保證金，被測過的人拿得回。
+function forfeitStake(did, a, now) {
+  if (!hasRole(a, 'verifier')) return 0;
+  const held = stakes.get(did) || 0;
+  if (held <= 1e-9) return 0;
+  const st = canaryStats.get(did) || { seen: 0, failed: 0, slashed_cc: 0 };
+  if (st.seen >= SLASH_MIN_SAMPLES) return 0;   // 測夠了，押注是它的
+  const take = +held.toFixed(4);
+  stakes.set(did, 0);
+  const ok = applyPostings('stake_forfeit', `forfeit:${did}:${now}`,
+    [{ account: STAKE, amount_cc: -take }, { account: INSURANCE, amount_cc: take }]);
+  if (!ok) { stakes.set(did, held); return 0; }
+  // 記在 canary_stats 裡而不是另開一張表，是因為重建把「各 verifier 現在持有
+  // 多少押注」定義為託管減去 canary_stats 的沒收額，並用 Σ持有 = protocol:stake
+  // 交叉檢查（lib/rebuild.js）。沒收額若不落在同一個地方，重建會對不上。
+  st.forfeited_cc = +((st.forfeited_cc || 0) + take).toFixed(4);
+  canaryStats.set(did, st);
+  console.log(`[hub] STAKE FORFEIT ${did.slice(0, 18)}: ${take.toFixed(4)} CC ` +
+    `→ 保險池（離線 ${Math.round((now - a.offlineSince) / 1000)}s、` +
+    `金絲雀樣本 ${st.seen}/${SLASH_MIN_SAMPLES}）`);
+  return take;
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const [did, a] of agents) {
     if (a.online !== false || !a.offlineSince) continue;
+    if (now - a.offlineSince >= STAKE_FORFEIT_AFTER_MS) forfeitStake(did, a, now);
     if (now - a.offlineSince < DEFAULT_AFTER_MS) continue;
     if (bal(did) >= -1e-9) continue;
     writeOff(did);
@@ -1409,7 +1461,13 @@ transport.listen({
             verifiers: [...agents]
               // === true, not !== false: a verifier that has not confirmed it
             // can hear us is not eligible (#49's sibling).
-            .filter(([, a]) => hasRole(a, 'verifier') && a.online === true)
+            // 取回押注者不再進 pool（#38）：身上沒有東西可罰的驗證者無從
+            // 嚇阻。這實質上讓「取回押注」＝**結束這個 DID 的驗證生涯**——
+            // 要再驗證就得用新身分，而新身分沒有受測紀錄、也重新暴露在
+            // 「未達標就棄置 → 押注不退」那條規則下。那是刻意的：唯一不該
+            // 存在的組合是「乾淨的受測紀錄 ＋ 身上零押注」。
+            .filter(([did, a]) => hasRole(a, 'verifier') && a.online === true
+              && !stakeReleased.has(did))
               .map(([did, a]) => ({ did, pub: a.pub, box_pub: a.boxPub })),
             lock: { checkpoint_seq: latest ? latest.cp.seq : -1,
                     root: latest ? latest.cp.root : sha256('genesis') },
@@ -1503,6 +1561,59 @@ transport.listen({
           chan.send({ type: 'collateral', did: msg.did,
                       locked_cc: held - amt, credit_line: clOf(msg.did),
                       ltv: eeff.COLLATERAL_LTV });
+          break;
+        }
+        case 'stake_release': {
+          // #38 的另一半，而少了它沒收只是記帳。押注從前只進不出（託管 →
+          // 罰沒），所以「不退押注」對離開的人毫無差別——那筆 CC 早就不在它
+          // 的餘額裡了。要讓「拿不回來」有意義，必須存在**拿得回來**的情形。
+          //
+          // 退還與沒收是同一條線的兩側：金絲雀樣本達標（被測夠了）且失敗率
+          // 沒到罰沒門檻，就可以取回；沒被測夠就走的，轉入保險池。
+          //
+          // 取回即**退出 pool，而且是這個 DID 的永久退出**：一個把押注抽走還
+          // 繼續驗證的人身上沒有東西可罰，那是 pay-to-play 的反面（#28）。
+          // 重新註冊也回不去（`stakeReleased` 不掛在 agent 記錄上），因為
+          // 「乾淨的受測紀錄 ＋ 身上零押注」正是唯一不該存在的組合。要再
+          // 驗證就得用新身分——沒有受測紀錄，並重新暴露在沒收規則下。
+          const a = agents.get(msg.did);
+          if (!a || a.chan !== chan) break;
+          if (!hasRole(a, 'verifier')) { fail(chan, 'stake: not a verifier', msg.did); break; }
+          const want = Number(msg.amount_cc);
+          const held = stakes.get(msg.did) || 0;
+          if (!(want > 0)) { fail(chan, 'stake: amount must be positive', msg.did); break; }
+          // 簽的是「最多取回這麼多」（授權上限），實際動的是 min(want, held)，
+          // 因為託管是持續進行的、節點手上的數字永遠稍舊。
+          if (!verify(a.pub, { did: msg.did, amount_cc: want, stake: 'release' }, msg.sig)) {
+            fail(chan, 'stake: bad signature', msg.did); break;
+          }
+          // 樣本數先看、託管餘額後看。反過來寫的話，一個還沒託管到任何押注的
+          // 新 verifier 會拿到「nothing held」——拒絕的**理由**變成偶然的託管
+          // 時序，而真正的規則（沒被測過的不退）就從回覆裡消失了。
+          const st = canaryStats.get(msg.did) || { seen: 0, failed: 0 };
+          if (st.seen < SLASH_MIN_SAMPLES) {
+            fail(chan, `stake: released only after ${SLASH_MIN_SAMPLES} canary ` +
+              `samples (have ${st.seen}) — 沒被測過的押注不退，否則 #38 的規則` +
+              `就有一個繞道`, msg.did);
+            break;
+          }
+          if (st.seen > 0 && st.failed / st.seen >= SLASH_THRESHOLD) {
+            fail(chan, `stake: failure rate ${(st.failed / st.seen).toFixed(2)} ` +
+              `at or above the slashing threshold ${SLASH_THRESHOLD}`, msg.did);
+            break;
+          }
+          if (held <= 1e-9) { fail(chan, 'stake: nothing held', msg.did); break; }
+          const give = +Math.min(want, held).toFixed(4);
+          if (!applyPostings('stake_release', `strel:${msg.did}:${Date.now()}`,
+                [{ account: STAKE, amount_cc: -give },
+                 { account: msg.did, amount_cc: give }])) break;
+          stakes.set(msg.did, +(held - give).toFixed(4));
+          stakeReleased.add(msg.did);
+          chan.send({ type: 'stake', did: msg.did, released_cc: give,
+                      stake_cc: stakes.get(msg.did), in_pool: false });
+          console.log(`[hub] STAKE RELEASE ${msg.did.slice(0, 18)}: ` +
+            `${give.toFixed(4)} CC 退還（樣本 ${st.seen}/${SLASH_MIN_SAMPLES}、` +
+            `失敗 ${st.failed}），已退出 verifier pool`);
           break;
         }
         case 'checkpoint_request': {

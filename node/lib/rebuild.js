@@ -157,6 +157,15 @@ function rebuild(ex, opts = {}) {
         stakes.set(p.account, +((stakes.get(p.account) || 0) - p.amount_cc).toFixed(4));
       }
     }
+    // 退還把 CC 從押注帳戶送回 verifier 自己的餘額（#38 的另一半）。這一筆
+    // 的歸屬**在分錄裡**（正分錄的收款方就是它），所以不需要摘要欄位——與
+    // slash／forfeit 的 pooled 分錄不同，那兩者才要靠 canary_stats。
+    if (e.kind === 'stake_release') {
+      for (const p of e.postings) {
+        if (p.account === 'protocol:stake' || p.amount_cc <= 0) continue;
+        stakes.set(p.account, +((stakes.get(p.account) || 0) - p.amount_cc).toFixed(4));
+      }
+    }
     // A slash moves CC out of the stake account into insurance. Which
     // verifier lost it is not in the postings — the account is pooled — so
     // it comes from canary_stats below, and the two must agree.
@@ -164,9 +173,28 @@ function rebuild(ex, opts = {}) {
 
   // Stake holdings: derived from escrow minus slashing, and the account must
   // equal the sum of holdings.
+  // 兩種離開押注帳戶的路徑：被罰（slashed_cc，#27/#30）與棄權沒收
+  // （forfeited_cc，#38 的離線且未被測夠）。兩者都是 STAKE → INSURANCE 的
+  // pooled 分錄，歸屬只存在 canary_stats，所以兩個都要扣，Σ持有 才對得上。
   for (const [did, st] of Object.entries(ex.canary_stats || {})) {
-    if (st && st.slashed_cc) {
-      stakes.set(did, +((stakes.get(did) || 0) - st.slashed_cc).toFixed(4));
+    if (!st) continue;
+    const out = (st.slashed_cc || 0) + (st.forfeited_cc || 0);
+    if (out) stakes.set(did, +((stakes.get(did) || 0) - out).toFixed(4));
+  }
+  // 每一條路徑的總額也要各自對得上，不只是總和恰好平。Σ持有 = protocol:stake
+  // 抓得到「憑空宣稱沒收」，但抓不到「把一筆 slash 記成 forfeit」——那會讓一個
+  // 被罰的 verifier 看起來只是早退。兩個類別各自比對就把這件事關掉。
+  for (const [kind, field] of [['slash', 'slashed_cc'], ['stake_forfeit', 'forfeited_cc']]) {
+    const fromEvents = (ex.events || [])
+      .filter((e) => e.kind === kind)
+      .reduce((t, e) => t + (e.postings || [])
+        .filter((p) => p.account === 'protocol:insurance')
+        .reduce((u, p) => u + p.amount_cc, 0), 0);
+    const attributed = Object.values(ex.canary_stats || {})
+      .reduce((t, st) => t + ((st || {})[field] || 0), 0);
+    if (Math.abs(fromEvents - attributed) > EPS) {
+      fail(`${kind} total ${fromEvents.toFixed(4)} != canary_stats.${field} ` +
+        `${attributed.toFixed(4)} — 押注流出的歸屬與事件不一致`);
     }
   }
   const stakeSum = [...stakes.values()].reduce((t, v) => t + v, 0);

@@ -54,7 +54,10 @@ def run(n_agents: int = 500, days: int = 84, seed: int = 42,
         # 一個誠實退場的 verifier 只要待到樣本數達標就拿得回去。
         # 2026-09-21 量到每 2 天換一次身分即可完全逃掉沒收（188 → 5.7 CC），
         # 而身分是免費的（#50），所以那條路沒有成本。
-        stake_forfeit_on_churn: bool = False,
+        # **2026-09-22 預設改為 True**：原型已實作同一條規則（`stake_forfeit`
+        # 事件，協定 v7 另附退還路徑），模擬器要模的是現行協定而不是修法前的
+        # 版本。設為 False 可重現修法前的對照（那組 A／B 就是這樣量的）。
+        stake_forfeit_on_churn: bool = True,
         # 需求枯竭：第 N 天之後全網需求掉到 20%。要驗「沒人發任務時會怎樣」
         # 就得先造出那個狀況——這正是「假設沒有人想發任務」那個問題。
         drought_day: int = 0,

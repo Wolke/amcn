@@ -97,7 +97,11 @@ const hmac = (key, s) =>
 // v5: collateral_post / collateral_release, and the credit line takes a
 // collateral term with a haircut (#65). A v4 hub would ignore the messages
 // entirely and the client would wait for an answer that never comes.
-const PROTOCOL_VERSION = 6;   // v6：checkpoint 不再攜帶 heads（#41）
+// v7: stake_release（#38）。押注從前只進不出，所以「不退押注」在原型裡沒有
+// 對照面；v7 加上退還路徑（被測夠且通過率過關者可取回，取回即退出 pool）。
+// 與 v5 同一個理由要升版：v6 的 Hub 會完全忽略這個訊息，而送出方會等一個
+// 永遠不會來的答覆。
+const PROTOCOL_VERSION = 7;   // v7：stake_release（#38）
 
 module.exports = {
   genIdentity, identityFromSeed, canon, sign, verify, sha256, hmac,

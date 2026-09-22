@@ -80,9 +80,28 @@ const hub = stampPeerSends(transport.dialLazy(() => discovery.resolveHubTarget(c
         break;
       case 'verify_request': kernel.onVerifyRequest(msg); break;
       case 'reveal_request': kernel.onRevealRequest(msg); break;
+      // #38：取回託管的押注（被測夠且通過率過關才會准）。取回即退出 pool，
+      // 所以這是「收工」的動作，不是資金調度。
+      case 'stake':
+        log(`stake released ${msg.released_cc} CC, still escrowed ` +
+            `${msg.stake_cc} CC, in_pool=${msg.in_pool}`);
+        break;
+      case 'error':
+        log(`hub refused: ${msg.why}`);
+        break;
     }
   },
 }));
+
+// 退還請求由節點自己發起（Hub 不會替人決定收工）。簽的是授權上限，實際退還
+// 的是 min(上限, 託管餘額)——託管持續進行，節點手上的數字永遠稍舊。
+if (cfg.releaseStakeAfterMs > 0) {
+  setTimeout(() => {
+    const body = { did: id.did, amount_cc: cfg.releaseStakeMaxCc || 5, stake: 'release' };
+    hub.send({ type: 'stake_release', ...body, sig: sign(id.privateKey, body) });
+    log('requested stake release');
+  }, cfg.releaseStakeAfterMs).unref();
+}
 
 kernel = require('./lib/verifier-kernel').create(
   { id, box, log, send: (m) => hub.send(m), cfg });

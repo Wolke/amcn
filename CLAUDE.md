@@ -64,6 +64,11 @@ cd node && node demo-rebuild.js
 # W10 第二個 ITransport（約 35 秒，7 項斷言：tcp 與 http 產生同一本帳）
 cd node && node demo-transport.js
 
+# #38 押注沒收／退還 demo（約 70 秒，14 項斷言，測的是一個 2×2：
+#   離線×未被測夠 → 全額沒收；在線×被測夠 → 可取回並退出 pool；
+#   離線×被測夠 → 押注不動；在線×未被測夠 → 取回被拒）
+cd node && node demo-forfeit.js
+
 # W10 拔線預演（約 40 秒，8 項斷言：殺掉 Hub 後全網自行重連、帳延續）
 cd node && node demo-reconnect.js
 
@@ -117,8 +122,9 @@ cd node && node chaos-run.js scenarios/hub-equivocates-panel.json
 cd node && node chaos-run.js scenarios/panel-blackhole.json
 cd node && node chaos-run.js scenarios/*.json
 
-# W11 紅隊第一批（約 55 秒，43 案：協議層攻擊＋串謀結算、排序器 equivocation、偽章 checkpoint）
-#   目前 block 43、known-open 0
+# W11 紅隊第一批（約 55 秒，45 案：協議層攻擊＋串謀結算、排序器 equivocation、
+#   偽章 checkpoint、押注退還的角色與連線綁定）
+#   目前 block 45、known-open 0
 cd node && node redteam.js
 
 # W11 紅隊第二批（約 40 秒，13 案：惡意參與者——不交付的 provider、沉默/改票的 verifier、超賣額度、未聲明上游條款者）

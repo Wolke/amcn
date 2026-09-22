@@ -485,6 +485,29 @@ async function main() {
   check('S15', '取回從未鎖入的抵押品', 'block',
     !c3 || !/cannot release/.test(c3.why || ''), c3 ? c3.why : '無回應');
 
+  // 押注退還（#38，協定 v7）。押注是履約保證，所以「誰能把它取走」是這條
+  // 路徑唯一重要的問題：X 是普通交易者、V1 是真的 verifier，而 X 知道 V1 的
+  // 種子（harness 自己起的），所以它能產生一個**簽章完全有效**的退還請求
+  // ——那正是 #53 那一類的形狀：簽章有效，但發話的連線不是那個身分的。
+  const V1 = identityFromSeed('rt-V1');
+  // 這一格要現取，不能用先前的 `before`：託管是持續發生的，所以「押注變了」
+  // 不等於「被取走了」。判準因此是**變少**（押注離開託管），而不是「有變動」。
+  const beforeK = await exportLedger();
+  const stakeBefore = (beforeK && (beforeK.stakes || {})[V1.did]) || 0;
+
+  const k1 = await colTry({ type: 'stake_release', did: X.did, amount_cc: 5,
+    sig: sign(X.privateKey, { did: X.did, amount_cc: 5, stake: 'release' }) });
+  check('S19', '非 verifier 取回押注', 'block',
+    !k1 || !/not a verifier/.test(k1.why || ''), k1 ? k1.why : '無回應');
+
+  await colTry({ type: 'stake_release', did: V1.did, amount_cc: 5,
+    sig: sign(V1.privateKey, { did: V1.did, amount_cc: 5, stake: 'release' }) });
+  const afterK = await exportLedger();
+  const stakeAfter = afterK ? (afterK.stakes || {})[V1.did] || 0 : stakeBefore;
+  check('S20', '從別的連線送出簽章有效的退還請求（連線綁定）', 'block',
+    stakeAfter < stakeBefore - 1e-9,
+    `V1 押注 ${stakeBefore.toFixed(4)} → ${stakeAfter.toFixed(4)} CC`);
+
   // S17／S18 — 收據裡**多出來**的分錄。`expect` 是逐項檢查「該有的都在且金額
   // 對」，但沒有人檢查「有沒有多的」；而且 `postings.find()` 只取第一筆，所以
   // 同一帳戶的第二筆完全不受約束。Σ=0 仍然成立，兩個串謀身分只要自己吸收另一
