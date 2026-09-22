@@ -1,0 +1,9 @@
+AMCN — Agent Mutual Compute Network
+Copyright 2026 AMCN contributors
+
+This product includes software developed as part of the AMCN project
+(https://github.com/Wolke/amcn), licensed under the Apache License,
+Version 2.0. See LICENSE for the full text.
+
+AMCN has no third-party dependencies: `node/` uses only the Node.js
+standard library and `sim/` only the Python standard library.
