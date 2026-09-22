@@ -76,6 +76,10 @@ cd node && node demo-transport.js
 # 單機起一個真的網路（推廣用的第一步，約 30 秒；留著讓人操作，不是回歸閘門）
 cd node && ./quickstart.sh          # ./quickstart.sh status / stop
 
+# 讓這台機器常駐跑（macOS launchd：開機起、崩潰重起）。Hub＋3 verifier＋只賣不買的供給端
+cd node/service && ./install.sh     # status / invite / ../service/uninstall.sh
+#   invite 會印出可以直接貼給人的邀請（hub did 與區網位址都填好）
+
 # 自己驗一本帳（不必相信 Hub）：逐筆驗簽、餘額由事件重放、checkpoint 比對鏈頭
 cd node && node ledger-dump.js out/mine.json 127.0.0.1 47180
 cd node && node verify-ledger.js out/mine.json --pin did:demo:<hub did>

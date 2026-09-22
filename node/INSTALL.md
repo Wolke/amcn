@@ -315,3 +315,44 @@ AGENT_CONFIG='{"hubPort":47180,"name":"canary","seed":"<同一個 seed>","everyM
 3. **協定版本**（現在是 v7）。混版不會半通，而是被明確拒絕。
 
 `node/JOIN.md` 就是可以直接轉給他們的那份文件。
+
+## 11. 讓這台機器常駐跑（macOS，開機自動起）
+
+`quickstart.sh` 是你自己要看的東西；要**招人**就得有個一直在那裡的東西。
+
+```bash
+cd node/service && ./install.sh
+```
+
+裝三個 launchd 服務（`RunAtLoad` ＋ `KeepAlive`，所以開機會起、崩潰會被重起）：
+
+| Label | 做什麼 | 身分存在哪 |
+|---|---|---|
+| `com.amcn.hub` | 排序器，綁 `0.0.0.0:47180`，帳本在 `out/home/ledger.json`（＋`.tail`）| `configs/.hub-seed` |
+| `com.amcn.panel` | 3 個驗收者 | `configs/.panel-seed` |
+| `com.amcn.agent` | **只賣不買**的供給端，Console `127.0.0.1:47201` | `configs/home-agent.json` |
+
+```bash
+./install.sh status    # 三個服務的 PID 與 hub did
+./install.sh invite    # 印出可以直接貼給人的邀請（DID 與位址都填好）
+./uninstall.sh         # 移除服務；帳本與身分都留著
+```
+
+三個設計選擇：
+
+- **供給端刻意不開需求模型**。這台是要讓外人來借的那一側；自己同時買又賣只會
+  產生關聯方交易（#63）——帳會變熱鬧，但那不是市場數據。
+- **三個獨立服務而不是一個包裝腳本**。launchd 的 `KeepAlive` 是按服務算的，
+  包成一個的話 panel 掛掉不會被單獨重起，而「半個 panel 看起來健康」比整個停掉更糟。
+- **種子存檔案、不寫進 plist**。`hub did` 就是你發給別人釘的地址，而 plist 會被
+  備份工具與截圖帶著走。
+
+**實測過的**：`kill -9` 掉 hub 之後 launchd 在 15 秒內重起、**hub did 不變**、
+panel 與供給端自己重新註冊（#40），帳本從快照＋尾檔接續。
+
+要備份的是四個東西，而它們是**身分與帳**、不是設定：`configs/.hub-seed`、
+`configs/.panel-seed`、`configs/home-agent.json`、`out/home/ledger.json`＋`.tail`。
+
+**它目前只服務區網**。外人不在你的網段時，需要的不只是開一個 port：每一台都要
+`AMCN_TRANSPORT=secure`，而發現要走 rendezvous。那條路還沒有任何人真的跑過
+（登記簿 #86）。

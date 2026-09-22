@@ -18,6 +18,8 @@ node/logs/
 # a config file has none), so these files are private keys, not preferences.
 node/configs/*.json
 !node/configs/*.example.json
-# The panel launcher's saved identity (panel.js). Same reason: the panel's
-# stake and canary record are bound to it.
-node/configs/.panel-seed
+# Saved identities that are not .json: the panel launcher's (panel.js) and the
+# resident hub's (service/run-hub.sh). Same reason as above — the panel's stake
+# and canary record are bound to one, and the other *is* the address everyone
+# pins. Pattern rather than two names, so the next one is covered too.
+node/configs/.*-seed
