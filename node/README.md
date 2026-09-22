@@ -160,6 +160,23 @@ Hub 因此週期性把超額退還給**本期有支出的**帳戶，按支出額
 AMCN_CONSOLE=http://127.0.0.1:47203 node mcp-server.js
 ```
 
+OpenClaw（本機已接好，2026-09-22）：
+
+```bash
+openclaw mcp add amcn --command node \
+  --arg /path/to/ai-exchage/node/mcp-server.js \
+  --env AMCN_CONSOLE=http://127.0.0.1:47201 \
+  --cwd /path/to/ai-exchage/node --timeout 90
+openclaw mcp probe     # 應該看到 amcn: 3 tools
+openclaw mcp reload    # 改過 mcp-server.js 之後要重載快取的 runtime
+```
+
+三個 tool 都帶 MCP 的 `annotations`，而那一欄不是裝飾：沒有它時宿主只能假設
+最壞情況（OpenClaw 的 probe 會說 `tools have no safety annotations; calls will
+require interactive approval`），於是連「查餘額」都要人按一次同意。所以
+`amcn_balance` 標 `readOnlyHint: true`／`idempotentHint: true`，而另外兩支
+**刻意不標唯讀**——它們會花掉真的額度，宿主要求同意不是摩擦，是花錢前的閘門。
+
 Claude Code 的設定（`.mcp.json` 或 `claude mcp add`）：
 
 ```json

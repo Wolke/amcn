@@ -31,6 +31,14 @@ const TOOLS = [
       'target balance band, current strategy mode (normal/repay/spend) and ' +
       'settlement history. Use before spending to see how much credit is left.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    // MCP 的工具註記（annotations）。沒有它時，宿主只能假設最壞情況：
+    // OpenClaw 的 probe 就明說「tools have no safety annotations; calls will
+    // require interactive approval」——於是連「查餘額」都要人按一次同意，
+    // 而那會讓「用聊天問我的 agent 現在還能花多少」變成一件麻煩事。
+    // 查詢是唯讀且可重複的；下面兩支**會花掉真的額度**，所以刻意不標
+    // readOnly，讓宿主維持要求同意——那不是摩擦，那是花錢前的閘門。
+    annotations: { title: 'AMCN balance and credit line', readOnlyHint: true,
+                   destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
     name: 'amcn_publish_task',
@@ -40,6 +48,11 @@ const TOOLS = [
       'task_id and contract_id. Acceptance criteria are mandatory (FR-011): ' +
       'a task with no completion condition cannot settle automatically. Use ' +
       'this when you do not want to wait for the result.',
+    // 會產生負餘額（在信用額度內），所以不是唯讀，也不是冪等：同一段內容
+    // 發兩次就是兩筆任務、兩筆帳。openWorldHint 為 true——得標者是網路上的
+    // 陌生人，不是本機的確定行為。
+    annotations: { title: 'Publish an AMCN task', readOnlyHint: false,
+                   destructiveHint: false, idempotentHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -70,6 +83,11 @@ const TOOLS = [
       'machine with their own API key, pass acceptance and settle, then return ' +
       'the output. Blocks until settlement or timeout. This is the tool to use ' +
       'when your own quota is exhausted and you want someone else\'s compute.',
+    // 與 publish 同一組判斷，外加「它會等到結算」：所以一次呼叫就是一次
+    // 真的支出。逾時回傳也不代表沒發生——任務仍在網路上。
+    annotations: { title: 'Request inference through AMCN and wait',
+                   readOnlyHint: false, destructiveHint: false,
+                   idempotentHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
       properties: {
