@@ -91,7 +91,11 @@ async function main() {
   console.log(`   transport: ${transport.name} (AMCN_TRANSPORT)\n`);
   const procs = [];
   procs.push(spawnProc('hub.js',
-    { HUB_PORT: String(PORT), HUB_AGE_RAMP_MS: '1', HUB_BEACON_PORT: String(BEACON_PORT) }));
+    // HUB_EXPORT_RAWLOG：NFR-005 的明文掃描要讀 Hub 的全量流量記錄，而它
+    // 預設不隨匯出出去（#88：公開的 Hub 不該把落選出價與所有 metadata
+    // 送給任何連得上的人）。掃描是閘門的工作，所以閘門自己打開它。
+    { HUB_PORT: String(PORT), HUB_AGE_RAMP_MS: '1', HUB_EXPORT_RAWLOG: '1',
+      HUB_BEACON_PORT: String(BEACON_PORT) }));
   procs.push(spawnProc('fake-provider.js', { FAKE_PORT: String(FAKE_A_PORT), FAKE_KEY: KEY_A }));
   procs.push(spawnProc('fake-provider.js', { FAKE_PORT: String(FAKE_B_PORT), FAKE_KEY: KEY_B }));
   await new Promise((r) => setTimeout(r, 300));

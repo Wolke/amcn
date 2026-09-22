@@ -508,6 +508,62 @@ async function main() {
     stakeAfter < stakeBefore - 1e-9,
     `V1 押注 ${stakeBefore.toFixed(4)} → ${stakeAfter.toFixed(4)} CC`);
 
+  // 上線前的濫用預算（#87）。這三案問的是同一件事：**一個陌生人在證明自己
+  // 是誰之前，能讓 Hub 花多少資源**。區網裡答案可以是「無限」，公網上不行。
+  const limitsBefore = await exportLedger();
+
+  // A1 — 未註冊就送一個超大 frame。註冊前的上限是 64KB，而 MAX_LINE 是 16MB：
+  // 少了這個分界，1000 條連線 × 16MB 就是 16GB，而且不必先簽任何東西。
+  const big = await new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), 4000);
+    const c = transport.dial({ port: PORT });
+    c.onMessage((m) => { if (m.type === 'error') { clearTimeout(t); resolve(m); } });
+    c.send({ type: 'task', pad: 'x'.repeat(200 * 1024) });
+  });
+  check('A1', '未註冊的連線送 200KB 的 frame', 'block',
+    !big || !/oversized frame before registering/.test(big.why || ''),
+    big ? big.why.slice(0, 80) : '無回應（沒有被指名拒絕）');
+
+  // A2 — 未註冊就一直講話。20 則之後這條連線該被關掉，而且要說出理由：
+  // 一個被限流關掉的連線與網路故障長得一樣，分不出來的人只會一直重試。
+  const chatty = await new Promise((resolve) => {
+    const t = setTimeout(() => resolve(null), 5000);
+    const c = transport.dial({ port: PORT });
+    c.onMessage((m) => { if (m.type === 'error') { clearTimeout(t); resolve(m); } });
+    for (let i = 0; i < 40; i++) c.send({ type: 'checkpoint_request', seq: i });
+  });
+  check('A2', '未註冊的連線送 40 則訊息', 'block',
+    !chatty || !/without registering/.test(chatty.why || ''),
+    chatty ? chatty.why.slice(0, 80) : '無回應');
+
+  // A3 — 匯出**必須**對陌生人開放（§20-4 的公共財：任何人都能自己驗帳），
+  // 所以它不受未註冊訊息額度限制；它的成本由每 IP 的匯出節流管。
+  // 這一案期望「攻擊失敗」＝匯出照樣拿得到。
+  const stillExports = await exportLedger();
+  check('A3', '陌生人仍然拿得到整本帳（限流不得關掉可驗證性）', 'block',
+    !stillExports || !stillExports.receipts,
+    stillExports ? `${stillExports.receipts.length} 筆收據` : '拿不到');
+
+  // A5 — 限流**不得**擋掉本機的多行程部署。第一版每 IP 上限 10 並且對
+  // loopback 一視同仁，結果自己的 demo 先死（`demo-forfeit` 一台機器上 14 條
+  // 連線被拒 12 條）；而同一個錯在真實網路上更糟：NAT 會把一整個家庭或辦公室
+  // 塌縮成同一個位址，於是被擋的是合法參與者。
+  const many = [];
+  let manyRefused = 0;
+  for (let i = 0; i < 14; i++) {
+    const c = transport.dial({ port: PORT });
+    c.onMessage((m) => {
+      if (m.type === 'error' && /too many connections/.test(m.why || '')) manyRefused += 1;
+    });
+    many.push(c);
+  }
+  await sleep(1200);
+  for (const c of many) { try { c.close(); } catch { /* already gone */ } }
+  check('A5', '本機（loopback）開 14 條連線不得被限流擋掉', 'block',
+    manyRefused > 0, `被拒 ${manyRefused}/14`);
+
+  check('A4', '限流之後帳本完全沒動', 'block', !(await unchanged(limitsBefore)));
+
   // S17／S18 — 收據裡**多出來**的分錄。`expect` 是逐項檢查「該有的都在且金額
   // 對」，但沒有人檢查「有沒有多的」；而且 `postings.find()` 只取第一筆，所以
   // 同一帳戶的第二筆完全不受約束。Σ=0 仍然成立，兩個串謀身分只要自己吸收另一

@@ -124,7 +124,10 @@ const agentCfg = (o) => ({
 async function main() {
   const procs = [];
   procs.push(spawnProc('hub.js', {
+    // HUB_EXPORT_RAWLOG：這支要斷言「Agent 的內部推理沒有洩漏到流量上」，
+    // 而流量記錄預設不隨匯出出去（#88）。閘門自己打開它。
     HUB_PORT: String(PORT), HUB_AGE_RAMP_MS: '1', HUB_BEACON: '0',
+    HUB_EXPORT_RAWLOG: '1',
   }));
   await new Promise((r) => setTimeout(r, 400));
   for (const v of ['V1', 'V2', 'V3']) {

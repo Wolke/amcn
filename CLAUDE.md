@@ -180,6 +180,11 @@ cd sim && python3 -u -m amcn_sim.sweep_size
 cd sim && python3 -u -m amcn_sim.sweep_verifier
 ```
 
+# 上線前的濫用預算（#87）與流量記錄（#88）的預設值——改動前先讀 INSTALL §12
+#   未註冊連線：frame 64KB、20 則、200 則/秒；連線 200／每 IP 10；
+#   新身分註冊 10/分/IP；帳戶上限 500；起始匯出 30/分/IP（跟游標的分頁不計數）
+#   raw_log 預設不隨匯出出去，掃流量的閘門自己設 HUB_EXPORT_RAWLOG=1
+
 注意：大規模模擬（>1,000 agents 或 --all-scenarios 全量）耗時較長，先與 Owner 確認再跑。
 
 ## 給外部架構/評審 Agent 的標準提示模式

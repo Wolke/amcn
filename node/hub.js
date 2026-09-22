@@ -152,6 +152,30 @@ const canarySeen = new Set();  // canary contract_ids already scored
 // 成為一條免費偷懶的路（比 #38 原本那條更好，因為連換身分都不必）。
 // 這個集合可由事件流重建（見匯入處），所以它不是新的信任狀態。
 const stakeReleased = new Set();
+// #87 上線前的濫用預算。區網裡這些都不需要；公網上少了它們，任何人都能
+// 用連線數與註冊數把 Hub 的記憶體吃光，而且不必先證明自己是誰。
+const MAX_CONNS = Number(process.env.HUB_MAX_CONNS || 200);
+// 每 IP 上限預設放寬到 50，而且 loopback 完全不算——第一版設 10 並且對本機
+// 一視同仁，結果**自己的 demo 先死**：`demo-forfeit` 在一台機器上有 6 個
+// verifier、3 個 agent、canary 加上取帳的連線，實測 14 條裡被拒 12 條。
+//
+// 而那不只是 demo 的問題：**NAT 會把一整個家庭或辦公室塌縮成同一個位址**，
+// 所以一個低的每 IP 上限擋掉的是合法參與者，不是攻擊者。真正的後盾是全域
+// 上限（同時也限制記憶體與 fd），每 IP 只是讓單一來源不要一口氣吃掉全部。
+const MAX_CONNS_PER_IP = Number(process.env.HUB_MAX_CONNS_PER_IP || 50);
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1', 'localhost']);
+// 註冊會建立永久狀態（帳戶、統計、餘額），所以它比別的訊息貴。
+const MAX_REGISTER_PER_MIN = Number(process.env.HUB_MAX_REGISTER_PER_MIN || 10);
+// 身分是免費的（#50），所以帳戶總量要有上限，否則註冊洪水會把帳本灌成垃圾。
+const MAX_AGENTS = Number(process.env.HUB_MAX_AGENTS || 500);
+const conns = new Set();
+const ipConns = new Map();     // ip -> 連線數
+const regWindow = new Map();   // ip -> [timestamps]
+// 匯出對陌生人是開放的（那是 §20-4 的公共財），但它是最貴的操作：整本帳的
+// 序列化。所以它有自己的每 IP 節流，而不是靠未註冊訊息額度去擋——後者會把
+// 分頁取回的大帳本（十幾頁）誤判成濫用。
+const MAX_EXPORT_PER_MIN = Number(process.env.HUB_MAX_EXPORT_PER_MIN || 30);
+const exportWindow = new Map(); // ip -> [timestamps]
 
 // Post a balanced set that is not a settlement (escrow, slashing). Same
 // conservation and hash-chain rules; kept separate so `receipts` stays the
@@ -959,7 +983,20 @@ function exportPage(sess, cur) {
   return { out, next: more ? { token: cur.token, r, e, c, ch } : null };
 }
 
-function buildExport({ includeRawLog = true } = {}) {
+// #88：全量流量記錄**預設不隨匯出出去**。
+//
+// 匯出對任何人開放是刻意的（§20-4：不必相信排序器，自己重建）。但帳本揭露的
+// 是「發生了什麼」，而 `raw_log` 揭露的是「所有人講過的每一句話」——包含
+// **落選的出價**（那從來不進帳本）、每一筆任務的 metadata、以及所有錯誤文字。
+// 在區網試點裡那是功能（demo 的 NFR-005 明文掃描靠它）；對一個公開的 Hub，
+// 那是把整個市場的私有資訊送給任何連得上的人。
+//
+// 所以預設關閉，`HUB_EXPORT_RAWLOG=1` 打開——所有需要掃描流量的閘門
+// （demo、demo-autonomous、redteam-agents）自己設它。相對於「預設開著、
+// 上線前記得關」，這個方向的錯誤是安全的那一邊。
+const EXPORT_RAWLOG = process.env.HUB_EXPORT_RAWLOG === '1';
+
+function buildExport({ includeRawLog = EXPORT_RAWLOG } = {}) {
   return {
     receipts,
     pubkeys: Object.fromEntries(pubkeys),
@@ -1350,6 +1387,29 @@ transport.listen({
   host: BIND,
 
   onChannel: (chan) => {
+    // 上線前的濫用預算（#87）。Hub 是唯一對陌生人開放的入口，所以限流在這裡
+    // 打開而不是在傳輸層預設開啟——撥出方數的是收到的訊息，對稱的規則會讓
+    // 正常的客戶端自殺（見 lib/channel.js 的說明）。
+    chan.enforceLimits();
+    // 連線上限：總量與每個來源位址。少了這兩個，一台機器就能開滿連線把
+    // Hub 的記憶體與 fd 吃光，而每條連線在註冊前都還有 64KB 的 frame 預算。
+    const ip = String(chan.remote || '').replace(/:\d+$/, '');
+    if (conns.size >= MAX_CONNS) {
+      chan.refuse(`hub at capacity (${MAX_CONNS} connections)`);
+      return;
+    }
+    const perIp = (ipConns.get(ip) || 0) + 1;
+    if (!LOOPBACK.has(ip) && perIp > MAX_CONNS_PER_IP) {
+      chan.refuse(`too many connections from ${ip} (limit ${MAX_CONNS_PER_IP})`);
+      return;
+    }
+    conns.add(chan);
+    ipConns.set(ip, perIp);
+    chan.onClose(() => {
+      conns.delete(chan);
+      const n = (ipConns.get(ip) || 1) - 1;
+      if (n > 0) ipConns.set(ip, n); else ipConns.delete(ip);
+    });
     // Departures matter for the verifier pool: a panel is drawn from the pool
     // pinned at contract time, so a verifier that has gone away keeps being
     // selected, produces no attestation, and silently blocks settlement once
@@ -1377,6 +1437,9 @@ transport.listen({
       if (why) { fail(chan, why, msg.ref || msg.contract_id); return; }
       switch (msg.type) {
         case 'register': {
+          // 註冊節流與帳戶總量上限（#87）。順序是刻意的：**先驗簽再計數**，
+          // 否則一個不帶有效簽章的洪水就能把別人的註冊配額用掉。
+          const ip = String(chan.remote || '').replace(/:\d+$/, '');
           const body = { did: msg.did, pub: msg.pub, box_pub: msg.box_pub };
           if (msg.role) body.role = msg.role;
           // roles 也要進簽署本體，否則任何人都能改別人的角色宣告。
@@ -1385,6 +1448,23 @@ transport.listen({
             return fail(chan, 'bad register signature', msg.did);
           }
           const prior = agents.get(msg.did);
+          // 重連（同一個 DID 已經在帳上）不受節流與上限限制：那是既有參與者
+          // 回來，而擋掉它等於把斷線變成永久離線——#40 的重連與 #17 的固定
+          // 身分都會被這條規則反過來打壞。
+          if (!prior && !pubkeys.has(msg.did) && !LOOPBACK.has(ip)) {
+            const now = Date.now();
+            const win = (regWindow.get(ip) || []).filter((t) => now - t < 60000);
+            if (win.length >= MAX_REGISTER_PER_MIN) {
+              return fail(chan, `too many new registrations from ${ip} ` +
+                `(${MAX_REGISTER_PER_MIN}/min)`, msg.did);
+            }
+            if (agents.size >= MAX_AGENTS) {
+              return fail(chan, `hub at capacity (${MAX_AGENTS} identities); ` +
+                'an operator has to raise HUB_MAX_AGENTS', msg.did);
+            }
+            win.push(now);
+            regWindow.set(ip, win);
+          }
           agents.set(msg.did, {
             // online stays false until the peer confirms it received our
             // reply. A client that can send but not hear re-registers every
@@ -1434,6 +1514,11 @@ transport.listen({
           if (!a || a.chan !== chan) break;  // only the channel that registered
           if (a.online) break;
           a.online = true;
+          // 這條連線從「陌生人」升級成「參與者」（#87）：frame 上限回到
+          // MAX_LINE、未註冊訊息數的限制解除。分界點選在 register_ack 而不是
+          // register，因為前者才證明對方**聽得到**（#49）——一個只會送不會
+          // 收的連線不該拿到大預算。
+          chan.markAuthenticated();
           console.log(`[hub] registered ${msg.did} (${a.role}, ` +
             `CL ${clOf(msg.did).toFixed(1)})`);
           break;
@@ -1628,6 +1713,22 @@ transport.listen({
           break;
         }
         case 'export': {
+          // 只對**起始**請求計數。跟著游標取後續分頁不算新的匯出——一份
+          // 50MB 的帳本要幾十頁（四小時長跑實測），把每一頁都算成一次匯出
+          // 會讓限流誤殺唯一能取回大帳本的那條路（#41 的分頁）。
+          const exIp = String(chan.remote || '').replace(/:\d+$/, '');
+          if (!msg.cursor && !LOOPBACK.has(exIp)) {
+            const ip = exIp;
+            const now = Date.now();
+            const win = (exportWindow.get(ip) || []).filter((t) => now - t < 60000);
+            if (win.length >= MAX_EXPORT_PER_MIN) {
+              fail(chan, `too many ledger exports from ${ip} ` +
+                `(${MAX_EXPORT_PER_MIN}/min) — 帳本是公開的，但整份序列化不便宜`);
+              break;
+            }
+            win.push(now);
+            exportWindow.set(ip, win);
+          }
           if (msg.paged || msg.cursor) {
             // 過期的 session 先清掉，否則一個中途離開的客戶端會讓 Hub
             // 一直抱著一份完整匯出。
