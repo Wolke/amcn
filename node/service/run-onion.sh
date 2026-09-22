@@ -34,7 +34,7 @@ HiddenServicePort $PORT 127.0.0.1:$PORT
 ClientOnly 1
 CONF
 
-echo "啟動 tor（onion service → 127.0.0.1:$PORT）…"
+echo "啟動 tor（onion service → 127.0.0.1:${PORT}）…"
 tor -f "$TORRC" &
 TOR_PID=$!
 trap 'kill $TOR_PID 2>/dev/null || true' EXIT

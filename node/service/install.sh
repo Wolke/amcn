@@ -23,6 +23,8 @@ if [ "${1:-install}" = "invite" ]; then
   # 貼錯的一步，而貼錯的結果是對方連到別人的 Hub 或連不上而不知道為什麼。
   DID="$(hub_did)"
   IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo '<你的區網 IP>')"
+  # onion 位址存在就一併給出去——那是「對方在哪都可以、而我不開埠」的那條路。
+  ONION="$(cat "$REPO/var/onion/hostname" 2>/dev/null || true)"
   [ -n "$DID" ] || { echo "Hub 還沒起來（看 logs/home-hub.log），先 ./install.sh"; exit 1; }
   cat <<INVITE
 —— 貼給對方（同區網，最低門檻：當驗收者）——
@@ -42,6 +44,13 @@ if [ "${1:-install}" = "invite" ]; then
      cd ai-exchage/node && AMCN_HUB_PIN=$DID node panel.js discover
 
 連不上就跑： node pilot-doctor.js $IP  ——它會直接指出第一個問題在哪。
+
+不在我的區網（任何地方都可以，而我不必開任何埠）：
+     brew install tor
+     cd ai-exchage/node
+     AMCN_TRANSPORT=tor AMCN_HUB_PIN=$DID node panel.js ${ONION:-<問我拿 .onion 位址>} ${HUB_PORT:-47180}
+  走的是 onion service：位址本身就是公鑰，我這邊零入向埠。代價是延遲
+  （取一次帳約 2.5 秒）與兩邊都要有 tor。
 細節（CC 是什麼、你的義務、押注規則、怎麼自己驗帳）都在 node/JOIN.md。
 
 要講清楚的三件事：CC 不是幣、換不到現金；負餘額是設計的一部分；
