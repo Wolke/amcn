@@ -1826,13 +1826,19 @@ transport.listen({
     const where = process.env.HUB_RENDEZVOUS;
     const host = process.env.HUB_ADVERTISE_HOST ||
       (BIND === '0.0.0.0' ? (discovery.localAddrs()[0] || '127.0.0.1') : BIND);
+    // 對外的埠不一定等於自己聽的埠：任何一層轉發（NAT 轉發、反向代理、
+    // 負載平衡）都可能換掉它，而記錄裡要寫的是**別人要連的那一個**。
+    // 原本只讓主機名可覆蓋、埠寫死成自己聽的 PORT，所以一旦中間有一層
+    // 轉發，發出去的記錄就是錯的——而它還帶著正確的簽章，所以客戶端會
+    // 老實地去連一個連不上的地方。
+    const advertisePort = Number(process.env.HUB_ADVERTISE_PORT || PORT);
     const republish = () => {
-      try { rv.publish(hubId, { host, port: PORT }, where); }
+      try { rv.publish(hubId, { host, port: advertisePort }, where); }
       catch (err) { console.error(`[hub] rendezvous publish failed: ${err.message}`); }
     };
     republish();
     setInterval(republish, Number(process.env.HUB_RENDEZVOUS_MS || 60000)).unref();
-    console.log(`[hub] rendezvous published → ${where} (${host}:${PORT})`);
+    console.log(`[hub] rendezvous published → ${where} (${host}:${advertisePort})`);
   }
     if (CANARY_DID) {
       console.log(`[hub] canary issuer authorised: ${CANARY_DID} ` +
