@@ -54,6 +54,10 @@ cd sim && python3 -c "from amcn_sim.simulation import run; \
 #   （starter 50、風險費 6%/2%、LTV 0.5、G8 改成 verifier 留存 ≤95%），
 #   詳見 docs/evaluation/phase0-results.md 的 v3 回合
 cd sim && python3 -u -m amcn_sim.gate0
+#   #90 的候選組（額度只能賺＋Treasury 買新人的第一份工作）：8/8，但 G2 是空過
+#   （零額度體制下沒有可比的誠實基準），而洗量佔成交量 40.3% → 66.3%
+cd sim && python3 -u -m amcn_sim.gate0 --starter 0 --onboarding 20 \
+  --onboarding-total 40000 --risk-thin 0.06 --risk-base 0.02 --dual-role
 
 # 參數掃描（starter × 風險費 × 違約率，輸出 out/sweep.csv）
 cd sim && python3 -m amcn_sim.sweep
