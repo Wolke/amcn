@@ -284,6 +284,35 @@ export AMCN_SECURE_PIN='did:demo:<對方的通道身分>'   # 只跟這個身分
 路徑上的觀察者只看得到 frame 的時間與大小。**它防的不是 Hub**：Hub 當然看得到
 metadata，那是它的工作，也是為什麼 payload 仍然端到端加密、收據仍然要簽。
 
+### 或者：誰都不用開埠（`tor`，#89）
+
+上面那條路要求**營運方**的機器是可達的——而真實家用網路經常不可能：開發機所在
+的網路就是雙層 NAT（路由器的 WAN 是私有位址，上游那台進不去），port forward
+連做都做不到。
+
+所以有第五個傳輸實作，它把這個要求整個拿掉：
+
+```bash
+# 營運方那一側（不開任何對外埠、不動路由器、不用租機器）
+brew install tor
+cd node && ./service/run-onion.sh        # 印出 <addr>.onion
+
+# 你這一側
+brew install tor                          # 只需要一個 SOCKS5 出口
+AMCN_TRANSPORT=tor node agent.js configs/my-agent.json
+```
+
+設定檔裡 `hubHost` 填 `<addr>.onion`，`hubPin` 照舊填對方的 hub did。
+
+三件事同時成立：**零入向埠**（Hub 只聽 127.0.0.1，由 onion 的 rendezvous 把人
+帶進來，雙層 NAT／CGNAT 兩邊都不必設定）、**位址本身就是公鑰**（v3 onion 是
+ed25519 公鑰的編碼，所以不需要 CA——而你本來就在釘 `hubPin`，兩層信任錨是同一
+種東西）、**免費且沒有人要營運基礎設施**。
+
+代價要知道：延遲（電路數百毫秒）、頻寬有限、兩邊都要有 tor。閘門
+`node demo-tor.js` 7/7（它自帶 SOCKS5 代理，所以不必裝 tor 也能驗），但**真實
+onion 的延遲與長連線穩定度還沒量過**。
+
 跨網段的**發現**（不能靠 UDP 廣播時）走 rendezvous：Hub 發布簽署過的位址記錄，
 client 每次重連重新解析並用 `hubPin` 驗身分。承載記錄的主機不受信任——它能扣住
 或給舊的，但無法冒充。細節見 `lib/rendezvous.js` 與 `INSTALL.md`。

@@ -9,7 +9,7 @@
 //
 // An implementation provides:
 //
-//   name                                  'tcp' | 'http'
+//   name                                  'tcp' | 'http' | 'secure' | 'tor'
 //   listen({ port, host, onChannel, onError, onListening }) -> { close(), port }
 //   dial({ port, host }) -> Channel
 //   probe({ port, host, timeoutMs }) -> Promise<boolean>
@@ -35,6 +35,9 @@ const IMPLS = {
   chaos: './transport-chaos',
   // Encrypted + identity-authenticated, for links that leave the LAN (#44).
   secure: './transport-secure',
+  // 不需要對外開任何埠的傳輸（#89）：Hub 只聽 127.0.0.1，由 onion service
+  // 把外面的人帶進來。雙層 NAT／CGNAT 兩邊都不必設定，位址本身就是公鑰。
+  tor: './transport-tor',
 };
 
 function get(name) {

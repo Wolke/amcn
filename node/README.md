@@ -15,6 +15,7 @@ node demo-rebuild.js      # 約 25 秒，7 項驗收（W10：第二排序器重�
 node demo-transport.js    # 約 35 秒，7 項驗收（W10：第二個 ITransport，兩傳輸同一本帳）
 node demo-reconnect.js    # 約 40 秒，8 項驗收（W10 預演：殺掉 Hub，網路自己回來）
 node demo-forfeit.js      # 約 70 秒，14 項驗收（#38：押注的沒收與退還是一個 2×2）
+node demo-tor.js          # 約 20 秒，7 項驗收（#89：零入向埠，不需要安裝 tor）
 
 # 不是閘門，是給人用的：
 ./quickstart.sh           # 單機起一個真的網路並留著（status / stop）
@@ -28,7 +29,7 @@ DEMO_PORT_OFFSET=100 node demo.js
 AMCN_TRANSPORT=http node demo.js
 ```
 
-`AMCN_TRANSPORT` 選 `tcp`（預設）、`http`、`secure`（加密＋身分認證，連線要離開區網時用）或 `chaos`（故障注入，只給情境用）。所有進程必須一致——混用時雙方都會明確拒絕並印出原因，不會靜默卡住。
+`AMCN_TRANSPORT` 選 `tcp`（預設）、`http`、`secure`（加密＋身分認證，連線要離開區網時用）、`tor`（零入向埠，#89）或 `chaos`（故障注入，只給情境用）。所有進程必須一致——混用時雙方都會明確拒絕並印出原因，不會靜默卡住。
 
 `demo.js` 用 `posts: [{atMs, ...}]` 時間表驅動，證明機制正確；`demo-autonomous.js` 沒有任何時間表與 Console 呼叫，每筆任務都來自 Agent 自行偵測額度耗盡（§20-8／§6.2）。
 
@@ -71,6 +72,8 @@ provider 端點」的 API key 執行 → sha256 確定性驗收 → 雙簽收據
 | 抵押品（#65）| `POST /collateral {amount_cc, lock}` 到 Owner Console：把自己的正餘額鎖入 `protocol:collateral`，額度上升 `amount × AMCN_COLLATERAL_LTV`（預設 0.5，取自 `amcn_sim.sweep_deposit`）。只能抵押自己的正餘額，取回時剩餘額度必須仍覆蓋負債 |
 | `lib/rendezvous.js` | 跨網段的發現與輪替（§4 #45）：Hub 發布簽署的位址記錄，client 每次重連重新解析、以 `hubPin` 驗身分。承載記錄的主機不受信任——它能扣住或給舊的，但無法冒充 |
 | `lib/transport-chaos.js` | 實作 3：故障注入（`AMCN_TRANSPORT=chaos`）。包裝 tcp／http，由執行期可改的控制檔驅動：`blackhole`（寫入成功但消失、連線永不關閉）、`reset`、`latency`／`jitter`、`loss`、`freeze`（只斷入向＝對手卡死）、單向中斷。注入點在**位元組層**而非 channel 之上——否則 channel 自己的活性 ping 會繞過故障（第一版就是這樣錯的）。`AMCN_CHAOS_SEED` 讓丟包樣式可重播 |
+| `lib/transport-tor.js` | 實作 5：**不需要對外開任何埠**的傳輸（#89）。Hub 只聽 127.0.0.1，由 onion service 的 rendezvous 把外面的人帶進來——雙層 NAT／CGNAT 兩邊都不必設定，不必租機器。位址本身就是公鑰（v3 onion ＝ ed25519 公鑰編碼），與協定既有的 `hubPin` 是同一種信任錨。實作上 `listen` 沿用 tcp、`dial` 只是換成經 SOCKS5 以 ATYP=0x03 連 `.onion`（在 DNS 裡不存在，必須交給 tor 解——那正是「客戶端不需要知道對方在哪」的原因）|
+| `service/run-onion.sh` | 起 onion service 並印出要給對方的設定。**它建立的是一條入向路徑**，所以不由任何自動流程替 Owner 決定 |
 | `lib/transport-http.js` | 實作 2：HTTP——長連 chunked NDJSON 回應載 server→client，POST 載 client→server。刻意不選另一種 socket 方言：那會共用 TCP 的故障模型，換了等於沒換。此實作線上無連線狀態、送達以請求為單位，POST 必須自行保序（單 socket keep-alive）|
 | `quickstart.sh` | 推廣用的起步路徑：在一台機器上拉起 Hub＋3 個 Verifier＋兩個 Agent、跑完第一筆結算，然後**留著**讓人操作（發任務、查帳、重啟、備份）。與 `demo.js` 的分工是「活的網路」對「回歸閘門」|
 | `verify-ledger.js` | 參與者自己驗一本帳（§20-4 的使用者版本）：與第二個排序器啟動時用同一份 `lib/rebuild.js`——逐筆驗簽、pubkey 自證 DID、餘額由事件重放、鏈重算、額度重放、checkpoint 比對鏈頭，任何一項不符是拒絕。`--pin` 才會檢查「是誰簽的」|

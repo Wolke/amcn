@@ -73,6 +73,10 @@ cd node && node demo-rebuild.js
 # W10 第二個 ITransport（約 35 秒，7 項斷言：tcp 與 http 產生同一本帳）
 cd node && node demo-transport.js
 
+# #89 零入向埠的傳輸（約 20 秒，7 項斷言）：Hub 只聽回送位址，經 SOCKS5 進來的
+#   帳與直連 tcp 完全相同。自帶 SOCKS5 代理，**不需要安裝 tor**
+cd node && node demo-tor.js
+
 # 單機起一個真的網路（推廣用的第一步，約 30 秒；留著讓人操作，不是回歸閘門）
 cd node && ./quickstart.sh          # ./quickstart.sh status / stop
 

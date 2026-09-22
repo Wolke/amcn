@@ -23,3 +23,6 @@ node/configs/*.json
 # and canary record are bound to one, and the other *is* the address everyone
 # pins. Pattern rather than two names, so the next one is covered too.
 node/configs/.*-seed
+# tor 的 onion service 身分與設定（node/service/run-onion.sh）。
+# hs_ed25519_secret_key 就是那個位址本身，外流等於別人可以冒充你的入口。
+node/var/
