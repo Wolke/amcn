@@ -1,9 +1,9 @@
 {
   "_": "這個檔案是「裝完之後要連去哪」，也就是**發布一個網路**的全部內容：填好之後任何人 clone 這份 repo、跑 `cd node && ./join.sh` 就會加入它，不必問你任何值。兩種填法——(1) 靜態位址：hubHost（`<addr>.onion` 或 IP）＋hubPort＋transport（onion 位址填 \"tor\"）；(2) 位址記錄：rendezvous 指向一個 https 網址（適合會搬家的排序器，但記錄有 10 分鐘的新鮮度要求，所以不適合用 commit 當發布方式）。兩種都**必須**填 hubPin：承載位址或記錄的地方不受信任，pin 才是信任錨。值是 null 代表這份 repo 還沒有預設網路——營運方跑 `./service/install.sh publish` 會把它填好。",
-  "name": null,
-  "hubHost": null,
+  "name": "amcn",
+  "hubHost": "o344qap4yrm7wbfpd5kqafeexzynyculsdddiexa5vc3pzem42zmu5yd.onion",
   "hubPort": 47180,
-  "transport": null,
+  "transport": "tor",
   "rendezvous": null,
-  "hubPin": null
+  "hubPin": "did:demo:634d724a19976c95"
 }
