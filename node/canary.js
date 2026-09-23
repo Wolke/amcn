@@ -67,6 +67,13 @@ const log = (m) => console.log(`[${name} ${id.did}] ${m}`);
 const UNITS = cfg.units || 2;
 const MAX_PRICE_CC = cfg.maxPriceCC || UNITS * 1.3;
 const EVERY_MS = cfg.everyMs || 8000;
+// 入門採購的資格（「從沒收過 CC」）是在**交付之後**才由 Hub 檢查的（#100），
+// 所以當線上所有帳戶都已經賺過錢時，這支會每 everyMs 發一輪、對方做一次工、
+// 然後被拒絕——實測 live 節點 10 分鐘 10 筆全被拒。退避讓它安靜下來，而且
+// 有人加入時會自己恢復（成功一次就重設）。
+let rejectStreak = 0;
+let backoffUntil = 0;
+const BACKOFF_MAX_MS = Number(process.env.HUB_ONBOARD_BACKOFF_MAX_MS || 600000);
 
 const open = new Map();   // contract_id -> {panel, commits, attest, provider, seedRoot}
 const cpRoots = new Map();
@@ -99,6 +106,35 @@ const hub = transport.dialLazy(() => discovery.resolveHubTarget(cfg, log), {
         log(`registered as canary issuer, hub credit line ${msg.credit_line.toFixed(1)} CC`);
         log('若 Hub 未設 HUB_CANARY_DID 為上面這個 DID，報告會被拒絕');
         break;
+
+      case 'onboard_paid': {
+        // 有人真的通過了 → 市場狀態變了，退避解除。沒有這一條，退避就是一個
+        // 只會變長的計時器（而那等於把發樁者關掉）。
+        if (rejectStreak) {
+          log(`有符合資格的新人了（${(msg.provider || '').slice(0, 18)}…）——退避解除`);
+        }
+        rejectStreak = 0;
+        backoffUntil = 0;
+        break;
+      }
+
+      case 'error': {
+        // Hub 拒絕了一份報告。最常見的理由是「沒有符合資格的新人」，而那不是
+        // 錯誤而是**市場狀態**——它值得說一次，然後閉嘴。
+        if (MODE === 'onboard' && /never been paid/.test(msg.why || '')) {
+          rejectStreak += 1;
+          const wait = Math.min(BACKOFF_MAX_MS, EVERY_MS * 2 ** rejectStreak);
+          backoffUntil = Date.now() + wait;
+          if (rejectStreak === 1) {
+            log('目前沒有符合資格的新人：線上的帳戶都已經賺過 CC，而入門採購只買' +
+              '「從沒收過 CC 的身分」的第一份工作。這不是錯誤，是市場狀態——' +
+              `改成每 ${Math.round(wait / 1000)}s 試一次，有人加入就會自己恢復。`);
+          }
+        } else {
+          log(`Hub 拒絕：${msg.why}`);
+        }
+        break;
+      }
 
       case 'verifiers': verifierDir = msg; break;
       case 'checkpoint': cpRoots.set(msg.cp.seq, msg.cp.root); break;
@@ -246,6 +282,7 @@ function report(contractId) {
 }
 
 function post() {
+  if (Date.now() < backoffUntil) return;
   const pool = [...(verifierDir.verifiers || [])];
   if (pool.length < panelLib.PANEL_SIZE) {
     log(`skipping: judge-quorum needs ${panelLib.PANEL_SIZE} verifiers, ${pool.length} online`);
