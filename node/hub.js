@@ -1241,6 +1241,11 @@ function buildExport({ includeRawLog = EXPORT_RAWLOG } = {}) {
     // 各自讀 `HUB_AGE_RAMP_MS`，於是 `demo-rebuild`（hub 設 1ms、自己沒設）
     // 又對不上——換一個地方犯同一個錯。跟著匯出走才對得起來。
     age_ramp_ms: AGE_RAMP_MS,
+    // #99：starter 與斜坡同理——它是**這本帳的政策**。少了它，營運方調整
+    // starter 之後自己的 Hub 就會因為「重算的額度對不上匯出」而拒絕啟動
+    // （實測：調成 10 之後 `credit line mismatch … rebuilt 5.160 vs export
+    // 25.798`，整個網路停在那裡）。
+    starter_cc: eeff.STARTER_CC,
     ...(includeRawLog ? { raw_log: rawLog.join('\n') } : {}),
   };
 }
@@ -1435,6 +1440,9 @@ if (process.env.HUB_IMPORT) {
     if (r.errors.length > 10) console.error(`  … and ${r.errors.length - 10} more`);
     process.exit(1);
   }
+  // 政策換過（例如 starter 從 50 調成 10）是一個**事實**，而它會改變每個人的
+  // 額度——所以它必須出現在啟動的那幾行裡，不能只活在一個回傳值裡（#99）。
+  for (const n of (r.notes || [])) console.log(`[hub] ${n}`);
   for (const [k, v] of r.balances) balances.set(k, v);
   for (const [k, v] of r.chains) chains.set(k, v);
   for (const [k, v] of r.stakes) stakes.set(k, v);

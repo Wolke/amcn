@@ -106,6 +106,13 @@ cd node && node demo-bootstrap.js
 #   所以「模式是 onion 卻又綁回 0.0.0.0」抓得到。不需要 tor、不碰你的 launchd
 cd node && node demo-rendezvous.js
 
+# #98／#99 常駐服務的組合（約 60 秒，9 項斷言）：新人第一天的額度、發樁者有沒有被
+#   授權（順序對不對）、治理上限、install.sh 會不會裝第五個服務。關鍵那條量的是
+#   **行為**：同一個新身分 starter 10 → 4.6 CC、starter 50 → 23.1 CC。
+#   另外三條是 #99：調整經濟參數之後這台機器**還起不起得來**（政策跟著帳走，
+#   不是跟著環境變數——實測改 starter 曾讓 live 排序器拒絕啟動）
+cd node && node demo-service.js
+
 # 加入一個已經在跑的網路（**別人 clone 之後要跑的那一個指令**，#96）
 cd node && ./join.sh                # --check / --verifiers 3 / --provider / status / stop
 #   要連去哪由 network.json 決定（靜態位址或位址記錄，都必須有 hubPin）。
@@ -116,7 +123,10 @@ cd node && node demo-join.js        # 閘門（約 30 秒，9 項斷言，含兩
 cd node && ./quickstart.sh          # ./quickstart.sh status / stop
 
 # 讓這台機器常駐跑（macOS launchd：開機起、崩潰重起）。Hub＋3 verifier＋只賣不買的供給端
-cd node/service && ./install.sh     # status / invite / ../service/uninstall.sh
+cd node/service && ./install.sh     # status / invite / publish / ../service/uninstall.sh
+#   五個服務：hub／panel／agent／onboard（#90 的入門採購發樁者）＋onion（--onion 時）
+#   新人額度預設 starter 10 CC ＋入門採購（#90 的 D 組，理由見 credit-regime-ab.md）
+#   ./install.sh publish 把 network.json 填好；commit 之後別人 clone 就能加入（#96）
 #   invite 會印出可以直接貼給人的邀請（hub did 與區網位址都填好）
 #   ./install.sh --onion 多裝一個常駐 onion service（com.amcn.onion）：任何地方的人
 #     都能加入而這台零入向埠，Hub 同時改綁 127.0.0.1；./install.sh --lan 收回去。

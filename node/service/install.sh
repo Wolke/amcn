@@ -131,7 +131,7 @@ fi
 
 if [ "${1:-install}" = "status" ]; then
   echo "模式      $(mode)$([ "$(mode)" = onion ] && echo '（對外零入向埠）' || echo '（只有同區網連得到）')"
-  for l in com.amcn.hub com.amcn.panel com.amcn.agent com.amcn.onion; do
+  for l in com.amcn.hub com.amcn.panel com.amcn.agent com.amcn.onboard com.amcn.onion; do
     [ -f "$LA/$l.plist" ] || continue
     printf '%-18s %s\n' "$l" "$(launchctl list | awk -v L="$l" '$3==L {print "PID "$1"  上次退出碼 "$2}' || true)"
   done
@@ -156,10 +156,14 @@ if [ "$WANT_MODE" = "onion" ] && ! command -v tor >/dev/null; then
 fi
 mkdir -p "$LA" "$REPO/logs" "$REPO/configs" "$REPO/var"
 echo "$WANT_MODE" > "$MODE_FILE"
+# 發樁者的身分要**在 Hub 啟動之前**存在：Hub 讀 configs/.onboard-seed 算出 DID
+# 並授權它（HUB_ONBOARD_DID）。順序反了的話，第一次啟動的 Hub 誰都沒授權，而
+# 發樁者的每一筆都會被拒絕——那種失敗很安靜，只會看起來像「新人沒有工作可做」。
+ONBOARD_DID="$(bash "$REPO/service/run-onboard.sh" --did)"
 
-LABELS=(com.amcn.hub com.amcn.panel com.amcn.agent)
-SCRIPTS=(run-hub.sh run-panel.sh run-agent.sh)
-ARGS=("" "" "")
+LABELS=(com.amcn.hub com.amcn.panel com.amcn.agent com.amcn.onboard)
+SCRIPTS=(run-hub.sh run-panel.sh run-agent.sh run-onboard.sh)
+ARGS=("" "" "" "")
 if [ "$WANT_MODE" = "onion" ]; then
   # 入口本身也要是一個**服務**。原本它是一個前景腳本，所以「常駐跑這個網路」
   # 與「外面的人能加入」是兩回事：機器重開、tor 崩掉、或那個終端機被關掉，
@@ -195,7 +199,7 @@ for i in "${!LABELS[@]}"; do
 PLIST
 done
 
-for l in com.amcn.hub com.amcn.panel com.amcn.agent com.amcn.onion; do
+for l in com.amcn.hub com.amcn.panel com.amcn.agent com.amcn.onboard com.amcn.onion; do
   launchctl unload "$LA/$l.plist" 2>/dev/null || true
 done
 # 切回區網模式時要把入口真的收掉，否則「我以為我沒有對外」與事實不一致——
@@ -209,6 +213,8 @@ launchctl load "$LA/com.amcn.hub.plist"
 sleep 3
 launchctl load "$LA/com.amcn.panel.plist"
 launchctl load "$LA/com.amcn.agent.plist"
+# 發樁者最後起：它要 Hub 已經在聽，而且 Hub 必須已經授權它。
+launchctl load "$LA/com.amcn.onboard.plist"
 sleep 4
 
 DID="$(hub_did)"
@@ -219,9 +225,14 @@ cat <<OUT
   com.amcn.hub     排序器      $([ "$WANT_MODE" = onion ] && echo "127.0.0.1:${HUB_PORT:-47180}（對外零入向埠）" || echo "0.0.0.0:${HUB_PORT:-47180}")
   com.amcn.panel   3 個驗收者  身分在 configs/.panel-seed
   com.amcn.agent   供給端      Owner Console http://127.0.0.1:47201/status
+  com.amcn.onboard 入門採購    Treasury 向新人買「答案已知的工作」（#90）
 $([ "$WANT_MODE" = onion ] && echo "  com.amcn.onion   對外入口    onion service → 127.0.0.1:${HUB_PORT:-47180}")
 
   hub did   ${DID:-（還沒印出來，看 logs/home-hub.log）}
+  新人額度  starter 10 CC ＋入門採購（每身分上限 20、全網 2000）；發樁者 ${ONBOARD_DID}
+            送額度的白拿 ≈ starter × 0.87，所以這個值就是你對 Sybil 的曝險上界
+            （為什麼是 10：docs/evaluation/credit-regime-ab.md。要改回 50 就設
+             DEMO_STARTER_CC=50，那等於接受每個新身分是一份 ~44 CC 的禮物）
   區網位址  $IP:${HUB_PORT:-47180}
   對外位址  $([ "$WANT_MODE" = onion ] && echo "$(onion_addr || echo '（tor 還在建，約 30 秒）')" || echo '（區網模式：沒有）')
   位址記錄  $RV_FILE → $(rv_summary)
@@ -234,6 +245,7 @@ $([ "$WANT_MODE" = onion ] && echo "  com.amcn.onion   對外入口    onion ser
   configs/.hub-seed      Hub 的身分，別人釘的就是它
   configs/.panel-seed    verifier 的身分（押注綁在上面）
   configs/home-agent.json  供給端的身分
+  configs/.onboard-seed    入門採購發樁者的身分（Hub 授權的就是它）
   out/home/ledger.json 與 out/home/ledger.json.tail  這本帳
 $([ "$WANT_MODE" = onion ] && echo "  var/onion/hs_ed25519_secret_key  onion 位址的身分（丟了位址就換）")
 

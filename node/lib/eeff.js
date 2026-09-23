@@ -75,7 +75,11 @@ function ageFactor(joinedAtMs, nowMs = Date.now(), rampMs = AGE_RAMP_MS) {
   return Math.max(0, Math.min(1, (nowMs - joinedAtMs) / rampMs));
 }
 
-function creditLine(myDid, myStats, statsOf, ageFactor = 1, collateralCc = 0) {
+// starterCc 可傳入的理由與 ageFactor 完全相同（#82／#99）：**它是那本帳的政策，
+// 不是重建方的環境變數**。營運方把 starter 從 50 調成 10 之後，重建方若用自己的
+// 值去重算，每一個帳戶的額度都會對不上，而 `rebuild` 會（正確地）拒絕整本帳。
+function creditLine(myDid, myStats, statsOf, ageFactor = 1, collateralCc = 0,
+                    starterCc = STARTER_CC) {
   const contribution = Math.min(
     effectiveContribution(myDid, myStats, statsOf), 2000);
   const diversity = Math.min(1, myStats.earnedBy.size / 8);
@@ -84,7 +88,7 @@ function creditLine(myDid, myStats, statsOf, ageFactor = 1, collateralCc = 0) {
   const quality = 0.25 + 0.75 * completionRate;
   const age = Math.max(0, Math.min(1, ageFactor));
   // 抵押品不乘 quality：它是真實擔保，不因帳戶年輕或紀錄少而打折。
-  const line = (STARTER_CC * (0.5 + 0.5 * age)
+  const line = (starterCc * (0.5 + 0.5 * age)
     + 0.35 * contribution * (0.3 + 0.7 * diversity)) * quality
     + Math.max(0, collateralCc) * COLLATERAL_LTV;
   return Math.min(HARD_CAP_CC, Math.max(0, line));

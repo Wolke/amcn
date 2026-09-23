@@ -265,6 +265,11 @@ function rebuild(ex, opts = {}) {
     collateralNow.set(did, v);
   }
   const exportedAt = ex.exported_at || null;
+  if (ex.starter_cc != null && ex.starter_cc !== eeff.STARTER_CC) {
+    notes.push(`這本帳的 starter 是 ${ex.starter_cc} CC，而本行程設定的是 ` +
+      `${eeff.STARTER_CC} CC——額度比對用的是**帳本的**值（#99）。` +
+      '接手服務之後新算的額度會用你設定的那個。');
+  }
   const creditLines = {};
   for (const did of stats.keys()) {
     // 斜坡長度取自匯出（#82）。用重建方自己的環境變數會在兩邊設定不同時
@@ -273,19 +278,29 @@ function rebuild(ex, opts = {}) {
       ? eeff.ageFactor((ex.joined_at || {})[did], exportedAt,
                        ex.age_ramp_ms || eeff.AGE_RAMP_MS)
       : 1;
+    // starter 同理取自匯出（#99）：它與斜坡長度一樣是**那本帳的政策**。
     creditLines[did] = eeff.creditLine(did, stats.get(did), statsOf, af,
-                                       collateralNow.get(did) || 0);
+                                       collateralNow.get(did) || 0,
+                                       ex.starter_cc == null ? eeff.STARTER_CC : ex.starter_cc);
   }
   if (!exportedAt && Object.keys(ex.credit_lines || {}).length) {
     warn('匯出沒有 exported_at（#82 之前的格式）——信用額度的年齡項無從重算，' +
          '本次略過額度比對；其餘檢查照跑');
+  } else if (ex.starter_cc == null && Object.keys(ex.credit_lines || {}).length) {
+    // #99 之前的格式沒有記下那本帳的 starter，所以「額度算不算對」這件事
+    // 對它是**無從檢查**而不是不通過——與 exported_at 那一條同一個處置。
+    // 下一份匯出就會帶著它，所以這個豁免只適用於一次啟動。
+    warn(`匯出沒有 starter_cc（#99 之前的格式）——這本帳當時的 starter 未知，` +
+         `無法重算額度（本行程是 ${eeff.STARTER_CC} CC），本次略過額度比對；` +
+         '其餘檢查照跑。下一份匯出會帶上它');
   } else {
     for (const [did, v] of Object.entries(ex.credit_lines || {})) {
       const mine = creditLines[did];
       if (mine === undefined) continue;   // an agent with no settlements yet
       if (Math.abs(mine - v) > 1e-3) {
         fail(`credit line mismatch ${did}: rebuilt ${mine.toFixed(3)} vs ` +
-          `export ${v.toFixed(3)} — 年齡因子或 HUB_AGE_RAMP_MS 兩邊不一致？（#82）`);
+          `export ${v.toFixed(3)} — 年齡因子／斜坡長度／starter 兩邊不一致？` +
+          `（#82／#99；這本帳的 starter=${ex.starter_cc == null ? '(匯出沒帶)' : ex.starter_cc}）`);
       }
     }
   }
