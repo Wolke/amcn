@@ -90,10 +90,14 @@ cd node && node demo-succession.js
 #   營運方那一側：現任加 HUB_SUCCESSORS=<待命機 DID>，待命機跑
 #   node standby.js var/rendezvous.json --pin did:demo:<現任> --port 47180
 
-# #94 token 計量、上限與回報（約 45 秒，10 項斷言）：替別人做事花掉的是自己的
+# #94／#101／#102 token 計量、上限與回報（約 60 秒，15 項斷言）：替別人做事花掉的是自己的
 #   token。計量（有 usage 用真值、沒有就估並標成估計值）、上限（token／美金，
 #   跨重啟不歸零，用完就**停止出價**）、回報（每筆一行 log ＋ 一行 JSON 到
-#   out/owner-notices.jsonl）。最重要的是那組正／負對照
+#   out/owner-notices.jsonl）。最重要的是那組正／負對照。另外三條是第二種上游
+#   形狀（Anthropic 原生：/v1/messages、content[]、input_tokens→prompt_tokens、
+#   metadata.user_id），以及兩條**定位**斷言（#102）：成本不離開這台機器
+#   （掃整本匯出含 raw_log，美金／token 數／模型名零命中）、收據買的是一份
+#   通過驗收的交付而不是用量
 cd node && node demo-spend.js
 
 # #92 裝完就加入預設網路（約 20 秒，8 項斷言）：`node agent.js` 不帶任何參數即

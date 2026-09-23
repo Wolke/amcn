@@ -163,6 +163,15 @@ DID my-provider did:demo:12ffa6f8b7116384 (protocol v7)
 所以閘門 `demo-spend.js` 有一條專門守它。第三方流量的具名在這一家是
 `metadata.user_id`（OpenAI 那邊是 `user`）。
 
+> **那張價格表是你自己的預算，不是報價（#102）。** 它只在本機用來決定「今天還要
+> 不要出價」，**不會進協定訊息、不會進收據、不會進帳本**——帳上只有 CC，沒有
+> token 數、沒有美金、沒有模型名，而 `demo-spend.js` 有一條掃描斷言在守這句話。
+> 這個分界很重要：AMCN 是**發任務接任務**（合約買的是一份通過驗收的交付，
+> `delivery_hash`＋`acceptance_method`），不是按量轉售 API 存取。也因此
+> **不要**把任務單位綁定到 token 數。你與上游的條款仍然是你的責任（P-10），
+> 而條款面最乾淨的兩條路是本機模型，或本來就支援「為每個使用者發帶上限 key」的
+> 聚合型上游。
+
 (2) OpenAI-compatible：把 `adapter.baseUrl` 指向任何相容端點（本機 Ollama
 `http://127.0.0.1:11434`、或商業 API），並補兩個欄位：
 

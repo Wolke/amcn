@@ -19,6 +19,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const transport = require('./lib/transport').fromEnv();
 const { identityFromSeed } = require('./lib/wire');
 const spendLib = require('./lib/spend');
 
@@ -106,7 +107,9 @@ async function market({ cap, preload }) {
   }
   const procs = [];
   const hub = spawnProc('hub.js', { HUB_PORT: String(PORT), HUB_BEACON: '0',
-    HUB_AGE_RAMP_MS: '1', HUB_DUMP_PATH: path.join(dir, 'ledger.json') });
+    HUB_AGE_RAMP_MS: '1', HUB_DUMP_PATH: path.join(dir, 'ledger.json'),
+    // 掃描要讀 Hub 的全量流量記錄（#88 之後預設不隨匯出出去，閘門自己開）
+    HUB_EXPORT_RAWLOG: '1' });
   procs.push(hub);
   procs.push(spawnProc('fake-provider.js', { FAKE_PORT: String(FAKE_PORT), FAKE_KEY: KEY }));
   await sleep(900);
@@ -121,7 +124,11 @@ async function market({ cap, preload }) {
                  key: { env: 'SPEND_KEY', service: 'amcn-demo-spend' },
                  terms: { attested: true, note: 'demo upstream is fake-provider.js' } },
       provide: { afterMs: 0, pricePerUnit: 1.0 },
-      policy: { spend: { dailyTokenCap: cap, noticePath: 'out/owner-notices.jsonl' } },
+      // 帶價目表：這樣「成本有沒有外洩」才是一個真的測試——沒有價目表的話
+      // 連本機都算不出美金，掃不到東西不代表守得住。
+      policy: { spend: { dailyTokenCap: cap, dailyUsdCap: 10,
+                         usdPerMTokens: { in: 5, out: 25 },
+                         noticePath: 'out/owner-notices.jsonl' } },
     }),
     SPEND_KEY: KEY, AMCN_SPEND_ROOT: dir,
   });
@@ -135,7 +142,20 @@ async function market({ cap, preload }) {
   // 成交與否由 **Hub** 說，而不是由買方的字串說——「有沒有進帳」是帳的事實。
   const settled = await waitFor(() => /SETTLED/.test(hub.text), 12000);
   await sleep(500);
-  const out = { settled: !!settled, sellerText: seller.text };
+  let ex = null;
+  if (settled) {
+    const chan = transport.dial({ host: '127.0.0.1', port: PORT });
+    ex = await new Promise((resolve) => {
+      const t = setTimeout(() => resolve(null), 8000);
+      chan.onMessage((m) => {
+        if (m.type !== 'ledger_export') return;
+        clearTimeout(t); resolve(m);
+      });
+      chan.send({ type: 'export' });
+    });
+    try { chan.close(); } catch { /* closed */ }
+  }
+  const out = { settled: !!settled, sellerText: seller.text, ex };
   procs.forEach((p) => { try { p.child.kill(); } catch { /* gone */ } });
   await sleep(400);
   return out;
@@ -218,6 +238,32 @@ async function main() {
   check('每筆結算後主人真的被告知（log 一行、給人看的那一份）',
     /\[owner\] 這筆 .* 用掉 .* tokens/.test(rich.sellerText),
     (rich.sellerText.match(/\[owner\] 這筆[^\n]*/) || [''])[0].slice(0, 90));
+
+  // 這一條守的是**定位**而不是程式：AMCN 是「發任務接任務」的賞金模式，
+  // 不是計量轉售 API 存取（P-10／#67／`key-lending-verification.md`）。
+  // 那個分界要站得住，靠的不是名稱而是可檢查的事實——**成本從來不離開這台
+  // 機器**：合約買的是「一份通過驗收的交付」（delivery_hash＋acceptance），
+  // 帳上只有 CC，沒有 token 數、沒有美金、沒有模型名。價目表是你**自己的
+  // 預算**輸入，不是報給任何人的價。
+  const exJson = rich.ex ? JSON.stringify(rich.ex) : '';
+  const leaks = rich.ex ? [
+    ['usd', /usd/i], ['價目表數字', /"in":\s*5\b|"out":\s*25\b/],
+    ['token 用量', /prompt_tokens|completion_tokens|tokens_in|tokens_out/],
+    ['模型名', /claude-|gpt-|llama/i],
+  ].filter(([, re]) => re.test(exJson)).map(([name]) => name) : ['沒有匯出可掃'];
+
+  check('成本不離開這台機器：整本帳（含流量記錄）裡沒有美金、沒有 token 數、沒有模型名',
+    rich.ex && leaks.length === 0,
+    rich.ex ? `掃過 ${(exJson.length / 1024).toFixed(0)} KB 的匯出與 raw_log，零命中`
+      : leaks.join('、'));
+
+  check('收據買的是「一份通過驗收的交付」而不是用量（delivery_hash＋acceptance，金額只有 CC）',
+    !!rich.ex && rich.ex.receipts.length > 0 &&
+    !!rich.ex.receipts[0].receipt.delivery_hash &&
+    !!rich.ex.receipts[0].receipt.acceptance_method &&
+    rich.ex.receipts[0].receipt.postings.every((p) => 'amount_cc' in p && !('usd' in p)),
+    rich.ex && rich.ex.receipts[0]
+      ? `欄位：${Object.keys(rich.ex.receipts[0].receipt).join('／')}` : '沒有收據');
 
   check('第二種上游形狀（Anthropic 原生）：回應解析得出內容',
     !!anth.out && typeof anth.out.content === 'string' && anth.out.content.length > 0,
