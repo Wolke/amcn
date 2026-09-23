@@ -39,7 +39,7 @@ fi
 
 say "0/6 檢查 SSH 與遠端 OS"
 run "uname -sm; . /etc/os-release 2>/dev/null; echo \${PRETTY_NAME:-unknown}" || {
-  echo "SSH 連不上 $TARGET。先確認你能手動 ssh 進去（金鑰、防火牆、使用者）。"; exit 1; }
+  echo "SSH 連不上 ${TARGET}。先確認你能手動 ssh 進去（金鑰、防火牆、使用者）。"; exit 1; }
 
 say "1/6 安裝 Node.js ≥ 20（Ubuntu/Debian）"
 # Ubuntu 24.04 內建的 nodejs 是 18.x，太舊（AMCN 需要 ≥ 20），所以走 NodeSource。
@@ -128,7 +128,7 @@ cat <<OUT
 $([ -n "$DID" ] && [ "$DID" = "$LOCAL_DID" ] && echo '→ 一致：對已經釘住你的人來說，Hub 只是換了位址' || echo '→ **不一致**：.hub-seed 沒帶過去，或遠端讀不到它')
 
 接下來（順序不能顛倒）：
-  1. 雲端防火牆放行 TCP $PORT（Azure：az network nsg rule create；其他家看各自的控制台）
+  1. 雲端防火牆放行 TCP ${PORT}（Azure：az network nsg rule create；其他家看各自的控制台）
   2. 本機停掉自己的 Hub，只留供給端與 panel：
        launchctl unload ~/Library/LaunchAgents/com.amcn.hub.plist
   3. 把本機的 agent／panel 指向新位址，而且**三者都要 secure**：

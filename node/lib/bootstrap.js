@@ -19,7 +19,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const ROOT = path.join(__dirname, '..');
-const NETWORK_FILE = path.join(ROOT, 'network.json');
+// AMCN_NETWORK_FILE：閘門與「同一台機器加入第二個網路」都需要換掉這一份。
+const NETWORK_FILE = process.env.AMCN_NETWORK_FILE || path.join(ROOT, 'network.json');
 // 身分檔放哪。可覆蓋的理由有兩個：閘門不該碰到這台機器真正的身分，而同一台
 // 機器要跑第二個 agent 時也需要第二組身分。
 const CONFIG_DIR = process.env.AMCN_CONFIG_DIR || path.join(ROOT, 'configs');
@@ -52,10 +53,21 @@ function network() {
   }
   try {
     const rec = JSON.parse(fs.readFileSync(NETWORK_FILE, 'utf8'));
+    const pin = process.env.AMCN_HUB_PIN || rec.hubPin || null;
     if (rec && rec.rendezvous) {
-      return { rendezvous: rec.rendezvous,
-               hubPin: process.env.AMCN_HUB_PIN || rec.hubPin || null,
-               name: rec.name || 'network.json', from: 'network.json' };
+      return { rendezvous: rec.rendezvous, hubPin: pin,
+               name: rec.name || 'network.json', from: 'network.json',
+               transport: rec.transport || null };
+    }
+    // 靜態位址也算一個網路（而且對「commit 進公開 repo」這個發布方式更實用）：
+    // 位址記錄有**新鮮度**要求（預設 10 分鐘），一份 commit 進 repo 的記錄十
+    // 分鐘後就過期了，而每十分鐘推一個 commit 不是發布方式。onion 位址本身
+    // 幾乎不變（它是一對留在 var/onion 的金鑰），所以靜態位址＋pin 就夠，
+    // 而 rendezvous 是「之後要搬家」時的升級路徑，不是入門的前提。
+    if (rec && rec.hubHost) {
+      return { hubHost: rec.hubHost, hubPort: rec.hubPort || 47180, hubPin: pin,
+               name: rec.name || 'network.json', from: 'network.json',
+               transport: rec.transport || null };
     }
   } catch { /* 沒有檔或壞了，都算「沒有預設網路」 */ }
   return null;
@@ -90,9 +102,14 @@ function defaultConfig(role, { standalone = false, log = console.log } = {}) {
   }
   const net = network();
   if (!net) { console.error(HELP); process.exit(1); }
-  log(`[amcn] 預設網路 ${net.name}（來源 ${net.from}）：記錄 ${net.rendezvous}` +
-    (net.hubPin ? `，釘住 ${net.hubPin}` : '，**沒有 pin**——任何簽得出記錄的人都會被跟隨'));
-  return { ...base, rendezvous: net.rendezvous, hubPin: net.hubPin };
+  const where = net.rendezvous
+    ? `記錄 ${net.rendezvous}`
+    : `位址 ${net.hubHost}:${net.hubPort}`;
+  log(`[amcn] 預設網路 ${net.name}（來源 ${net.from}）：${where}` +
+    (net.hubPin ? `，釘住 ${net.hubPin}` : '，**沒有 pin**——任何答得出來的人都會被跟隨'));
+  return net.rendezvous
+    ? { ...base, rendezvous: net.rendezvous, hubPin: net.hubPin }
+    : { ...base, hubHost: net.hubHost, hubPort: net.hubPort, hubPin: net.hubPin };
 }
 
 module.exports = { network, defaultConfig, seedFor, NETWORK_FILE, CONFIG_DIR, HELP };

@@ -55,6 +55,10 @@ jobs:
         working-directory: node
         run: node demo-tor.js
 
+      - name: clone 之後的那一個指令（#96；含 repo 內腳本的 $變數緊接中文掃描 #97）
+        working-directory: node
+        run: node demo-join.js
+
       - name: 排序器接手（#95；自動升格、不複製私鑰、第三方仍驗得過）
         working-directory: node
         run: node demo-succession.js

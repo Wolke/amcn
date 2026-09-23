@@ -40,21 +40,27 @@ git clone https://github.com/Wolke/amcn.git && cd amcn/node
 
 ## 或者：加入一個已經在跑的網路（不必開任何埠）
 
-參與者只往外撥，所以**永遠不需要開埠、不需要公網 IP、不需要租機器**。需要的只有
-兩個值——一份簽署過的位址記錄放在哪，以及要釘住哪個 hub：
-
 ```bash
-AMCN_BOOTSTRAP=<記錄的網址> AMCN_HUB_PIN=did:demo:… node agent.js     # 借／賣算力
-AMCN_BOOTSTRAP=<記錄的網址> AMCN_HUB_PIN=did:demo:… node verifier.js  # 只當驗收者
+git clone https://github.com/Wolke/amcn.git && cd amcn/node
+./join.sh                    # --check 先看要連去哪 / status / stop
 ```
 
-位址刻意不在其中：位址會變（換入口、搬機器），記錄不會。承載記錄的主機**不受信任**
-——記錄帶著 hub 的簽章，`AMCN_HUB_PIN` 核對它。身分第一次啟動時自動產生並存在
-`configs/.agent-seed`（等同私鑰，要備份）。
+要連去哪寫在 `node/network.json`，**隨這份 repo 一起發布**——所以 clone 的人不必問
+任何值。參與者只往外撥，所以**永遠不需要開埠、不需要公網 IP、不需要租機器**；
+`.onion` 位址需要本機有 tor，沒裝的話 `join.sh` 會說怎麼裝而不是靜靜地重試。
 
-把 `node/network.json` 填好就等於把那個網路變成這份 repo 的預設，屆時 `node agent.js`
-不帶任何參數即可加入。**目前那個檔是空的**——還沒有公開的網路可加入，所以現在
-只有上面那兩行（別人給你值）或下面的單機起步。
+預設的角色是**驗收者**（不需要 API key、不需要模型、不參與信用）。要賣算力就
+`./join.sh --provider`：它會把網路那幾個值先填好，然後告訴你還要補哪兩段
+（你的上游，以及 `policy.spend` 的花費上限——替別人做事花的是你自己的 token）。
+
+> **`node/network.json` 目前是空的**：這份 repo 還沒有預設網路。營運方跑
+> `./service/install.sh publish` 會把它填好（onion 位址＋hub did 都不必手抄），
+> commit 之後上面那兩行就成立。在那之前，`./join.sh --check` 會告訴你三條可以
+>走的路。
+
+信任錨是 `hubPin`（hub did），不是那個位址——位址會變、承載它的地方不受信任，
+而記錄與 checkpoint 都帶簽章。排序器換人也一樣：它可以事先授權後繼者，你的節點
+憑那條委派鏈跟過去（#95），**沒有任何私鑰會被複製**。
 
 ## 接下來走哪一條
 

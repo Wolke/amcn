@@ -6,6 +6,7 @@
 #   ./install.sh --onion  同上，外加一個常駐 onion service：**任何地方**的人
 #                         都能加入，而這台機器對外零入向埠（#89／#86）
 #   ./install.sh --lan    切回區網模式（會停掉 onion service）
+#   ./install.sh publish  把 network.json 填成這個網路（commit 之後別人 clone 就能加入）
 #   ./install.sh status   看服務狀態、hub did、對外位址
 #   ./install.sh invite   印出可以直接貼給人的邀請
 #   ./uninstall.sh        全部移除（不會刪帳本與身分）
@@ -32,7 +33,7 @@ rv_summary() {
     const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
     const age = Math.round((Date.now() - r.ts) / 1000);
     console.log(`${r.host}:${r.port}（${age}s 前發布）`);
-  ' "$RV_FILE" 2>/dev/null || echo "（記錄讀不出來：$RV_FILE）"
+  ' "$RV_FILE" 2>/dev/null || echo "（記錄讀不出來：${RV_FILE}）"
 }
 
 if [ "${1:-install}" = "invite" ]; then
@@ -90,6 +91,41 @@ INVITE
 要講清楚的三件事：CC 不是幣、換不到現金；負餘額是設計的一部分；
 這是原型，目前為止網路上所有交易都是我自己的機器之間發生的。
 INVITE
+  exit 0
+fi
+
+if [ "${1:-install}" = "publish" ]; then
+  # 「發布一個網路」＝把 network.json 填好並 commit。手抄 onion 位址與 hub did
+  # 是整條推廣路徑上最容易貼錯的一步，而貼錯的結果是對方連到別人的 Hub 或
+  # 連不上而不知道為什麼——所以這一步由程式做。
+  DID="$(hub_did)"; ONION="$(onion_addr)"
+  [ -n "${DID}" ] || { echo "Hub 還沒起來（看 logs/home-hub.log），先 ./install.sh"; exit 1; }
+  if [ -z "${ONION}" ]; then
+    echo "還沒有 onion 位址——只有區網位址的話，clone 這份 repo 的人連不到你。"
+    echo "  先跑： ./install.sh --onion   （常駐 onion service，對外零入向埠）"
+    exit 1
+  fi
+  # install.sh 自己 cd 到 service/ 底下，所以這裡要用絕對路徑——
+  # 相對路徑在第一版就讓它去找 service/network.json 了。
+  node -e '
+    const fs = require("fs");
+    const p = process.argv[5];
+    const cur = JSON.parse(fs.readFileSync(p, "utf8"));
+    const out = { _: cur._, name: process.argv[1], hubHost: process.argv[2],
+                  hubPort: Number(process.argv[3]), transport: "tor",
+                  rendezvous: null, hubPin: process.argv[4] };
+    fs.writeFileSync(p, JSON.stringify(out, null, 2) + "\n");
+  ' "${NETWORK_NAME:-amcn}" "${ONION}" "${HUB_PORT:-47180}" "${DID}" "${REPO}/network.json"
+  echo "已把 node/network.json 填成這個網路："
+  echo "  位址  ${ONION}:${HUB_PORT:-47180}（tor）"
+  echo "  釘住  ${DID}"
+  echo ""
+  echo "剩下一步是 commit 它——那就是「發布」的全部內容："
+  echo "    git add node/network.json && git commit -m 'publish the network' && git push"
+  echo ""
+  echo "之後任何人 clone 這份 repo 就能直接加入，不必問你任何值："
+  echo "    cd node && ./join.sh"
+  echo "（對方需要本機有 tor；沒裝的話 join.sh 會說怎麼裝。你這邊仍然零入向埠。）"
   exit 0
 fi
 
@@ -179,7 +215,7 @@ DID="$(hub_did)"
 IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo '<你的區網 IP>')"
 cat <<OUT
 
-已安裝並啟動（開機自動起、崩潰自動重起），模式 $WANT_MODE：
+已安裝並啟動（開機自動起、崩潰自動重起），模式 ${WANT_MODE}：
   com.amcn.hub     排序器      $([ "$WANT_MODE" = onion ] && echo "127.0.0.1:${HUB_PORT:-47180}（對外零入向埠）" || echo "0.0.0.0:${HUB_PORT:-47180}")
   com.amcn.panel   3 個驗收者  身分在 configs/.panel-seed
   com.amcn.agent   供給端      Owner Console http://127.0.0.1:47201/status
@@ -203,6 +239,7 @@ $([ "$WANT_MODE" = onion ] && echo "  var/onion/hs_ed25519_secret_key  onion 位
 
   ./install.sh status    看狀態
   ./install.sh invite    印出可以直接貼給人的邀請（DID 與位址都填好）
+  ./install.sh publish   把 network.json 填好；commit 之後別人 clone 就能加入
   ./install.sh --lan     收掉對外入口，改回只有區網連得到
   ./uninstall.sh         移除服務（帳本與身分都留著）
 OUT

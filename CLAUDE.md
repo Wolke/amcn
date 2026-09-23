@@ -106,6 +106,12 @@ cd node && node demo-bootstrap.js
 #   所以「模式是 onion 卻又綁回 0.0.0.0」抓得到。不需要 tor、不碰你的 launchd
 cd node && node demo-rendezvous.js
 
+# 加入一個已經在跑的網路（**別人 clone 之後要跑的那一個指令**，#96）
+cd node && ./join.sh                # --check / --verifiers 3 / --provider / status / stop
+#   要連去哪由 network.json 決定（靜態位址或位址記錄，都必須有 hubPin）。
+#   參與者只往外撥，永遠不必開埠；.onion 位址需要本機有 tor，缺了會說怎麼修。
+cd node && node demo-join.js        # 閘門（約 30 秒，9 項斷言，含兩條負對照）
+
 # 單機起一個真的網路（推廣用的第一步，約 30 秒；留著讓人操作，不是回歸閘門）
 cd node && ./quickstart.sh          # ./quickstart.sh status / stop
 

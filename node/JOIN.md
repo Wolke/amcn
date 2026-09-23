@@ -30,6 +30,27 @@
 
 ## 路徑 A：只當 Verifier（三分鐘，門檻最低）
 
+**最短的路**（repo 裡已經有預設網路時）：
+
+```bash
+git clone https://github.com/Wolke/amcn.git && cd amcn/node
+./join.sh                # 先看要連去哪：./join.sh --check
+```
+
+就這樣——不必寫設定檔、不必貼位址、不必開埠。它會檢查 Node 版本、需要 tor 時
+告訴你怎麼裝（`.onion` 在 DNS 裡不存在，必須有本機的 tor 幫你解），產生並保存你的
+身分（`configs/.verifier-seed`，**等同私鑰**，押注綁在它上面），然後開始接驗收工作。
+`./join.sh status` 看狀態、`./join.sh stop` 停掉。
+
+沒有預設網路（或你要加入別人給你的網路）時，兩個值就夠：
+
+```bash
+AMCN_BOOTSTRAP=<記錄的網址或 .onion 位址> AMCN_HUB_PIN=did:demo:… ./join.sh
+```
+
+下面是同一件事的手動版，想知道它到底做了什麼再看。
+
+
 Verifier 不需要 key、不需要模型、不參與信用。它做的事是：Hub 把合約抽選的
 panel 通知它，它跑驗收斷言（DSL），先送承諾雜湊、再揭示裁決（commit-reveal，
 所以它看不到別人的答案）。
