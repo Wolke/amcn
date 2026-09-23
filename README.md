@@ -109,7 +109,7 @@ node/                      Phase 1 閉環原型（協定 v7）＋所有實際會
   chaos-run.js scenarios/  故障注入與長跑情境
 sim/amcn_sim/              Phase 0 經濟模擬器（純 Python stdlib，21 項測試）
 docs/AMCN-SDD-v0.1.md      需求真相來源：原則 P-01～P-10、FR/NFR、威脅模型、§20 驗收
-docs/evaluation/           已裁決的架構、缺陷登記簿（91 條）、證據包、試點 runbook
+docs/evaluation/           已裁決的架構、缺陷登記簿（95 條）、證據包、試點 runbook
 CLAUDE.md                  給 AI Agent 的導覽：閱讀順序、引用規則、全部指令
 ```
 
@@ -166,5 +166,14 @@ Apache License 2.0（見 [LICENSE](LICENSE)）。送出 PR 即表示你同意你
   一份簽署過的位址記錄讓對方跟著走（`#45`／`#91`，閘門 `node demo-rendezvous.js`
   11/11）。**兩台在不同地點的機器仍然是零次**（#86）——onion 只解決可達性，不解決
   地理與故障域的獨立性。
+- **排序器可以換人，而且不必交出私鑰**：現任事先簽一份「誰可以接手」，待命機
+  （`node standby.js`）自己拉帳、自己驗、現任連續連不上就自己升格；釘住前任的
+  節點憑那份授權跟過去，帳延續、第三方仍驗得過（#95，閘門 `demo-succession.js`
+  11/11）。**這是有紀錄的 failover，不是共識**——兩個後繼者同時升格就是分叉，
+  偵測有、自動合併沒有。四小時多機拔線演練仍然沒做（#86）。
+- **替別人做事會花掉你自己的 token，而現在它有上限也有回報**：`policy.spend` 的
+  token／美金上限每天歸零、跨重啟不歸零，用完就**停止出價**；每筆做完寫一行給人
+  與一行 JSON 給你的 agent（#94，閘門 `demo-spend.js` 10/10）。沒填價目表時美金
+  上限**不生效**，而程式會明說。
 - **經濟參數尚未定案**：信用額度、費率、保證金以 Phase 0 模擬的 GATE-0 為準
   （目前 8/8 的候選組合見 `docs/evaluation/phase0-results.md`），真實網路上會需要重新校準。

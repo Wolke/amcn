@@ -82,6 +82,14 @@ cd node && node demo-transport.js
 #   帳與直連 tcp 完全相同。自帶 SOCKS5 代理，**不需要安裝 tor**
 cd node && node demo-tor.js
 
+# #95 排序器接手（約 70 秒，11 項斷言）：現任被 SIGKILL 之後待命機**自動**升格，
+#   client 憑事先簽好的授權跟到一個**不同的 DID**（沒有任何私鑰被複製），帳延續
+#   且第三方仍驗得過（前任簽的 checkpoint 靠委派鏈）。三條負對照：沒授權的人
+#   跟不到、沒驗過的帳本不准升格、舊排序器不能搶回排序權
+cd node && node demo-succession.js
+#   營運方那一側：現任加 HUB_SUCCESSORS=<待命機 DID>，待命機跑
+#   node standby.js var/rendezvous.json --pin did:demo:<現任> --port 47180
+
 # #94 token 計量、上限與回報（約 45 秒，10 項斷言）：替別人做事花掉的是自己的
 #   token。計量（有 usage 用真值、沒有就估並標成估計值）、上限（token／美金，
 #   跨重啟不歸零，用完就**停止出價**）、回報（每筆一行 log ＋ 一行 JSON 到

@@ -71,6 +71,13 @@ console.log(`  Σ 餘額      ${sum.toFixed(10)}${Math.abs(sum) < 1e-9 ? '（守
 console.log(`  排序器身分  ${ex.hub_pub ? 'did:demo:' + require('./lib/wire').sha256(ex.hub_pub).slice(0, 16) : '(匯出沒帶 hub_pub)'}` +
   (pin ? `（要求 ${pin}）` : '（沒有 --pin，就沒有在驗「是誰簽的」）'));
 
+// 接手要被**說出來**：釘住前任的人拿到的是後繼者的帳，而那是合法的——
+// 但「合法」不等於「不必知道」（#95）。
+if (r.notes && r.notes.length) {
+  console.log('');
+  for (const n of r.notes) console.log(`  ${n}`);
+}
+
 if (r.warnings && r.warnings.length) {
   console.log(`\n無從檢查的項目 ${r.warnings.length} 項（不是不通過，是這份匯出裡沒有可比對的東西）：`);
   for (const w of r.warnings.slice(0, 5)) console.log(`  - ${w}`);

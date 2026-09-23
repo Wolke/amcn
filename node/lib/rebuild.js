@@ -68,6 +68,10 @@ function rebuild(ex, opts = {}) {
   // 的話，修覆蓋率的人會以為自己在修守恆（#76 分「未測到」與「違反」同理）。
   const warnings = [];
   const warn = (m) => { warnings.push(m); console.error(`[rebuild] 注意：${m}`); };
+  // notes 與 warnings 分開：接手是一個**事實**（這本帳換過排序器，而換得
+  // 合法），不是「這一項無從檢查」。把它塞進 warnings 會讓一個正常的接手
+  // 看起來像一個瑕疵，而那會訓練人忽略警告。
+  const notes = [];
   const {
     stakeTargetCc = 5, stakeEscrowFrac = 0.5, expectHubDid = null,
   } = opts;
@@ -314,12 +318,52 @@ function rebuild(ex, opts = {}) {
   const cps = ex.checkpoints || [];
   if (ex.hub_pub) {
     if (expectHubDid && didOf(ex.hub_pub) !== expectHubDid) {
-      fail(`export is from hub ${didOf(ex.hub_pub)}, expected ${expectHubDid}`);
+      // 接手之後，匯出來自**後繼者**，而釘住前任的人仍然要驗得過這本帳
+      // （#95）。判準與 client 跟隨位址記錄時完全相同：能不能從我釘的那個
+      // DID 經委派鏈走到這本帳的排序器。走不到才是「不是我要的那本帳」。
+      const su = require('./succession');
+      const path = su.chain(ex.succession || [],
+        { from: expectHubDid, to: didOf(ex.hub_pub) });
+      if (!path) {
+        fail(`export is from hub ${didOf(ex.hub_pub)}, expected ${expectHubDid}` +
+          (ex.succession ? '，而附帶的接手憑證裡沒有一條從它出發的鏈' : ''));
+      } else {
+        notes.push(`接手：這本帳的排序器 ${didOf(ex.hub_pub)} 由 ${expectHubDid} ` +
+          `事先授權（${path.length} 段委派）`);
+      }
     }
+    // 接手之後，這本帳裡有**前任簽的** checkpoint（#95）。原本這裡只認一把
+    // `hub_pub`，於是後繼者的匯出在第三方手上**驗不過**——而「任何人都可以
+    // 自己驗這本帳」是這個設計的核心宣稱之一，所以那等於接手把帳弄成不可驗。
+    // 閘門先抓到的就是這一條（`checkpoint #0 signature invalid`）。
+    //
+    // 允許的簽署者＝現任，加上**能經委派鏈走到現任的**每一個前任。鏈本身隨
+    // 匯出出去（`ex.succession`），每一段都有自己的簽章，所以這不是放寬：
+    // 一把不在鏈上的 key 簽的 checkpoint 仍然是偽造。
+    const signers = [{ pub: ex.hub_pub, who: 'current' }];
+    if (Array.isArray(ex.succession) && ex.succession.length) {
+      const su = require('./succession');
+      const hubDid = didOf(ex.hub_pub);
+      for (const c of ex.succession) {
+        const ok = su.checkCert(c);
+        if (!ok) { fail('succession cert in export does not verify'); continue; }
+        // 只收「從這個簽發者出發，能走到現任」的憑證：一張把排序權交給別人
+        // 的憑證不會讓簽發者自己變成合法簽署者。
+        if (ok.successor === hubDid ||
+            su.chain(ex.succession, { from: ok.issuer, to: hubDid })) {
+          signers.push({ pub: c.pub, who: `predecessor ${ok.issuer}` });
+        }
+      }
+    }
+    const signedByAny = (cp, sig) => signers.some((s) => {
+      try { return verify(s.pub, cp, sig); } catch { return false; }
+    });
     let prevStored = null;
     for (const entry of cps) {
-      if (!verify(ex.hub_pub, entry.cp, entry.sig)) {
-        fail(`checkpoint #${entry.cp && entry.cp.seq} signature invalid`);
+      if (!signedByAny(entry.cp, entry.sig)) {
+        fail(`checkpoint #${entry.cp && entry.cp.seq} signature invalid` +
+          (signers.length > 1
+            ? `（試過現任與 ${signers.length - 1} 個前任的 key）` : ''));
       }
       // §4 #69a — a truncated history. Every artefact in such an export is
       // genuine and hub-signed; what gives it away is that a checkpoint
@@ -372,11 +416,12 @@ function rebuild(ex, opts = {}) {
     }
   }
 
-  if (errors.length) return { ok: false, errors, warnings };
+  if (errors.length) return { ok: false, errors, warnings, notes };
   return {
     ok: true,
     errors: [],
     warnings,
+    notes,
     balances, chains, stakes,
     stats,
     creditLines,

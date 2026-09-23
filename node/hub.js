@@ -140,6 +140,34 @@ const CHECKPOINT_KEEP_MS = Number(process.env.HUB_CHECKPOINT_KEEP_MS || 60000);
 const hubId = process.env.HUB_SEED
   ? identityFromSeed(process.env.HUB_SEED)
   : genIdentity(); // signs checkpoints
+
+// 接手憑證（#95）。兩個來源都要帶：
+//   HUB_SUCCESSORS        我事先授權誰可以接手我（趁自己還活著時簽）
+//   HUB_SUCCESSION_CERTS  授權「我」的那條鏈（我自己就是接手上來的）
+// 它們隨**位址記錄**出去（client 憑它跟過來），也隨**匯出**出去（第三方憑它
+// 才驗得過前任簽的 checkpoint——那一條是閘門抓到的，不是設計時想到的）。
+const successionCerts = (() => {
+  const su = require('./lib/succession');
+  const out = [];
+  const inherited = process.env.HUB_SUCCESSION_CERTS;
+  if (inherited) {
+    try {
+      const got = JSON.parse(require('node:fs').readFileSync(inherited, 'utf8'));
+      if (Array.isArray(got)) out.push(...got);
+    } catch (err) {
+      console.error(`[hub] 讀不到接手憑證 ${inherited}: ${err.message}` +
+        '——我會照樣服務，但釘住前任的 client 不會跟過來，' +
+        '而前任簽的 checkpoint 會讓這本帳在第三方手上驗不過');
+    }
+  }
+  const names = (process.env.HUB_SUCCESSORS || '').split(',')
+    .map((x) => x.trim()).filter(Boolean);
+  names.forEach((did, i) => {
+    out.push(su.cert(hubId, { successor: did, priority: i + 1,
+      note: 'signed while primary was live' }));
+  });
+  return out;
+})();
 const settledIds = new Set(); // contract_id idempotency keys
 const stakes = new Map();     // verifier did -> CC held in protocol:stake
 const collateral = new Map(); // did -> CC locked in protocol:collateral
@@ -1204,6 +1232,8 @@ function buildExport({ includeRawLog = EXPORT_RAWLOG } = {}) {
     onboard_paid: [...onboardSeen],
     events,
     hub_pub: hubId.pub,
+    // #95：前任簽的 checkpoint 要能被第三方驗過，所以委派鏈跟著帳一起走。
+    ...(successionCerts.length ? { succession: successionCerts } : {}),
     // 取匯出的時刻（#82）。信用額度含年齡項，而重建一定發生在匯出**之後**，
     // 沒有這個時間戳就重算不出同一個值——只會算出一個比較大的。
     exported_at: Date.now(),
@@ -1571,6 +1601,41 @@ if (REBATE_ON) setInterval(() => {
   if (trSurplus > REBATE_MIN_CC) rebateFrom(TREASURY, trSurplus, 'treasury');
   outVolume.clear();   // 權重要反映「最近」而不是全期
 }, REBATE_MS).unref();
+
+// 有人正在接手的時候，舊排序器**不能**直接回來（#95）。
+//
+// 分叉最常見的成因不是攻擊，是人：拔線演練之後把原本那台插回同一個網段。
+// 三台真機的 runbook 用一句話處理它（「M1 不得再接回同一網段」），而一句話
+// 不是守門。可以檢查的事實是：**後繼者活著的時候，位址記錄是新的**——一個
+// 死掉的排序器發不出新記錄，所以記錄的新鮮度就是「現在誰是現任」的證據。
+//
+// 刻意不自動合併兩本帳：那需要決定哪些分錄留下，而那是治理決定不是程式決定。
+// 這裡只做一件事——說清楚現況與兩條路，然後拒絕啟動。
+if (process.env.HUB_RENDEZVOUS && process.env.HUB_RESUME_AFTER_SUCCESSION !== '1') {
+  try {
+    const fs_ = require('node:fs');
+    const rec = JSON.parse(fs_.readFileSync(process.env.HUB_RENDEZVOUS, 'utf8'));
+    const rv = require('./lib/rendezvous');
+    const mine = discovery.didOf(hubId.pub);
+    const seen = rv.check(rec, { pin: null });
+    if (seen.ok && seen.did !== mine) {
+      const su = require('./lib/succession');
+      const authorised = su.chain(rec.succession || [], { from: mine, to: seen.did });
+      console.error(
+        `[hub] REFUSING to start: ${seen.did} 正在服務（位址記錄 ${Math.round(seen.ageMs / 1000)}s 前才更新，` +
+        `${seen.host}:${seen.port}）` +
+        (authorised ? '，而那是我自己授權的後繼者' : '，而它不是我授權的（可能是別人的網路用了同一個記錄位置）'));
+      console.error('[hub] 直接起來就是分叉：兩個排序器會各自延伸同一段歷史，' +
+        '而釘住我的 client 會被分到兩本帳上。兩條路：');
+      console.error('  1. 接受它是現任，我改當待命（推薦）：');
+      console.error(`       node standby.js ${process.env.HUB_RENDEZVOUS}`);
+      console.error('  2. 我要收回排序權：先取得它的帳（ledger-dump.js）並以那份 ' +
+        'HUB_IMPORT 啟動，然後 HUB_RESUME_AFTER_SUCCESSION=1。');
+      console.error('     那份帳延續的是它的歷史——沒有這一步，你會丟掉它服務期間的每一筆。');
+      process.exit(1);
+    }
+  } catch { /* 沒有記錄、或讀不出來：照原本的路啟動 */ }
+}
 
 // --- server ---------------------------------------------------------------
 transport.listen({
@@ -2016,6 +2081,9 @@ transport.listen({
   if (process.env.HUB_RENDEZVOUS) {
     const rv = require('./lib/rendezvous');
     const where = process.env.HUB_RENDEZVOUS;
+    // 憑證隨每一份位址記錄出去，所以 client 取一次就同時拿到「你是誰」與
+    // 「憑什麼是你」。它們不在記錄的簽署範圍內——是別人簽的（見 rendezvous.js）。
+    const succession = successionCerts;
     // 對外的埠不一定等於自己聽的埠：任何一層轉發（NAT 轉發、反向代理、
     // 負載平衡）都可能換掉它，而記錄裡要寫的是**別人要連的那一個**。
     // 原本只讓主機名可覆蓋、埠寫死成自己聽的 PORT，所以一旦中間有一層
@@ -2045,7 +2113,7 @@ transport.listen({
     const republish = () => {
       const { host, from } = advertiseHost();
       try {
-        rv.publish(hubId, { host, port: advertisePort }, where);
+        rv.publish(hubId, { host, port: advertisePort }, where, succession);
         // 只在位址**變了**的時候說話：常駐服務每 60 秒重發一次，逐次列印
         // 會把「入口換了位址」這件唯一值得看的事埋掉。
         if (host !== announced) {
@@ -2059,6 +2127,13 @@ transport.listen({
     republish();
     setInterval(republish, Number(process.env.HUB_RENDEZVOUS_MS || 60000)).unref();
   }
+    const authorised = (process.env.HUB_SUCCESSORS || '').split(',')
+      .map((x) => x.trim()).filter(Boolean);
+    if (authorised.length) {
+      console.log(`[hub] 已簽接手憑證給 ${authorised.length} 個待命排序器：` +
+        authorised.map((d, i) => `${d}（優先序 ${i + 1}）`).join('、') +
+        '——它們不需要我的私鑰，client 釘的仍然是我');
+    }
     if (CANARY_DID) {
       console.log(`[hub] canary issuer authorised: ${CANARY_DID} ` +
         '(may spend Treasury on decoy tasks)');

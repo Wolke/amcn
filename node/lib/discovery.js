@@ -139,9 +139,15 @@ async function resolveHubTarget(cfg, log = () => {}) {
       const got = await rv.resolve(cfg.rendezvous,
         { pin: cfg.hubPin || null, maxAgeMs: cfg.rendezvousMaxAgeMs });
       if (got.ok) {
+        // 跟到一個**不是**釘住那一個的排序器，是要被說出來的事（#95）：
+        // 它代表接手發生了。原本這裡不分青紅皂白印 'matches pinned did'，
+        // 而那句話在接手之後是假的——一個把接手誤讀成正常的操作者，不會去
+        // 查為什麼現任換人了。
         log(`rendezvous → ${got.host}:${got.port} (${got.did}, ` +
             `${(got.ageMs / 1000).toFixed(0)}s old)` +
-            (cfg.hubPin ? ' — matches pinned did' : ''));
+            (got.via
+              ? ` — 接手：${cfg.hubPin} 事先授權了它（${got.via.length} 段委派）`
+              : cfg.hubPin ? ' — matches pinned did' : ''));
         return { host: got.host, port: got.port };
       }
       if (attempt <= 3 || attempt % 10 === 0) {

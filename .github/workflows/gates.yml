@@ -55,6 +55,10 @@ jobs:
         working-directory: node
         run: node demo-tor.js
 
+      - name: 排序器接手（#95；自動升格、不複製私鑰、第三方仍驗得過）
+        working-directory: node
+        run: node demo-succession.js
+
       - name: token 計量、上限與回報（#94；上限用完要停止出價）
         working-directory: node
         run: node demo-spend.js
