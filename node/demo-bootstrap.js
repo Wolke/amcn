@@ -58,11 +58,20 @@ function startClient(script, env, args = []) {
 
 async function main() {
   fs.mkdirSync(IDS, { recursive: true });
+  fs.mkdirSync(DIR, { recursive: true });
 
   // (1) 沒有預設網路：一個**同步**的執行就夠，因為它應該立刻結束。
+  //     這個狀態要自己造：`network.json` 一旦被填好（＝那個網路被發布了），
+  //     只清環境變數已經造不出來——agent 會去連那個 .onion 而不是結束，於是
+  //     這條負對照從「立刻說明三條路」變成逾時。#104 在 demo-join 修過同一件事，
+  //     而這支當時漏掉了，所以它在 CI 上第一次遇到「已發布」的 repo 就紅了。
+  const emptyNet = path.join(DIR, 'empty-network.json');
+  fs.writeFileSync(emptyNet, JSON.stringify(
+    { name: null, hubHost: null, rendezvous: null, hubPin: null }, null, 2));
   const bare = spawnSync(process.execPath, [path.join(__dirname, 'agent.js')], {
     env: { ...process.env, AMCN_CONFIG_DIR: IDS,
-           AMCN_BOOTSTRAP: '', AMCN_HUB_PIN: '' },
+           AMCN_BOOTSTRAP: '', AMCN_HUB_PIN: '',
+           AMCN_NETWORK_FILE: emptyNet },
     encoding: 'utf8', timeout: 20000,
   });
   const bareSaid = (bare.stdout || '') + (bare.stderr || '');
