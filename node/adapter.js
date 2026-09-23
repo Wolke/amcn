@@ -75,12 +75,58 @@ function attribute(body, cfg, ctx) {
 // 多少自己的 token」在整個原型裡沒有任何地方知道。OpenAI-compatible 的回應
 // 本來就帶 `usage`，所以這不是新功能，是**先前沒有收下已經送來的東西**。
 // 拿不到 usage 的供應商由 lib/spend.js 估算，並標成估計值。
+// Anthropic 的 Messages API **不是** OpenAI 相容的：路徑是 `/v1/messages`、
+// 認證走 `x-api-key`＋`anthropic-version`、回應是 `content[]` 而不是
+// `choices[]`、usage 的欄位叫 `input_tokens`／`output_tokens`。所以它是第二種
+// 上游形狀，而不是換一個 baseUrl 就好——這一點寫錯的話，症狀會是「賣得出去
+// 但拿不到 usage」，而那正好讓 #94 的花費上限變成裝飾。
+//
+// 刻意用原生 `fetch` 而不是官方 SDK：這個 repo 的硬規則是**零第三方相依**
+// （CONTRIBUTING、CI 都守著它），而那條規則的理由是「clone 完不必 npm install
+// 就能跑」——那正是推廣路徑的第一步。
+async function anthropicComplete(cfg, prompt, ctx) {
+  const base = cfg.baseUrl || 'https://api.anthropic.com';
+  const body = {
+    model: cfg.model || 'claude-opus-5',
+    max_tokens: Number(cfg.maxTokens || 4096),
+    messages: [{ role: 'user', content: prompt }],
+  };
+  // 第三方流量要**具名**而不是混進自己的用量裡（§4 #67）。Anthropic 這一側
+  // 的欄位是 metadata.user_id，與 OpenAI 的 `user` 同一個用途。
+  if (ctx && ctx.endUser && (cfg.attribution || 'user') !== 'none') {
+    body.metadata = { user_id: ctx.endUser };
+  }
+  const res = await fetch(`${base}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'x-api-key': cfg.apiKey,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`adapter: provider HTTP ${res.status}`);
+  }
+  const j = await res.json();
+  const content = (j.content || [])
+    .filter((b) => b && b.type === 'text').map((b) => b.text).join('');
+  // 欄位名對映：spend 帳目要的是 prompt/completion，而這一家叫 input/output。
+  const usage = j.usage
+    ? { prompt_tokens: j.usage.input_tokens, completion_tokens: j.usage.output_tokens }
+    : null;
+  return { content, usage };
+}
+
 async function complete(cfg, prompt, ctx = null) {
   if (!cfg.apiKey) throw new Error('adapter: no local API key resolved');
   // mock 模式沒有上游，所以也沒有成本：usage 明確是 null 而不是 0，
   // 「不知道」與「零」必須分得開。
-  if (!cfg.baseUrl) return { content: sha256(prompt), usage: null };
+  if (!cfg.baseUrl && cfg.api !== 'anthropic') {
+    return { content: sha256(prompt), usage: null };
+  }
   if (ctx && ctx.endUser) requireTerms(cfg);
+  if (cfg.api === 'anthropic') return anthropicComplete(cfg, prompt, ctx);
   const body = attribute({
     model: cfg.model || 'demo-model',
     messages: [{ role: 'user', content: prompt }],
@@ -98,4 +144,4 @@ async function complete(cfg, prompt, ctx = null) {
   return { content: j.choices[0].message.content, usage: j.usage || null };
 }
 
-module.exports = { complete, attribute, requireTerms };
+module.exports = { complete, attribute, requireTerms, anthropicComplete };

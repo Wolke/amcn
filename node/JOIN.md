@@ -142,7 +142,28 @@ DID my-provider did:demo:12ffa6f8b7116384 (protocol v7)
 
 ### 接真實模型
 
-把 `adapter.baseUrl` 指向任何 OpenAI-compatible 端點（本機 Ollama
+兩種上游形狀，差別不是「換一個位址」而是**協定不同**（#101）：
+
+```json
+// (1) Anthropic 原生 Messages API：/v1/messages、x-api-key、回應是 content[]
+"adapter": {
+  "api": "anthropic",
+  "model": "claude-opus-5",
+  "maxTokens": 4096,
+  "key": { "service": "amcn-provider-key" },
+  "terms": { "attested": true, "note": "查證日期與依據" },
+  "attribution": "user"
+},
+"policy": { "spend": { "dailyUsdCap": 10,
+  "usdPerMTokens": { "in": 5, "out": 25 } } }   // 換模型要一起換價目表
+```
+
+`usage` 的欄位名在這一家是 `input_tokens`／`output_tokens`，adapter 會對映成
+花費帳目要的 prompt／completion——對映錯的症狀是「賣得出去但上限拿不到數字」，
+所以閘門 `demo-spend.js` 有一條專門守它。第三方流量的具名在這一家是
+`metadata.user_id`（OpenAI 那邊是 `user`）。
+
+(2) OpenAI-compatible：把 `adapter.baseUrl` 指向任何相容端點（本機 Ollama
 `http://127.0.0.1:11434`、或商業 API），並補兩個欄位：
 
 ```json

@@ -141,9 +141,31 @@ async function market({ cap, preload }) {
   return out;
 }
 
+// 第二種上游形狀（#101）：Anthropic 的 Messages API。驗的是三件會安靜出錯的
+// 事——認證頭（`x-api-key`＋`anthropic-version`，不是 Bearer）、回應解析
+// （`content[]` 不是 `choices[]`）、以及 **usage 的欄位對映**
+// （`input_tokens`／`output_tokens` → prompt／completion）。最後那一項寫錯的
+// 症狀最壞：賣得出去、但花費上限拿不到數字，於是 #94 變成裝飾。
+async function anthropicShape() {
+  const port = PORT + 30;
+  const fake = spawnProc('fake-provider.js',
+    { FAKE_PORT: String(port), FAKE_KEY: KEY });
+  await sleep(600);
+  const adapter = require('./adapter');
+  const out = await adapter.complete({
+    api: 'anthropic', baseUrl: `http://127.0.0.1:${port}`,
+    model: 'claude-opus-5', apiKey: KEY, maxTokens: 256,
+    terms: { attested: true }, attribution: 'user',
+  }, 'anthropic shape probe', { endUser: 'did:demo:someone', contractId: 'c-x' });
+  const stats = await (await fetch(`http://127.0.0.1:${port}/stats`)).json();
+  fake.child.kill();
+  return { out, stats };
+}
+
 async function main() {
   fs.mkdirSync(ROOT, { recursive: true });
   const acct = accounting();
+  const anth = await anthropicShape();
   console.log(`\n-- 帳目規則 --\n  真值：${acct.n1.tokens_total} tokens、US$${acct.n1.usd}` +
     `｜估算：${acct.n2.tokens_total} tokens（estimated=${acct.n2.estimated}）\n`);
 
@@ -196,6 +218,19 @@ async function main() {
   check('每筆結算後主人真的被告知（log 一行、給人看的那一份）',
     /\[owner\] 這筆 .* 用掉 .* tokens/.test(rich.sellerText),
     (rich.sellerText.match(/\[owner\] 這筆[^\n]*/) || [''])[0].slice(0, 90));
+
+  check('第二種上游形狀（Anthropic 原生）：回應解析得出內容',
+    !!anth.out && typeof anth.out.content === 'string' && anth.out.content.length > 0,
+    `content ${(anth.out.content || '').slice(0, 16)}…（content[] 不是 choices[]）`);
+
+  check('usage 的欄位對映正確（input/output → prompt/completion，否則上限變裝飾）',
+    !!anth.out.usage && anth.out.usage.prompt_tokens > 0 &&
+    anth.out.usage.completion_tokens > 0,
+    JSON.stringify(anth.out.usage));
+
+  check('第三方流量在這一家也具名（metadata.user_id，#67）',
+    anth.stats.users.includes('did:demo:someone') && anth.stats.unattributed === 0,
+    `${anth.stats.users.length} 筆具名、${anth.stats.unattributed} 筆匿名`);
 
   fs.rmSync(ROOT, { recursive: true, force: true });
   const failed = results.filter(([, ok]) => !ok).length;

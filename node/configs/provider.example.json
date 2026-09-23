@@ -6,8 +6,16 @@
   "hubPort": 47180,
   "consolePort": 47201,
   "adapter": {
+    "_comment": "兩種上游形狀：留空 baseUrl 且不設 api ＝ 確定性 mock（不花錢，先把路徑跑通）；api=\"anthropic\" 走 Anthropic Messages API（/v1/messages、x-api-key，baseUrl 可留 null）；其他 OpenAI 相容端點就填 baseUrl（例如本機 Ollama http://127.0.0.1:11434）。接真實上游時 terms.attested 必須由你設 true（P-10／#67），否則不會對外供給。",
+    "api": null,
     "baseUrl": null,
     "model": null,
+    "maxTokens": 4096,
+    "attribution": "user",
+    "terms": {
+      "attested": false,
+      "note": "填上你的查證日期與依據"
+    },
     "key": {
       "service": "amcn-provider-key",
       "env": "AMCN_PROVIDER_KEY"

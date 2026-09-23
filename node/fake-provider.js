@@ -23,11 +23,18 @@ http.createServer((req, res) => {
     return res.end(JSON.stringify(
       { requests, authOk, users, unattributed }));
   }
-  if (req.method !== 'POST' || req.url !== '/v1/chat/completions') {
+  // 第二種上游形狀（#101）：Anthropic 的 Messages API。認證與回應都不一樣，
+  // 所以閘門要能在**不花錢**的情況下驗證那條路的欄位對映——尤其是 usage，
+  // 對映寫錯的症狀是「賣得出去但花費上限變成裝飾」（#94）。
+  const anthropicPath = req.url === '/v1/messages';
+  if (req.method !== 'POST' || (req.url !== '/v1/chat/completions' && !anthropicPath)) {
     res.writeHead(404); return res.end();
   }
   requests += 1;
-  if (req.headers.authorization !== `Bearer ${KEY}`) {
+  const authed = anthropicPath
+    ? req.headers['x-api-key'] === KEY && !!req.headers['anthropic-version']
+    : req.headers.authorization === `Bearer ${KEY}`;
+  if (!authed) {
     res.writeHead(401); return res.end('{"error":"bad key"}');
   }
   authOk += 1;
@@ -35,7 +42,10 @@ http.createServer((req, res) => {
   req.on('data', (d) => { body += d; });
   req.on('end', () => {
     const req_ = JSON.parse(body);
-    if (req_.user) users.push(req_.user); else unattributed += 1;
+    // 兩家的歸屬欄位不同名但同一個用途：OpenAI 是 `user`，Anthropic 是
+    // `metadata.user_id`。
+    const who = anthropicPath ? (req_.metadata || {}).user_id : req_.user;
+    if (who) users.push(who); else unattributed += 1;
     const prompt = req_.messages.at(-1).content;
     res.writeHead(200, { 'content-type': 'application/json' });
     const content = sha256(prompt);
@@ -44,14 +54,22 @@ http.createServer((req, res) => {
     // FAKE_NO_USAGE=1 是**指名的負對照**：模擬不回 usage 的供應商。
     // `body` 這個名字外面已經在用（請求的累積緩衝），所以這裡叫 resBody——
     // 第一版就是這樣拿到一個 TDZ 例外的。
-    const resBody = { choices: [{ message: { role: 'assistant', content } }] };
-    if (process.env.FAKE_NO_USAGE !== '1') {
-      resBody.usage = {
-        prompt_tokens: Math.ceil(prompt.length / 4),
-        completion_tokens: Math.ceil(content.length / 4),
-      };
-      resBody.usage.total_tokens =
-        resBody.usage.prompt_tokens + resBody.usage.completion_tokens;
+    const tin = Math.ceil(prompt.length / 4);
+    const tout = Math.ceil(content.length / 4);
+    let resBody;
+    if (anthropicPath) {
+      resBody = { type: 'message', role: 'assistant',
+                  content: [{ type: 'text', text: content }],
+                  stop_reason: 'end_turn' };
+      if (process.env.FAKE_NO_USAGE !== '1') {
+        resBody.usage = { input_tokens: tin, output_tokens: tout };
+      }
+    } else {
+      resBody = { choices: [{ message: { role: 'assistant', content } }] };
+      if (process.env.FAKE_NO_USAGE !== '1') {
+        resBody.usage = { prompt_tokens: tin, completion_tokens: tout,
+                          total_tokens: tin + tout };
+      }
     }
     res.end(JSON.stringify(resBody));
   });

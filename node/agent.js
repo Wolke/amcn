@@ -76,6 +76,9 @@ const log = (m) => console.log(`[${cfg.name} ${id.did}] ${m}`);
 
 const adapterCfg = cfg.adapter ? {
   baseUrl: cfg.adapter.baseUrl, model: cfg.adapter.model,
+  // 上游的**形狀**（OpenAI 相容 or Anthropic 原生），不是同一個東西換位址。
+  api: cfg.adapter.api || null,
+  maxTokens: cfg.adapter.maxTokens || null,
   apiKey: keystore.getKey(cfg.adapter.key),
   // Carried through to the adapter, which refuses third-party work on a real
   // upstream without an attested declaration (§4 #67).
