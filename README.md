@@ -91,7 +91,7 @@ node/                      Phase 1 閉環原型（協定 v7）＋所有實際會
   chaos-run.js scenarios/  故障注入與長跑情境
 sim/amcn_sim/              Phase 0 經濟模擬器（純 Python stdlib，21 項測試）
 docs/AMCN-SDD-v0.1.md      需求真相來源：原則 P-01～P-10、FR/NFR、威脅模型、§20 驗收
-docs/evaluation/           已裁決的架構、缺陷登記簿（88 條）、證據包、試點 runbook
+docs/evaluation/           已裁決的架構、缺陷登記簿（91 條）、證據包、試點 runbook
 CLAUDE.md                  給 AI Agent 的導覽：閱讀順序、引用規則、全部指令
 ```
 
@@ -141,6 +141,12 @@ Apache License 2.0（見 [LICENSE](LICENSE)）。送出 PR 即表示你同意你
   所以帳上每一筆都是關聯方交易（#63）——市場數字不代表有外部需求。這是這個專案
   現在最缺的那一塊證據，不是程式問題。
 - **預設傳輸沒有加密**（`tcp`／`http`）：訊息有簽章、payload 有 E2E 加密，但信封是
-  明文。要離開受信任的區網就用 `AMCN_TRANSPORT=secure`（每一台都要設）。
+  明文。要離開受信任的區網就用 `AMCN_TRANSPORT=secure`（每一台都要設），或走
+  `tor`（`AMCN_TRANSPORT=tor`）——後者連埠都不必開。
+- **要讓不在你區網的人加入，入口要是常駐的**：`cd node/service && ./install.sh --onion`
+  裝一個常駐 onion service（這台機器零入向埠），Hub 同時綁回 `127.0.0.1`，並發布
+  一份簽署過的位址記錄讓對方跟著走（`#45`／`#91`，閘門 `node demo-rendezvous.js`
+  11/11）。**兩台在不同地點的機器仍然是零次**（#86）——onion 只解決可達性，不解決
+  地理與故障域的獨立性。
 - **經濟參數尚未定案**：信用額度、費率、保證金以 Phase 0 模擬的 GATE-0 為準
   （目前 8/8 的候選組合見 `docs/evaluation/phase0-results.md`），真實網路上會需要重新校準。

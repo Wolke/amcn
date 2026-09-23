@@ -8,12 +8,13 @@
 2. `docs/evaluation/final-architecture.md` — **已裁決的架構**。分層決策表（§2.2）、必修缺陷登記簿（§4，P0/P1 編號）、12 週整合計畫（§5）。
 3. `docs/proposals/proposal-{A,B,C}-*.md` — 三份競爭提案，**歷史輸入**。與 final-architecture 衝突時，一律以 final-architecture 為準。
 4. `docs/evaluation/reviews/review-{A,B,C}.md` — 獨立評審報告；提案中被評審實證推翻的數字（幣值錨定、成本表、分錄範例）不得直接引用。
+5. `docs/evaluation/credit-regime-ab.md` — #90 的裁決用對照（新人的第一筆額度要送還是買）。**尚未裁決**：常駐節點目前跑的是「送 50」，而建議是先走「小額 10＋入門採購」。
 
 ## 引用規則
 
 - 引用需求用穩定編號：`FR-050`、`NFR-006`、`P-05`、`§16 威脅 7`、缺陷登記簿 `P0-3`——不要用頁碼或行號。
 - 設計討論必須對照 SDD §27 閉環判準與 §5.2 MVP 非目標；任何方案若破壞「Key 不離機」（P-02）或引入投機幣（P-04）即不合格。
-- 提案內的數值參數（信用額度、費率、押金）尚未定案，最終以 Phase 0 模擬 GATE-0 結果為準（final-architecture §5 W3）。
+- 提案內的數值參數（信用額度、費率、押金）尚未定案，最終以 Phase 0 模擬 GATE-0 結果為準（final-architecture §5 W3）；新人額度那一格另見 `credit-regime-ab.md`，而**寫報表時「成交量」不等於需求**（洗量與 `related-party` 要分開列，#63／#90 條件 ii）。
 
 ## 使用者文件（推廣用，2026-09-22 新增）
 
@@ -81,12 +82,21 @@ cd node && node demo-transport.js
 #   帳與直連 tcp 完全相同。自帶 SOCKS5 代理，**不需要安裝 tor**
 cd node && node demo-tor.js
 
+# #91 常駐入口與位址記錄（約 25 秒，11 項斷言）：入口比 Hub 晚起來、入口換位址，
+#   簽署過的 rendezvous 記錄都要跟上；讀的是 run-hub.sh --print-env **算出來的值**，
+#   所以「模式是 onion 卻又綁回 0.0.0.0」抓得到。不需要 tor、不碰你的 launchd
+cd node && node demo-rendezvous.js
+
 # 單機起一個真的網路（推廣用的第一步，約 30 秒；留著讓人操作，不是回歸閘門）
 cd node && ./quickstart.sh          # ./quickstart.sh status / stop
 
 # 讓這台機器常駐跑（macOS launchd：開機起、崩潰重起）。Hub＋3 verifier＋只賣不買的供給端
 cd node/service && ./install.sh     # status / invite / ../service/uninstall.sh
 #   invite 會印出可以直接貼給人的邀請（hub did 與區網位址都填好）
+#   ./install.sh --onion 多裝一個常駐 onion service（com.amcn.onion）：任何地方的人
+#     都能加入而這台零入向埠，Hub 同時改綁 127.0.0.1；./install.sh --lan 收回去。
+#     模式存在 configs/.home-mode，兩種模式都發布 var/rendezvous.json（#45／#91）——
+#     把那個檔放到任何靜態主機就是位址輪替，對方用 `node panel.js rv:<網址>` 跟著走
 
 # 自己驗一本帳（不必相信 Hub）：逐筆驗簽、餘額由事件重放、checkpoint 比對鏈頭
 cd node && node ledger-dump.js out/mine.json 127.0.0.1 47180
@@ -157,9 +167,9 @@ cd node && node chaos-run.js scenarios/hub-equivocates-panel.json
 cd node && node chaos-run.js scenarios/panel-blackhole.json
 cd node && node chaos-run.js scenarios/*.json
 
-# W11 紅隊第一批（約 55 秒，45 案：協議層攻擊＋串謀結算、排序器 equivocation、
-#   偽章 checkpoint、押注退還的角色與連線綁定）
-#   目前 block 45、known-open 0
+# W11 紅隊第一批（約 55 秒，50 案：協議層攻擊＋串謀結算、排序器 equivocation、
+#   偽章 checkpoint、押注退還的角色與連線綁定、同價同信譽的決勝）
+#   目前 block 50、known-open 0
 cd node && node redteam.js
 
 # W11 紅隊第二批（約 40 秒，13 案：惡意參與者——不交付的 provider、沉默/改票的 verifier、超賣額度、未聲明上游條款者）
@@ -176,6 +186,12 @@ cd sim && python3 -u -m amcn_sim.sweep_repay
 
 # 保證金掃描（推廣額度 × 保證金 × 折扣率，三種子，約 5 分鐘）
 cd sim && python3 -u -m amcn_sim.sweep_deposit
+
+# #90 的裁決用對照（約 7 分鐘）：新人的第一筆額度要送還是買。
+#   四體制（送 50／零額度／零額度＋採購／小額 10＋採購）× 兩種攻擊（借了就走／
+#   交假東西），因為每種體制被打穿的方式不一樣。結論與建議見
+#   docs/evaluation/credit-regime-ab.md
+cd sim && python3 -u -m amcn_sim.regime_ab
 
 # 淨流入費掃描（#66 流量側；費率 × 去向 × N，七種子，約 6 分鐘）
 #   對「當期餘額長了多少」收費，而非對持有量。抽取效果單調成立；

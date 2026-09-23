@@ -359,8 +359,9 @@ panel 與供給端自己重新註冊（#40），帳本從快照＋尾檔接續�
 
 ## 12. 正式上線（公網）前的檢查表
 
-「上線」不是把 port 開出去。區網與公網之間有四件事不一樣，而其中兩件已經修好、
-兩件還在你手上。
+「上線」不是把 port 開出去。區網與公網之間有四件事不一樣：資源預算（#87）、
+流量記錄（#88）、**對外入口是不是常駐的**（#91）這三件已經修好，剩下的一件
+——**真的有兩台在不同地點的機器**（#86）——還在你手上，而它不是程式問題。
 
 ### 已經做好的（2026-09-22）
 
@@ -391,6 +392,43 @@ panel 與供給端自己重新註冊（#40），帳本從快照＋尾檔接續�
 文字送給任何連得上的人。現在要 `HUB_EXPORT_RAWLOG=1` 才有，而需要掃流量的閘門
 自己設它。
 
+### 對外入口本身也要是一個服務（#91，2026-09-23）
+
+#89 讓可達性問題消失（onion service，這台機器零入向埠），但那條路原本是一個
+**前景腳本**：常駐的 `launchd` 只有 hub／panel／agent 三個服務，所以機器重開、
+tor 崩掉、或那個終端機被關掉，入口就沒了——而 Hub 看起來完全健康。實測
+2026-09-23 早上這台就是這個狀態：三個服務都活著、邀請照樣印得出來，而**此刻
+從網際網路要加入，沒有任何東西在聽**，同時排序器反而還暴露在區網上。
+
+```bash
+cd node/service
+./install.sh --onion     # 多裝 com.amcn.onion，並把 Hub 綁回 127.0.0.1
+./install.sh status      # 模式、四個服務、hub did、onion 位址、位址記錄
+./install.sh --lan       # 收掉對外入口（真的會移除那個服務）
+```
+
+模式寫在 `configs/.home-mode`，所以它跨重開機成立；`run-hub.sh` 據此決定
+`HUB_BIND`（`onion` → `127.0.0.1`，`lan` → `0.0.0.0`）。**不要在 onion 模式下把
+`HUB_BIND` 改回 `0.0.0.0`**：onion 轉進來的連線走回送位址，綁 `0.0.0.0` 只會讓
+同一個排序器同時暴露在區網上，那正是要拿掉的東西。
+
+**兩種模式都會發布一份簽署過的位址記錄**（`var/rendezvous.json`）。位址會變——
+onion 位址要等 tor 起來才存在、排序器也可能搬家——所以記錄的主機名不是啟動時
+定住的，而是每次重發都重新讀 `HUB_ADVERTISE_HOST_FILE`（onion 模式預設
+`var/onion/hostname`）。把那個檔放到任何靜態主機，對方就能用
+
+```bash
+AMCN_TRANSPORT=tor AMCN_HUB_PIN=did:demo:<你的 hub did> node panel.js rv:<記錄的網址>
+```
+
+加入，而且你之後換位址、換入口、換機器，他都不必改任何東西。承載記錄的主機
+**不受信任**：它能扣住或給舊的，但無法冒充你。
+
+閘門：`cd node && node demo-rendezvous.js`（**11/11**，不需要 tor、不啟動任何
+onion service、不碰你的 launchd）。它讀的是 `service/run-hub.sh --print-env`
+**算出來的值**而不是原始碼裡的字串——「模式是 onion 卻又綁回 0.0.0.0」這種回歸
+只有這樣才抓得到。
+
 ### 搬到公網可達的主機（一個指令）
 
 ```bash
@@ -420,7 +458,9 @@ NodeSource）→ `git clone`（repo 是公開的，所以遠端不需要任何�
 
 ### 位址輪替：用你的公開 repo 當 rendezvous
 
-`lib/rendezvous.js` 支援 `https://` 的記錄，所以輪替機制可以是**一次 commit**：
+常駐服務已經替你寫出記錄了（`var/rendezvous.json`，見上一節），這一節是「把它
+放到哪」與「手動跑 hub 時怎麼開」。`lib/rendezvous.js` 支援 `https://` 的記錄，
+所以輪替機制可以是**一次 commit**：
 
 ```bash
 HUB_RENDEZVOUS=rendezvous.json node hub.js     # Hub 自己週期性寫出簽署記錄
@@ -448,7 +488,13 @@ https://github.com/Wolke/amcn ，Apache-2.0。所以遠端主機 `git clone` 不
 
 ### 還沒有人跑過的那一條（#86）
 
-`AMCN_TRANSPORT=secure` 有閘門，`lib/rendezvous.js` 有情境，但**兩者都是同一台
-機器上的三個行程**。兩台在不同地點的機器用 secure 跑通一次「借用 → 驗收 → 結算」
-這件事，目前零次。上線前要做的第一個實驗就是它，而量的是「握手在真實 RTT 與 NAT
-下會不會成立」，不是密碼學。
+`AMCN_TRANSPORT=secure` 有閘門，`lib/rendezvous.js` 有情境與 `demo-rendezvous.js`，
+但**全部都是同一台機器上的幾個行程**。兩台在不同地點的機器跑通一次「借用 → 驗收
+→ 結算」這件事，目前零次。上線前要做的第一個實驗就是它，而量的是「握手與長連線
+在真實 RTT、NAT 與電路重建之下會不會成立」，不是密碼學（那一層有閘門）。
+
+走 onion 時 `secure` 的必要性下降（tor 本身就對信封加密，防的是路徑上的第三方），
+所以這個實驗最便宜的形狀是：`./install.sh --onion`，把 `var/rendezvous.json` 發到
+一個靜態網址，然後請對方在**他家的網路**用上面那一行 `rv:` 加入。要量三個數字：
+第一次建電路的時間、連續 30 分鐘有沒有掉線、以及他的 verifier 有沒有真的進到
+panel 並分到 CC。

@@ -14,7 +14,16 @@
 //   node panel.js 192.168.1.10          hub IP (required for a remote hub)
 //   node panel.js 192.168.1.10 47180 5  hub IP, hub port, panel size
 //   node panel.js discover              find the hub by its signed UDP beacon
+//   node panel.js rv:<path|url>         follow a signed rendezvous record (#45)
 //   node panel.js                       defaults to 127.0.0.1:47180, 3 nodes
+//
+// The `rv:` form is the one that works across networks and survives a move:
+// the beacon is UDP broadcast, which no NAT or WAN path carries, and a
+// hand-copied address dies the moment the entrance changes — and a resident
+// entrance (an onion service, a sequencer that moved hosts) is exactly the
+// kind that changes. The host serving the record is untrusted infrastructure:
+// it can withhold or serve something stale, but it cannot impersonate the
+// hub, because AMCN_HUB_PIN is checked against the record's signature.
 //
 // `discover` is what makes this panel able to follow a hub that moves: the
 // verifiers re-resolve the target on every reconnect attempt (§4 #40), so a
@@ -33,7 +42,12 @@ const transport = require('./lib/transport').fromEnv();
 require('./lib/log').install();
 
 const [hostArg, portArg, sizeArg] = process.argv.slice(2);
-const HOST = hostArg || '127.0.0.1';
+// A rendezvous location (file path or https URL). The verifiers re-resolve it
+// on every reconnect attempt (#40), so the panel follows the hub without
+// anyone editing anything here; the port comes from the record, not argv.
+const RENDEZVOUS = process.env.AMCN_RENDEZVOUS ||
+  (hostArg && hostArg.startsWith('rv:') ? hostArg.slice(3) : null);
+const HOST = RENDEZVOUS ? 'rendezvous' : (hostArg || '127.0.0.1');
 const DISCOVER = HOST === 'discover';
 // The hub DID to insist on. Without it, discovery would follow whichever
 // beacon answers first.
@@ -101,7 +115,8 @@ function stopAll(code) {
 
 async function main() {
   console.log(`AMCN Verifier panel → hub ` +
-    `${DISCOVER ? 'via UDP beacon' : `${HOST}:${PORT}`}, ${SIZE} verifiers` +
+    `${RENDEZVOUS ? `via rendezvous ${RENDEZVOUS}`
+      : DISCOVER ? 'via UDP beacon' : `${HOST}:${PORT}`}, ${SIZE} verifiers` +
     (SEED ? `, seeded identities (${SEED}-V1…)` : ', ephemeral identities'));
   if (SEED_FROM === 'new') {
     console.log(`已產生本機 panel 身分並存在 ${SEED_FILE}（0600）。` +
@@ -115,7 +130,36 @@ async function main() {
   }
   console.log('（Verifier 不需要 API key、不需要模型、不參與信用）\n');
 
-  if (DISCOVER) {
+  if (RENDEZVOUS) {
+    // Resolve once here for the same reason the probe below exists: an
+    // operator should see a usable error instead of N verifiers retrying
+    // quietly. The verifiers still resolve for themselves, so a hub that
+    // moves *after* this point is followed anyway.
+    const rv = require('./lib/rendezvous');
+    const got = await rv.resolve(RENDEZVOUS, { pin: HUB_PIN });
+    if (!got.ok) {
+      console.error(`rendezvous ${RENDEZVOUS} unusable: ${got.why}`);
+      console.error('  - a record older than AMCN_RENDEZVOUS_MAX_AGE_MS (預設 10 分鐘)');
+      console.error('    means the hub stopped publishing, not that you are wrong.');
+      console.error('  - "signed by … not the pinned hub" means the record is real');
+      console.error('    but somebody else\'s — check AMCN_HUB_PIN with whoever invited you.');
+      process.exit(1);
+    }
+    if (!HUB_PIN) {
+      console.log('提示：沒有設 AMCN_HUB_PIN——任何簽得出記錄的人都會被跟隨。' +
+        '向邀請你的人要 hub did 並釘住它。');
+    }
+    console.log(`rendezvous → ${got.host}:${got.port} (${got.did}, ` +
+      `${(got.ageMs / 1000).toFixed(0)}s old)` +
+      (HUB_PIN ? ' — matches pinned did' : ''));
+    if (!await probe(got.host, got.port, 8000)) {
+      console.error(`記錄指向 ${got.host}:${got.port}，但那裡連不上。`);
+      console.error('  - .onion 位址要 AMCN_TRANSPORT=tor 並且本機的 tor 要在跑');
+      console.error('  - 記錄是新的卻連不上，代表入口掛了或搬家還沒發出新記錄');
+      process.exit(1);
+    }
+    console.log(`hub reachable at ${got.host}:${got.port}\n`);
+  } else if (DISCOVER) {
     // Report what the beacon says before starting anything, for the same
     // reason the probe exists: an operator should see a usable error rather
     // than N verifiers retrying quietly. The verifiers still resolve for
@@ -148,9 +192,11 @@ async function main() {
   for (let i = 1; i <= SIZE; i++) {
     // Derived per verifier from one operator-supplied base, so a panel
     // restart keeps each verifier's identity — and therefore its stake.
-    const cfg = DISCOVER
-      ? { name: `V${i}`, hubHost: 'discover', hubPin: HUB_PIN }
-      : { name: `V${i}`, hubHost: HOST, hubPort: PORT };
+    const cfg = RENDEZVOUS
+      ? { name: `V${i}`, rendezvous: RENDEZVOUS, hubPin: HUB_PIN }
+      : DISCOVER
+        ? { name: `V${i}`, hubHost: 'discover', hubPin: HUB_PIN }
+        : { name: `V${i}`, hubHost: HOST, hubPort: PORT };
     if (SEED) cfg.seed = `${SEED}-V${i}`;
     const child = spawn(process.execPath, [path.join(__dirname, 'verifier.js')], {
       env: { ...process.env, AGENT_CONFIG: JSON.stringify(cfg) },

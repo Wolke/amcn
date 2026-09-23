@@ -295,7 +295,7 @@ metadata，那是它的工作，也是為什麼 payload 仍然端到端加密、
 ```bash
 # 營運方那一側（不開任何對外埠、不動路由器、不用租機器）
 brew install tor
-cd node && ./service/run-onion.sh        # 印出 <addr>.onion
+cd node/service && ./install.sh --onion   # 常駐：com.amcn.onion，重開機也在
 
 # 你這一側
 brew install tor                          # 只需要一個 SOCKS5 出口
@@ -304,14 +304,28 @@ AMCN_TRANSPORT=tor node agent.js configs/my-agent.json
 
 設定檔裡 `hubHost` 填 `<addr>.onion`，`hubPin` 照舊填對方的 hub did。
 
+**更好的是不要填位址**（#45／#91）：位址會變（對方換 onion、搬機器），而簽署過的
+位址記錄讓你每次重連都重新解析，所以換位址你不必改任何東西。設定檔改成
+
+```json
+{ "name": "我", "rendezvous": "https://…/rendezvous.json", "hubPin": "did:demo:…" }
+```
+
+只當驗收者的話一行就好：`AMCN_TRANSPORT=tor AMCN_HUB_PIN=did:demo:… node panel.js rv:<記錄的網址>`。
+承載記錄的主機**不受信任**：它能扣住或給你舊的，但無法冒充對方——記錄帶著對方的
+簽章，你的 `hubPin`／`AMCN_HUB_PIN` 會核對。記錄過期（預設 10 分鐘）會被**指名
+拒絕**，那代表對方停了，不是你設定錯。
+
 三件事同時成立：**零入向埠**（Hub 只聽 127.0.0.1，由 onion 的 rendezvous 把人
 帶進來，雙層 NAT／CGNAT 兩邊都不必設定）、**位址本身就是公鑰**（v3 onion 是
 ed25519 公鑰的編碼，所以不需要 CA——而你本來就在釘 `hubPin`，兩層信任錨是同一
 種東西）、**免費且沒有人要營運基礎設施**。
 
 代價要知道：延遲（電路數百毫秒）、頻寬有限、兩邊都要有 tor。閘門
-`node demo-tor.js` 7/7（它自帶 SOCKS5 代理，所以不必裝 tor 也能驗），但**真實
-onion 的延遲與長連線穩定度還沒量過**。
+`node demo-tor.js` 7/7（它自帶 SOCKS5 代理，所以不必裝 tor 也能驗）與
+`node demo-rendezvous.js` 11/11（入口比 Hub 晚起來、入口換位址，記錄都要跟上），
+但**真實 onion 的延遲與長連線穩定度還沒量過**，而兩端在不同地點這件事也還是
+零次（#86）。
 
 跨網段的**發現**（不能靠 UDP 廣播時）走 rendezvous：Hub 發布簽署過的位址記錄，
 client 每次重連重新解析並用 `hubPin` 驗身分。承載記錄的主機不受信任——它能扣住

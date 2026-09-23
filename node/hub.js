@@ -2016,21 +2016,48 @@ transport.listen({
   if (process.env.HUB_RENDEZVOUS) {
     const rv = require('./lib/rendezvous');
     const where = process.env.HUB_RENDEZVOUS;
-    const host = process.env.HUB_ADVERTISE_HOST ||
-      (BIND === '0.0.0.0' ? (discovery.localAddrs()[0] || '127.0.0.1') : BIND);
     // 對外的埠不一定等於自己聽的埠：任何一層轉發（NAT 轉發、反向代理、
     // 負載平衡）都可能換掉它，而記錄裡要寫的是**別人要連的那一個**。
     // 原本只讓主機名可覆蓋、埠寫死成自己聽的 PORT，所以一旦中間有一層
     // 轉發，發出去的記錄就是錯的——而它還帶著正確的簽章，所以客戶端會
     // 老實地去連一個連不上的地方。
     const advertisePort = Number(process.env.HUB_ADVERTISE_PORT || PORT);
+    // 對外的**主機**同樣不是啟動時就知道的（#91）。常駐的 onion service 是
+    // 另一個行程（`service/run-onion.sh`），位址要等 tor 把目錄建好才出現，
+    // 而它也會因為換位址而變。原本在 listen 那一刻解析一次就定住，所以
+    // 「Hub 先起來、入口後起來」這個**常駐服務必然的順序**會讓記錄永遠
+    // 帶著回送位址或區網位址——而它帶著正確的簽章，客戶端於是老實地去連
+    // 一個連不上的地方（與上面那個埠的缺陷同一個形態，只是換一個欄位）。
+    // 修法與 #40 的 `dialLazy` 相同：持有**解析方式**而不是解析結果。
+    const hostFile = process.env.HUB_ADVERTISE_HOST_FILE || null;
+    const advertiseHost = () => {
+      if (hostFile) {
+        try {
+          const v = require('node:fs').readFileSync(hostFile, 'utf8').trim();
+          if (v) return { host: v, from: hostFile };
+        } catch { /* 入口還沒起來——先發下面那個位址，下一輪再跟上 */ }
+      }
+      const fallback = process.env.HUB_ADVERTISE_HOST ||
+        (BIND === '0.0.0.0' ? (discovery.localAddrs()[0] || '127.0.0.1') : BIND);
+      return { host: fallback, from: process.env.HUB_ADVERTISE_HOST ? 'HUB_ADVERTISE_HOST' : `bind ${BIND}` };
+    };
+    let announced = null;
     const republish = () => {
-      try { rv.publish(hubId, { host, port: advertisePort }, where); }
-      catch (err) { console.error(`[hub] rendezvous publish failed: ${err.message}`); }
+      const { host, from } = advertiseHost();
+      try {
+        rv.publish(hubId, { host, port: advertisePort }, where);
+        // 只在位址**變了**的時候說話：常駐服務每 60 秒重發一次，逐次列印
+        // 會把「入口換了位址」這件唯一值得看的事埋掉。
+        if (host !== announced) {
+          console.log(`[hub] rendezvous published → ${where} ` +
+            `(${host}:${advertisePort}，來源 ${from})` +
+            (announced ? ` — 位址已更新，前一個是 ${announced}` : ''));
+          announced = host;
+        }
+      } catch (err) { console.error(`[hub] rendezvous publish failed: ${err.message}`); }
     };
     republish();
     setInterval(republish, Number(process.env.HUB_RENDEZVOUS_MS || 60000)).unref();
-    console.log(`[hub] rendezvous published → ${where} (${host}:${advertisePort})`);
   }
     if (CANARY_DID) {
       console.log(`[hub] canary issuer authorised: ${CANARY_DID} ` +

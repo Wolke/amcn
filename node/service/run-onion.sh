@@ -3,6 +3,7 @@
 #
 #   ./run-onion.sh            啟動（前景，Ctrl-C 停）
 #   ./run-onion.sh --addr     只印出目前的 onion 位址
+#   ./run-onion.sh --service  給 launchd 用：不印邀請、只留一行狀態（#86）
 #
 # 這會建立一條**入向**路徑（外面的人可以連進來）。它不開防火牆、不動路由器、
 # 也不需要公網 IP——但它確實讓這台機器變成可達，所以這個決定是你的，不是
@@ -20,6 +21,9 @@ TORRC="var/torrc"
 command -v tor >/dev/null || { echo "找不到 tor。先裝：brew install tor"; exit 1; }
 mkdir -p "$DIR" var
 chmod 700 "$DIR"
+
+SERVICE=0
+[ "${1:-}" = "--service" ] && SERVICE=1
 
 if [ "${1:-}" = "--addr" ]; then
   [ -s "$DIR/hostname" ] && cat "$DIR/hostname" || echo "（還沒有位址——先啟動一次）"
@@ -46,6 +50,16 @@ done
 
 ADDR="$(cat "$DIR/hostname" 2>/dev/null || true)"
 if [ -z "$ADDR" ]; then echo "tor 沒有產生位址，看上面的輸出"; exit 1; fi
+
+if [ "$SERVICE" = "1" ]; then
+  # 常駐模式刻意話少：邀請文字要在 ./install.sh invite 那裡產生一次，而不是
+  # 每次 tor 重啟就把一整段貼在服務 log 裡（那會把真正的錯誤埋掉）。
+  # Hub 那一側不必知道這個位址是什麼——它每次重發 rendezvous 記錄都會重新
+  # 讀 var/onion/hostname（#91），所以先後順序不重要。
+  echo "onion service 已就緒：$ADDR → 127.0.0.1:${PORT}（對外零入向埠）"
+  wait $TOR_PID
+  exit 0
+fi
 
 HUB_DID="$(grep -o 'hub did did:demo:[0-9a-f]*' logs/home-hub.log 2>/dev/null | tail -1 | awk '{print $3}')"
 cat <<OUT

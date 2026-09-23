@@ -23,6 +23,9 @@ node/configs/*.json
 # and canary record are bound to one, and the other *is* the address everyone
 # pins. Pattern rather than two names, so the next one is covered too.
 node/configs/.*-seed
+# 這台機器是區網模式還是 onion 模式（service/install.sh 寫入）。屬於機器而不是
+# 程式：同一份 repo 在不同機器上本來就該有不同的答案。
+node/configs/.home-mode
 # tor 的 onion service 身分與設定（node/service/run-onion.sh）。
 # hs_ed25519_secret_key 就是那個位址本身，外流等於別人可以冒充你的入口。
 node/var/

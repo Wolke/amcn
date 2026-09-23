@@ -55,6 +55,10 @@ jobs:
         working-directory: node
         run: node demo-tor.js
 
+      - name: 常駐入口與位址記錄（#91；入口比 Hub 晚起來、入口換位址都要跟上）
+        working-directory: node
+        run: node demo-rendezvous.js
+
       - name: 紅隊第一批（協議層，50 案）
         working-directory: node
         run: node redteam.js
