@@ -199,9 +199,20 @@ DID my-provider did:demo:12ffa6f8b7116384 (protocol v7)
 
 ### 它會不會把我的 token 燒光？（#94）
 
-不會沒有上限，而**上限在你這一台**——供應商那一側靠不住（我們查過：OpenAI 的
-硬上限只在控制台、Anthropic 的 `spend_limits` 只給 Enterprise，見
-`docs/evaluation/key-lending-verification.md`）。設定檔裡：
+**用兩層，而且第一層不在這個程式裡（#105）。**
+
+**第一層：給 AMCN 一把專用、而且上游自己就有硬上限的 key。** 這是唯一真的擋得住
+金額的東西——AMCN 的上限只能讓節點「不再出價」，擋不住已經送出去的請求。設一次
+就好：
+- **OpenAI**：新開一個 project → 用它的 key → 開啟「Enforce a hard limit」
+  （達標直接回 429）。那個開關只在控制台，Admin API 沒有。
+- **Anthropic**：新開一個 workspace → 設 workspace 花費上限 → 用它的 key。
+  （`spend_limits` 端點只給 Enterprise，一般帳號走控制台。）
+
+**不要把你主力的 key 丟進來**：爆炸半徑等於那把 key 的全部額度。
+
+**第二層：AMCN 自己的每日上限**，它決定「今天還要不要接單」，並且逐筆告訴你
+用掉多少。設定檔裡：
 
 ```json
 "policy": { "spend": {

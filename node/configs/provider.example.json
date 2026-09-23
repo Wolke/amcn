@@ -17,6 +17,8 @@
       "note": "填上你的查證日期與依據"
     },
     "key": {
+      "_comment": "**給 AMCN 一把專用的 key，而且在供應商那一側就設硬上限**（#105）：OpenAI 新開 project＋「Enforce a hard limit」；Anthropic 新開 workspace＋花費上限。那是唯一真的擋得住金額的一層——policy.spend 只能讓節點停止出價，擋不住已經送出去的請求。key 本身不寫在這裡：放 Keychain（service 名）或環境變數（env 名）。",
+      "scope": "dedicated-capped",
       "service": "amcn-provider-key",
       "env": "AMCN_PROVIDER_KEY"
     }

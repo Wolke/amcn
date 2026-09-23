@@ -68,9 +68,33 @@ printf '同意的話，把這句話打出來（其餘皆視為取消）：%s\n> 
 read -r TYPED
 if [ "$TYPED" != "$PHRASE" ]; then echo "取消，什麼都沒有改。"; exit 1; fi
 
+SCOPE_TAG="${AMCN_KEY_SCOPE:-unknown}"
 if [ "$HAS_KEY" != yes ]; then
   echo ""
-  echo "把上游的 API key 放進 Keychain（由 security 自己索取，這支腳本看不到）："
+  echo "=== 這把 key 是哪一種？（#105）==="
+  cat <<'KEY'
+  AMCN 的 policy.spend 是**軟的**：它只能讓節點「不再出價」。程式有 bug、設定
+  寫錯、或有人餵進一個超大的 prompt，它都可能失守——**供應商那一側的硬上限才是
+  唯一真的擋得住金額的東西**，而且只要設一次：
+
+    OpenAI     新開一個 project → 用它的 key → 開啟「Enforce a hard limit」
+               （達標直接回 429；那個開關只在控制台，Admin API 沒有）
+    Anthropic  新開一個 workspace → 設 workspace 花費上限 → 用它的 key
+               （spend_limits 端點只給 Enterprise，一般帳號走控制台）
+
+  1) 我另外開了一把**專用、而且上游已設硬上限**的 key（建議）
+  2) 就用我現有那把（AMCN 的上限擋得住持續超支，擋不住一次爆掉）
+KEY
+  printf '選 1 或 2 > '
+  read -r SCOPE
+  case "$SCOPE" in
+    1) SCOPE_TAG=dedicated-capped ;;
+    2) SCOPE_TAG=shared-uncapped
+       echo "  已記下：共用且上游未設硬上限——爆炸半徑等於那把 key 的全部額度。" ;;
+    *) echo "沒有選，取消。"; exit 1 ;;
+  esac
+  echo ""
+  echo "把 key 放進 Keychain（由 security 自己索取，這支腳本看不到）："
   # -w 不帶值＝互動式索取，所以 key 不會出現在 argv／ps／shell history。
   security add-generic-password -U -a "$USER" -s "$SERVICE" -w
 fi
@@ -86,9 +110,11 @@ node -e '
     attested_by: process.env.USER || "owner",
     note: "由 service/arm-supply.sh 記錄；聲明內容見該腳本（P-10／#67）",
   };
+  // 記錄的是 key 的**性質**而不是 key：爆炸半徑是稽核時要問的第一個問題（#105）。
+  c.adapter.key = { ...(c.adapter.key || {}), scope: process.argv[2] || "unknown" };
   fs.writeFileSync(p, JSON.stringify(c, null, 2) + "\n");
-' "$CFG"
-echo "已記下聲明（含日期，可稽核）→ $CFG"
+' "$CFG" "${SCOPE_TAG:-unknown}"
+echo "已記下聲明與金鑰性質（含日期，可稽核）→ ${CFG}（key 本身不在裡面）"
 
 echo "重啟供給端…"
 launchctl kickstart -k "gui/$(id -u)/com.amcn.agent" 2>/dev/null || true
