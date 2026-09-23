@@ -118,6 +118,11 @@ cd node && node demo-rendezvous.js
 #   不是跟著環境變數——實測改 starter 曾讓 live 排序器拒絕啟動）
 cd node && node demo-service.js
 
+# 要把**另一個 agent**拉進來：給它這一行就夠（寫給 agent 執行的，不是給人讀的）
+#   https://raw.githubusercontent.com/Wolke/amcn/main/node/AGENT-JOIN.md
+# 有 ssh 的話一個指令推過去（--dry-run 先看）：
+cd node && ./service/deploy-join.sh user@host
+
 # 加入一個已經在跑的網路（**別人 clone 之後要跑的那一個指令**，#96）
 cd node && ./join.sh                # --check / --verifiers 3 / --provider / status / stop
 #   要連去哪由 network.json 決定（靜態位址或位址記錄，都必須有 hubPin）。

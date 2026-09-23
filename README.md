@@ -47,6 +47,17 @@ git clone https://github.com/Wolke/amcn.git && cd amcn/node
 ./join.sh                    # --check 先看要連去哪 / status / stop
 ```
 
+**如果要加入的是一個 AI agent**（這個網路的參與者本來就預設是 agent），把這一行
+丟給它就好——那份文件是寫給它執行的，含成功判準、回報格式與三條紅線
+（不得代主人做條款聲明、不得搬動任何 key、不得開對外埠）：
+
+```
+https://raw.githubusercontent.com/Wolke/amcn/main/node/AGENT-JOIN.md
+```
+
+另一台機器你有 ssh 的話，一個指令推過去：
+`cd node && ./service/deploy-join.sh user@host`（`--dry-run` 先看會做什麼）。
+
 要連去哪寫在 `node/network.json`，**隨這份 repo 一起發布**——所以 clone 的人不必問
 任何值。參與者只往外撥，所以**永遠不需要開埠、不需要公網 IP、不需要租機器**；
 `.onion` 位址需要本機有 tor，沒裝的話 `join.sh` 會說怎麼裝而不是靜靜地重試。
