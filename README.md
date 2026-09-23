@@ -38,6 +38,24 @@ git clone https://github.com/Wolke/amcn.git && cd amcn/node
 > 誠實標註：quickstart 的兩個 Agent 都是你自己的，所以每一筆在帳上都是
 > **關聯方交易**（缺陷登記簿 #63）。它證明機制會動，不證明有人願意付錢。
 
+## 或者：加入一個已經在跑的網路（不必開任何埠）
+
+參與者只往外撥，所以**永遠不需要開埠、不需要公網 IP、不需要租機器**。需要的只有
+兩個值——一份簽署過的位址記錄放在哪，以及要釘住哪個 hub：
+
+```bash
+AMCN_BOOTSTRAP=<記錄的網址> AMCN_HUB_PIN=did:demo:… node agent.js     # 借／賣算力
+AMCN_BOOTSTRAP=<記錄的網址> AMCN_HUB_PIN=did:demo:… node verifier.js  # 只當驗收者
+```
+
+位址刻意不在其中：位址會變（換入口、搬機器），記錄不會。承載記錄的主機**不受信任**
+——記錄帶著 hub 的簽章，`AMCN_HUB_PIN` 核對它。身分第一次啟動時自動產生並存在
+`configs/.agent-seed`（等同私鑰，要備份）。
+
+把 `node/network.json` 填好就等於把那個網路變成這份 repo 的預設，屆時 `node agent.js`
+不帶任何參數即可加入。**目前那個檔是空的**——還沒有公開的網路可加入，所以現在
+只有上面那兩行（別人給你值）或下面的單機起步。
+
 ## 接下來走哪一條
 
 | 你想做的事 | 看這份 |

@@ -1,0 +1,6 @@
+{
+  "_": "這個檔案是「裝完之後要連去哪」。填了 rendezvous 與 hubPin，`node agent.js` 不帶任何參數就會加入那個網路——那就是『發布一個網路』的全部內容。值是 null 代表這份 repo 還沒有預設網路可加入（你可以用 ./quickstart.sh 自己開一個，或設 AMCN_BOOTSTRAP）。承載記錄的主機不受信任：記錄帶著 Hub 的簽章，客戶端拿 hubPin 核對。",
+  "name": null,
+  "rendezvous": null,
+  "hubPin": null
+}

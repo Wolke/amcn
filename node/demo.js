@@ -50,11 +50,26 @@ const check = (name, ok, detail) => {
   console.log(`  ${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ' — ' + detail : ''}`);
 };
 
+// 子行程死掉就停下來，而不是等一個永遠不會到的斷言。最常見的成因是埠被
+// 佔用（這台機器上有常駐的試點在跑，而 demo 預設用同一個 47180）——Hub
+// 會印出 EADDRINUSE 並退出 1，但在這個守門存在之前整支 demo 只是**掛著**，
+// 於是「埠被佔用」看起來像「協定壞了」。與 #80 同型：失敗被報成了另一件事。
+let tearingDown = false;
+const procs = [];
 function spawnProc(file, env) {
   const p = spawn(process.execPath, [path.join(__dirname, file)],
     { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'inherit'] });
   p.stdout.on('data', (d) => process.stdout.write(d.toString()
     .split('\n').filter(Boolean).map((l) => `  ${l}`).join('\n') + '\n'));
+  p.on('exit', (code) => {
+    if (tearingDown || code === 0 || code === null) return;
+    console.error(`\n[demo] ${file} 以 ${code} 退出——這支 demo 不會有結果了。`);
+    console.error(`[demo] 最常見的原因是埠 ${PORT} 已經有人在聽（常駐的試點、` +
+      '另一支 demo）。用 DEMO_PORT_OFFSET=100 換一組埠再跑。');
+    tearingDown = true;
+    procs.forEach((q) => { try { q.kill(); } catch { /* 已經走了 */ } });
+    process.exit(1);
+  });
   return p;
 }
 const agentCfg = (o, extraEnv) => ({
@@ -89,7 +104,6 @@ function verifyChains(chains, checkpoints, hubPub) {
 async function main() {
   console.log('== AMCN Phase 1 round 3: quorum + forced settlement + hash chain ==');
   console.log(`   transport: ${transport.name} (AMCN_TRANSPORT)\n`);
-  const procs = [];
   procs.push(spawnProc('hub.js',
     // HUB_EXPORT_RAWLOG：NFR-005 的明文掃描要讀 Hub 的全量流量記錄，而它
     // 預設不隨匯出出去（#88：公開的 Hub 不該把落選出價與所有 metadata
@@ -247,6 +261,7 @@ async function main() {
     console.log(`  !! upstream stats failed: ${err.message}`);
   }
 
+  tearingDown = true;
   procs.forEach((p) => p.kill());
 
   const { receipts, pubkeys, balances, credit_lines, chains, checkpoints,

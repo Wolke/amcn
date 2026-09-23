@@ -70,9 +70,16 @@ function attribute(body, cfg, ctx) {
   return out;
 }
 
+// 回傳 `{ content, usage }` 而不是只有字串。usage 是**成本**，而先前這一行
+// 把它丟掉了（`return j.choices[0].message.content`）——於是「替別人做事花掉
+// 多少自己的 token」在整個原型裡沒有任何地方知道。OpenAI-compatible 的回應
+// 本來就帶 `usage`，所以這不是新功能，是**先前沒有收下已經送來的東西**。
+// 拿不到 usage 的供應商由 lib/spend.js 估算，並標成估計值。
 async function complete(cfg, prompt, ctx = null) {
   if (!cfg.apiKey) throw new Error('adapter: no local API key resolved');
-  if (!cfg.baseUrl) return sha256(prompt); // mock mode
+  // mock 模式沒有上游，所以也沒有成本：usage 明確是 null 而不是 0，
+  // 「不知道」與「零」必須分得開。
+  if (!cfg.baseUrl) return { content: sha256(prompt), usage: null };
   if (ctx && ctx.endUser) requireTerms(cfg);
   const body = attribute({
     model: cfg.model || 'demo-model',
@@ -88,7 +95,7 @@ async function complete(cfg, prompt, ctx = null) {
   });
   if (!res.ok) throw new Error(`adapter: provider HTTP ${res.status}`);
   const j = await res.json();
-  return j.choices[0].message.content;
+  return { content: j.choices[0].message.content, usage: j.usage || null };
 }
 
 module.exports = { complete, attribute, requireTerms };

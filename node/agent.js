@@ -5,7 +5,8 @@
 // judge-quorum acceptance via the DSL, forced settlement when a requester
 // refuses to pay (T-05), and a minimal read-only Owner Console.
 //
-// Config: AGENT_CONFIG env (JSON) or `node agent.js <config.json>`:
+// Config: 不帶參數＝加入 node/network.json 的預設網路（`--standalone` 連本機）；
+// 否則 AGENT_CONFIG env (JSON) 或 `node agent.js <config.json>`:
 // { name, hubPort, hubHost?, consolePort?,
 //   adapter: {baseUrl, model, key:{service, env}} | null,
 //   provide: {afterMs, pricePerUnit, repayment?} | null,
@@ -27,10 +28,17 @@ const demand = require('./lib/demand');
 const panelLib = require('./lib/panel');
 const adapter = require('./adapter');
 
-const cfgPath = process.env.AGENT_CONFIG ? null : process.argv[2];
+// 不帶設定檔啟動＝「裝完就加入預設網路」（lib/bootstrap.js）。在它存在之前
+// 這一行是 `JSON.parse(undefined)`，也就是**安裝完什麼都不會發生**——而那正是
+// 「一個 agent 裝了服務之後就能去收發任務」這個目標字面上不成立的地方。
+const STANDALONE = process.argv.slice(2).includes('--standalone');
+const cfgArg = process.argv.slice(2).find((a) => !a.startsWith('--')) || null;
+const cfgPath = process.env.AGENT_CONFIG ? null : cfgArg;
 const cfg = cfgPath
   ? JSON.parse(require('node:fs').readFileSync(cfgPath, 'utf8'))
-  : JSON.parse(process.env.AGENT_CONFIG);
+  : process.env.AGENT_CONFIG
+    ? JSON.parse(process.env.AGENT_CONFIG)
+    : require('./lib/bootstrap').defaultConfig('agent', { standalone: STANDALONE });
 // 從設定檔啟動而檔裡沒有 `seed` 時，產生一個並**寫回那個檔案**。
 //
 // 理由是下面那一大段註解的實務版：範本沒有 seed，所以照著安裝文件複製範本的
@@ -75,7 +83,13 @@ const adapterCfg = cfg.adapter ? {
   attribution: cfg.adapter.attribution || 'user',
 } : null;
 
+// 替別人做事會花掉自己的 token，而那是真的錢（lib/spend.js）。計量、上限、
+// 回報三件事綁在這個 DID 上，而且跨重啟不歸零——否則「重啟一下」就是繞過
+// 上限的辦法。
+const spend = require('./lib/spend').create({ did: id.did, policy: cfg.policy || {}, log });
+
 let providing = false;
+let warnedCapped = false;       // 上限訊息只說一次，而不是每個任務都喊
 let verifierDir = { verifiers: [], lock: null };
 const pendingBids = new Map();   // task_id -> {task, post, bids, timer}
 const asRequester = new Map();   // contract_id -> {contract, payload, panel, attest:[], done}
@@ -457,6 +471,20 @@ const hub = stampPeerSends(transport.dialLazy(() => discovery.resolveHubTarget(c
         if (console_.quota && console_.quota.remaining < msg.task.units) {
           break;
         }
+        // 預算用完就**不出價**。先接單再因為沒預算而交不出來，對網路的傷害
+        // 比沉默大得多——那是違約，會吃掉對手的 CC 與保險池。同 #21／#22：
+        // 不能執行者不得出價。
+        const capped = spend.exceeded();
+        if (capped) {
+          if (!warnedCapped) {
+            warnedCapped = true;
+            log(`今日${capped.cap === 'usd' ? '金額' : 'token'}上限已到 ` +
+                `(${capped.used.toLocaleString?.() || capped.used}/${capped.limit.toLocaleString?.() || capped.limit})` +
+                '——停止出價，不再替別人花自己的額度。明天（UTC）恢復，' +
+                '或調高 policy.spend。');
+          }
+          break;
+        }
         const unitPrice = strategy.priceFor(cfg.provide.pricePerUnit, mode);
         // A task past its own expiry gets no bid: bidding on it would produce
         // a contract the requester must refuse, which is worse than silence.
@@ -534,8 +562,14 @@ const hub = stampPeerSends(transport.dialLazy(() => discovery.resolveHubTarget(c
           // The requester's DID is the end-user identifier upstream: this
           // call is not our own work, and a provider's abuse report has to be
           // traceable back to a contract in our own ledger (§4 #67).
-          output = await adapter.complete(adapterCfg, payload,
+          const done = await adapter.complete(adapterCfg, payload,
             { endUser: c.requester, contractId: c.contract_id });
+          output = done.content;
+          // 主人要知道的就是這三個數字：這筆花了多少、今天花了多少、還剩多少。
+          // 主人通常是另一個 agent，所以同一份東西也寫成一行 JSON。
+          spend.record({ contractId: c.contract_id, usage: done.usage,
+                         prompt: payload, output,
+                         counterparty: c.requester, priceCC: c.price_cc });
         } catch (err) {
           // This handler is async, so a throw here escapes as an unhandled
           // rejection and kills the process mid-contract — a real provider
@@ -1016,6 +1050,7 @@ if (cfg.consolePort) {
         scripted_posts: console_.scriptedPosts,
         withheld: console_.withheld,
       },
+      spend: spend.status(),
       quota: console_.quota ? {
         capacity_units: console_.quota.capacity,
         remaining_units: console_.quota.remaining,
@@ -1072,6 +1107,10 @@ if (cfg.provide && canExecute) {
     // about the hub connection (§4 #19). Bids only happen once registered.
     log(`supply armed at ${cfg.provide.pricePerUnit} CC/unit, strategy ${mode}` +
         (hub.connected ? '' : ' — WARNING: not connected to a hub yet'));
+    // 武裝供給＝開始有可能花到自己的錢，所以這裡就要講清楚「什麼在守、
+    // 什麼沒在守」。一個以為有美金上限、其實只有 token 上限在擋的主人，
+    // 比一個知道自己沒有上限的主人危險。
+    spend.announce();
   }, cfg.provide.afterMs);
 }
 

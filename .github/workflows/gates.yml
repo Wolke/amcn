@@ -55,6 +55,14 @@ jobs:
         working-directory: node
         run: node demo-tor.js
 
+      - name: token 計量、上限與回報（#94；上限用完要停止出價）
+        working-directory: node
+        run: node demo-spend.js
+
+      - name: 裝完就加入預設網路（#92；不帶參數即註冊、pin 不符就不連）
+        working-directory: node
+        run: node demo-bootstrap.js
+
       - name: 常駐入口與位址記錄（#91；入口比 Hub 晚起來、入口換位址都要跟上）
         working-directory: node
         run: node demo-rendezvous.js

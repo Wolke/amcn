@@ -17,10 +17,16 @@ const { genBoxKeys } = require('./lib/e2e');
 // nothing could load it — env was the only path, which also meant every
 // verifier had to be started with shell-quoted JSON (a real obstacle on
 // PowerShell, where bash's single-quote form does not work).
-const cfgPath = process.env.AGENT_CONFIG ? null : process.argv[2];
+// 同 agent.js：不帶設定檔＝加入預設網路（lib/bootstrap.js）。verifier 是門檻
+// 最低的角色（不需要 key、不需要模型、不參與信用），所以它最需要「一行就好」。
+const STANDALONE = process.argv.slice(2).includes('--standalone');
+const cfgArg = process.argv.slice(2).find((a) => !a.startsWith('--')) || null;
+const cfgPath = process.env.AGENT_CONFIG ? null : cfgArg;
 const cfg = cfgPath
   ? JSON.parse(require('node:fs').readFileSync(cfgPath, 'utf8'))
-  : JSON.parse(process.env.AGENT_CONFIG);
+  : process.env.AGENT_CONFIG
+    ? JSON.parse(process.env.AGENT_CONFIG)
+    : require('./lib/bootstrap').defaultConfig('verifier', { standalone: STANDALONE });
 // 與 agent.js 同一條（見那裡的說明）：從設定檔啟動而沒有 seed 時，產生一個
 // 並寫回去。對 verifier 這件事現在**有價**：協定 v7 之後，還沒被金絲雀測夠
 // 就換身分離開的 verifier 押注不退（#38），所以每次重啟換 DID 等於每次丟掉

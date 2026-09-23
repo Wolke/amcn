@@ -82,6 +82,17 @@ cd node && node demo-transport.js
 #   帳與直連 tcp 完全相同。自帶 SOCKS5 代理，**不需要安裝 tor**
 cd node && node demo-tor.js
 
+# #94 token 計量、上限與回報（約 45 秒，10 項斷言）：替別人做事花掉的是自己的
+#   token。計量（有 usage 用真值、沒有就估並標成估計值）、上限（token／美金，
+#   跨重啟不歸零，用完就**停止出價**）、回報（每筆一行 log ＋ 一行 JSON 到
+#   out/owner-notices.jsonl）。最重要的是那組正／負對照
+cd node && node demo-spend.js
+
+# #92 裝完就加入預設網路（約 20 秒，8 項斷言）：`node agent.js` 不帶任何參數即
+#   解析簽署過的位址記錄 → 撥出去 → 註冊。沒有預設網路時要說出三條路而不是
+#   丟例外；pin 不符就不連。預設網路填在 node/network.json（目前是空的）
+cd node && node demo-bootstrap.js
+
 # #91 常駐入口與位址記錄（約 25 秒，11 項斷言）：入口比 Hub 晚起來、入口換位址，
 #   簽署過的 rendezvous 記錄都要跟上；讀的是 run-hub.sh --print-env **算出來的值**，
 #   所以「模式是 onion 卻又綁回 0.0.0.0」抓得到。不需要 tor、不碰你的 launchd

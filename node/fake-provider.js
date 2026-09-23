@@ -38,9 +38,22 @@ http.createServer((req, res) => {
     if (req_.user) users.push(req_.user); else unattributed += 1;
     const prompt = req_.messages.at(-1).content;
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({
-      choices: [{ message: { role: 'assistant', content: sha256(prompt) } }],
-    }));
+    const content = sha256(prompt);
+    // 真的供應商會回 usage，所以這個替身也要回——否則計量那條路只會被
+    // 「估算」那一半覆蓋到（#92 的閘門自己踩過同型的事）。
+    // FAKE_NO_USAGE=1 是**指名的負對照**：模擬不回 usage 的供應商。
+    // `body` 這個名字外面已經在用（請求的累積緩衝），所以這裡叫 resBody——
+    // 第一版就是這樣拿到一個 TDZ 例外的。
+    const resBody = { choices: [{ message: { role: 'assistant', content } }] };
+    if (process.env.FAKE_NO_USAGE !== '1') {
+      resBody.usage = {
+        prompt_tokens: Math.ceil(prompt.length / 4),
+        completion_tokens: Math.ceil(content.length / 4),
+      };
+      resBody.usage.total_tokens =
+        resBody.usage.prompt_tokens + resBody.usage.completion_tokens;
+    }
+    res.end(JSON.stringify(resBody));
   });
 }).listen(PORT, '127.0.0.1', () =>
   console.log(`[fake-provider] :${PORT} up (key-gated OpenAI-compatible)`));

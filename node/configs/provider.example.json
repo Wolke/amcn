@@ -18,5 +18,13 @@
     "pricePerUnit": 1.0,
     "repayment": true
   },
+  "policy": {
+    "_spend_comment": "替別人做事會花掉**你的** token（#94）。兩個上限每天（UTC）歸零，先到的那個綁住，而用量跨重啟不歸零。token 上限不需要價目表就能執行，所以它一定有值；**美金上限要填 usdPerMTokens 才生效**——沒填的話啟動時會明說「美金上限不生效」，不會假裝有人在守。填你自己供應商的價（每百萬 token 的美金價，輸入／輸出分開）。上限用完的行為是**停止出價**，不是接了單再交不出來。每筆做完會寫一行 log 給你看、一行 JSON 到 out/owner-notices.jsonl 給你的 agent 讀。",
+    "spend": {
+      "dailyTokenCap": 2000000,
+      "dailyUsdCap": 10,
+      "usdPerMTokens": null
+    }
+  },
   "posts": []
 }

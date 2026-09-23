@@ -146,6 +146,38 @@ DID my-provider did:demo:12ffa6f8b7116384 (protocol v7)
   AMCN_USE_KEYCHAIN=1 node agent.js configs/my-provider.json
   ```
 
+### 它會不會把我的 token 燒光？（#94）
+
+不會沒有上限，而**上限在你這一台**——供應商那一側靠不住（我們查過：OpenAI 的
+硬上限只在控制台、Anthropic 的 `spend_limits` 只給 Enterprise，見
+`docs/evaluation/key-lending-verification.md`）。設定檔裡：
+
+```json
+"policy": { "spend": {
+  "dailyTokenCap": 2000000,
+  "dailyUsdCap": 10,
+  "usdPerMTokens": { "in": 0.15, "out": 0.60 }
+} }
+```
+
+- 兩個上限每天（UTC）歸零，**先到的那個綁住**；用量**跨重啟不歸零**。
+- **上限用完的行為是停止出價**，不是接了單再交不出來——後者是違約，會吃掉對方
+  的 CC 與保險池。
+- **`usdPerMTokens` 沒填的話，美金上限不生效**，而且啟動時會明白講出來（只有
+  token 上限在守）。填的是你自己供應商的每百萬 token 價格，輸入／輸出分開。
+- **每一筆做完你都會被告知**：一行給人看、一行 JSON 到
+  `out/owner-notices.jsonl` 給你自己的 agent 讀，內容是這筆花了多少 token／多少
+  錢、今天累計、還剩多少、以及「大概還能接幾筆」。
+  ```
+  [owner] 這筆 c-t-buyer-…-1 用掉 1,240 tokens（in 980／out 260）≈ US$0.0003；
+          token 還剩 1,998,760／2,000,000、今天還剩 US$9.99／10、大概還能接 1612 筆
+  ```
+- 供應商沒回 `usage` 時會用字數估算，而**估出來的一律標成估計值**（`estimated:
+  true`）——不會把估計值當成事實混進帳裡。
+
+閘門：`node demo-spend.js` 10/10，其中一組是正／負對照（同一個任務、同一個賣方，
+唯一差別是今天還有沒有預算）。
+
 ⚠️ **真實模型的輸出不是確定性的，所以 `sha256_eq` 驗收必定失敗。** 要接真模型時，
 發任務那邊的斷言得換成弱斷言（`max_len`、`contains`）。這是原型的已知限制：
 強斷言（schema／test-suite）是正式版的驗收 DSL 要做的事。
@@ -303,6 +335,16 @@ AMCN_TRANSPORT=tor node agent.js configs/my-agent.json
 ```
 
 設定檔裡 `hubHost` 填 `<addr>.onion`，`hubPin` 照舊填對方的 hub did。
+
+**最短的那一行（#92）**：如果對方給你的是一個**記錄的網址**而不是位址，你連設定檔
+都不用寫——
+
+```bash
+AMCN_BOOTSTRAP=<記錄的網址> AMCN_HUB_PIN=did:demo:… node verifier.js
+```
+
+身分會自動產生並存在 `configs/.verifier-seed`（0600，等同私鑰：押注與受測紀錄綁在
+它上面，要備份）。沒有給值時它會印出三條可以走的路，不會丟一個例外。
 
 **更好的是不要填位址**（#45／#91）：位址會變（對方換 onion、搬機器），而簽署過的
 位址記錄讓你每次重連都重新解析，所以換位址你不必改任何東西。設定檔改成
