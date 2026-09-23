@@ -8,7 +8,8 @@
 2. `docs/evaluation/final-architecture.md` — **已裁決的架構**。分層決策表（§2.2）、必修缺陷登記簿（§4，P0/P1 編號）、12 週整合計畫（§5）。
 3. `docs/proposals/proposal-{A,B,C}-*.md` — 三份競爭提案，**歷史輸入**。與 final-architecture 衝突時，一律以 final-architecture 為準。
 4. `docs/evaluation/reviews/review-{A,B,C}.md` — 獨立評審報告；提案中被評審實證推翻的數字（幣值錨定、成本表、分錄範例）不得直接引用。
-5. `docs/evaluation/credit-regime-ab.md` — #90 的裁決用對照（新人的第一筆額度要送還是買）。**尚未裁決**：常駐節點目前跑的是「送 50」，而建議是先走「小額 10＋入門採購」。
+5. `docs/evaluation/second-machine.md` — 第二台機器的 runbook（三階段、每段一個要量的數字、以及這一趟之後**不能**宣稱什麼）。
+6. `docs/evaluation/credit-regime-ab.md` — #90 的裁決用對照（新人的第一筆額度要送還是買）。**尚未裁決**：常駐節點目前跑的是「送 50」，而建議是先走「小額 10＋入門採購」。
 
 ## 引用規則
 
@@ -128,6 +129,8 @@ cd node && ./quickstart.sh          # ./quickstart.sh status / stop
 
 # 讓這台機器常駐跑（macOS launchd：開機起、崩潰重起）。Hub＋3 verifier＋只賣不買的供給端
 cd node/service && ./install.sh     # status / invite / publish / ../service/uninstall.sh
+#   ./arm-supply.sh 讓這台真的能賣算力：key 進 Keychain（腳本看不到）＋記下你的
+#     條款聲明（P-10，要打一句話而不是按 y）＋重啟並驗證。--check 只看不改
 #   五個服務：hub／panel／agent／onboard（#90 的入門採購發樁者）＋onion（--onion 時）
 #   新人額度預設 starter 10 CC ＋入門採購（#90 的 D 組，理由見 credit-regime-ab.md）
 #   ./install.sh publish 把 network.json 填好；commit 之後別人 clone 就能加入（#96）

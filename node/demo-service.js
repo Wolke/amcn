@@ -207,8 +207,13 @@ async function main() {
     hubEnv.HUB_ONBOARD_DID === onboardDid,
     `${onboardDid} = HUB_ONBOARD_DID`);
 
-  check('兩個治理上限與「連續 3 次才付」都在（Treasury 的支出不是無底的）',
-    hubEnv.HUB_ONBOARD_CAP_CC === '20' && hubEnv.HUB_ONBOARD_TOTAL_CC === '2000' &&
+  // 全網上限刻意小於 hub.js 的內建預設（#103：題目是算 sha256，對誰都免費，
+  // 所以它現在是一個有上限的水龍頭而不是已證明的反 Sybil 機制）。斷言只要求
+  // 「有上限、而且比內建預設嚴」，不要求某個特定數字——數字是治理決定。
+  check('兩個治理上限與「連續 3 次才付」都在，而全網上限比內建預設更嚴（#103）',
+    hubEnv.HUB_ONBOARD_CAP_CC === '20' &&
+    Number(hubEnv.HUB_ONBOARD_TOTAL_CC) > 0 &&
+    Number(hubEnv.HUB_ONBOARD_TOTAL_CC) <= 2000 &&
     hubEnv.HUB_ONBOARD_STREAK === '3',
     `每身分 ${hubEnv.HUB_ONBOARD_CAP_CC}、全網 ${hubEnv.HUB_ONBOARD_TOTAL_CC}、連續 ${hubEnv.HUB_ONBOARD_STREAK} 次`);
 

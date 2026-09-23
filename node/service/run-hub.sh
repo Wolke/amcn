@@ -64,7 +64,11 @@ ONBOARD_SEED=configs/.onboard-seed
 if [ -s "${ONBOARD_SEED}" ]; then
   export HUB_ONBOARD_DID="${HUB_ONBOARD_DID:-$(node -e     'process.stdout.write(require("./lib/wire").identityFromSeed(require("fs").readFileSync(process.argv[1],"utf8").trim()).did)'     "${ONBOARD_SEED}")}"
   export HUB_ONBOARD_CAP_CC="${HUB_ONBOARD_CAP_CC:-20}"      # 每身分上限
-  export HUB_ONBOARD_TOTAL_CC="${HUB_ONBOARD_TOTAL_CC:-2000}" # 全網治理上限
+  # 全網治理上限。**刻意比 hub.js 的內建預設（2000）小十倍**，理由是 #103：
+  # 入門採購現在的題目是算 sha256，而那對任何人都是免費的——所以在題目變成
+  # 「真的要花算力」之前，它是一個有上限的水龍頭而不是已證明的反 Sybil 機制。
+  # 200 CC ＝ 十個新人，對「第二台機器加入」這個階段綽綽有餘。
+  export HUB_ONBOARD_TOTAL_CC="${HUB_ONBOARD_TOTAL_CC:-200}"
   # 連續通過才付一次。實測攻擊者每身分：1 次 5.52 CC → 3 次 0.00 CC，而誠實
   # 新人只從 196 掉到 187 人——對攻擊者是平方壓制，對誠實者幾乎無感。
   export HUB_ONBOARD_STREAK="${HUB_ONBOARD_STREAK:-3}"

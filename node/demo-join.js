@@ -57,8 +57,14 @@ const join = (args, extra = {}) => {
 async function main() {
   fs.mkdirSync(DIR, { recursive: true });
 
-  // (1) 還沒有網路可加入：三條路要說出來，而不是丟例外
-  const noNet = join(['--check'], { AMCN_BOOTSTRAP: '', AMCN_HUB_PIN: '' });
+  // (1) 還沒有網路可加入：三條路要說出來，而不是丟例外。
+  //     這一條要自己造出「空的 network.json」：發布之後 repo 的預設就有網路了，
+  //     只清環境變數已經造不出這個狀態——而它先前會綠正是因為當時還沒發布。
+  const emptyNet = path.join(DIR, 'empty-network.json');
+  fs.writeFileSync(emptyNet, JSON.stringify(
+    { name: null, hubHost: null, rendezvous: null, hubPin: null }, null, 2));
+  const noNet = join(['--check'], { AMCN_BOOTSTRAP: '', AMCN_HUB_PIN: '',
+    AMCN_NETWORK_FILE: emptyNet });
 
   // (2) 有網路：Hub 起來並發布位址記錄
   const hub = spawn(process.execPath, [path.join(__dirname, 'hub.js')], {
@@ -108,8 +114,11 @@ async function main() {
   fs.writeFileSync(onionRv, JSON.stringify({ name: 'onion-test',
     hubHost: 'amcnexampleaddressnotarealonion.onion', hubPort: PORT,
     transport: 'tor', hubPin: HUB_DID }, null, 2));
+  // SOCKS 埠要指向**沒有人在聽**的地方：這台機器自己在跑 onion service 之後
+  // :9050 是通的，於是 join.sh 會（正確地）跳過「缺 tor」那個分支，而這條
+  // 負對照就變成空過——它先前會綠只是因為當時沒有跑 tor。
   const noTor = join([], { AMCN_BOOTSTRAP: '', AMCN_HUB_PIN: '',
-    JOIN_FAKE_NO_TOR: '1',
+    JOIN_FAKE_NO_TOR: '1', AMCN_TOR_SOCKS: `127.0.0.1:${PORT + 40}`,
     // 直接餵一份靜態位址的 network.json 給 bootstrap（#96 的第二種填法）
     AMCN_NETWORK_FILE: onionRv });
 
